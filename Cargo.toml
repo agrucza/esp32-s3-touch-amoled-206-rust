@@ -1,0 +1,27 @@
+[workspace]
+resolver = "2"
+members = [
+    "app-core",
+    "drivers",
+    "firmware",
+]
+
+# Shared dependency versions — single source of truth to avoid mismatches.
+[workspace.dependencies]
+defmt                  = "0.3"
+embedded-hal           = "1.0.0"
+embedded-hal-async     = "1.0.0"
+embedded-graphics-core = "0.4.1"
+
+[profile.dev]
+opt-level     = "s"
+codegen-units = 1
+debug         = true
+
+[profile.release]
+opt-level     = "s"
+codegen-units = 1
+lto           = "fat"
+# Keep debug symbols in ELF for espflash panic symbolication.
+# They are stripped from the flash image automatically.
+debug         = 2

@@ -1,0 +1,16 @@
+[package]
+name    = "app-core"
+version = "0.1.0"
+edition = "2021"
+
+# no_std by default; `std` feature enables standard-library impls for host tests.
+[features]
+default = []
+std     = []
+
+[dependencies]
+defmt                  = { workspace = true, optional = true }
+embedded-graphics-core = { workspace = true }
+
+[dev-dependencies]
+# nothing extra — `cargo test` on host uses std automatically via the test harness

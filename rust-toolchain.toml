@@ -1,0 +1,6 @@
+[toolchain]
+# Xtensa fork installed by `espup install`.
+# Required for ESP32-S3 (Xtensa LX7) — the standard Rust toolchain has no Xtensa backend.
+channel    = "esp"
+components = ["rust-src", "rustfmt", "clippy"]
+targets    = ["xtensa-esp32s3-none-elf"]

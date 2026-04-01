@@ -1,0 +1,50 @@
+[package]
+name    = "firmware"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name  = "firmware"
+path  = "src/main.rs"
+test  = false
+bench = false
+
+[dependencies]
+# --- Espressif bootloader descriptor (required by espflash to verify the image) ---
+esp-bootloader-esp-idf = { version = "0.4.0", features = ["esp32s3"] }
+
+# --- Espressif HAL ---
+esp-hal = { version = "1.0.0", features = [
+    "esp32s3",
+    "unstable",     # required for many APIs in 1.0.x
+] }
+esp-rtos = { version = "0.2.0", features = [
+    "esp32s3",
+    "embassy",  # enables the async executor and time driver
+] }
+esp-backtrace = { version = "0.18.1", features = [
+    "esp32s3",
+    "panic-handler",
+    "println",
+] }
+esp-println = { version = "0.16.1", features = [
+    "esp32s3",
+    "log-04",           # bridges esp-println to the `log` 0.4 crate
+] }
+
+# --- Embassy async runtime ---
+embassy-executor = { version = "0.9" }
+embassy-time = { version = "0.5.1" }
+
+# --- Logging ---
+log = { version = "0.4.29", default-features = false }
+
+# --- embedded-hal traits (used by drivers crate) ---
+embedded-hal       = { workspace = true }
+embedded-hal-async = { workspace = true }
+
+# --- Local crates ---
+app-core = { path = "../app-core" }
+drivers  = { path = "../drivers", features = ["display", "pmu", "rtc", "touch"] }
+
+embedded-graphics-core = { workspace = true }

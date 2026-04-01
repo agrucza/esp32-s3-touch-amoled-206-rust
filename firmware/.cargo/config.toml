@@ -1,0 +1,17 @@
+[build]
+target = "xtensa-esp32s3-none-elf"
+
+[target.xtensa-esp32s3-none-elf]
+runner = "espflash flash --monitor"
+rustflags = [
+    # Pull in esp-hal's linker script, which sets up all memory sections.
+    "-C", "link-arg=-Tlinkall.x",
+    # Keep frame pointers so esp-backtrace can produce readable stack traces.
+    "-C", "force-frame-pointers",
+]
+
+# Build the `core` library from source.
+# Pre-built std is not distributed for Xtensa targets, so Cargo must compile
+# it locally using the esp Xtensa fork.
+[unstable]
+build-std = ["core"]
