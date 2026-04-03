@@ -6,20 +6,25 @@
 //!
 //! The CO5300 driver itself lives in `drivers::display::co5300`.
 //!
-//! ## Bounce buffer
+//! ## DMA transfers
 //!
-//! GDMA on ESP32-S3 cannot read from PSRAM directly. `EspQspi` holds a
-//! fixed-size bounce buffer in internal SRAM. `write_pixels` copies the
-//! incoming data (which may be in PSRAM) into the bounce buffer chunk by
-//! chunk before handing each chunk to the DMA engine.
+//! `EspQspi` wraps `SpiDmaBus<Blocking>` which uses GDMA for all transfers.
+//! `SpiDmaBus::half_duplex_write` copies the caller's buffer into its own
+//! internal DMA TX buffer (internal SRAM) before starting the transfer, so
+//! data may come from PSRAM without any extra bounce logic here.
+//!
+//! The DMA TX buffer is DMA_BUF_SIZE bytes. A larger buffer means fewer SPI
+//! transactions per frame (less CS-toggle and DMA-setup overhead).
+//! `write_pixels` chunks the framebuffer into pieces that fit the buffer.
 
 use drivers::display::QspiWrite;
 use esp_hal::{
+    Blocking,
+    dma::{DmaChannelFor, DmaRxBuf, DmaTxBuf},
     gpio::interconnect::PeripheralOutput,
-    spi::master::{Address, Command, Config, DataMode, Spi},
+    spi::master::{Address, AnySpi, Command, Config, DataMode, Spi, SpiDmaBus},
     spi::Mode,
     time::Rate,
-    Blocking,
 };
 
 pub use drivers::display::{color, co5300::FB_BYTES, co5300::HEIGHT, co5300::WIDTH, CO5300};
@@ -32,23 +37,28 @@ const RAMWRC: u8 = 0x3C;
 const OPCODE_CTRL:  u8 = 0x02; // 1-wire config/command writes
 const OPCODE_PIXEL: u8 = 0x32; // Quad 4-wire pixel writes
 
-/// Size of the bounce buffer - must match the ESP32-S3 SPI FIFO (64 bytes = 32 RGB565 pixels).
-/// half_duplex_write on blocking SPI (no DMA) cannot transfer more than 64 bytes at once.
-const BOUNCE: usize = 64;
+/// DMA TX buffer capacity in bytes.
+/// Larger = fewer SPI transactions per frame = less overhead.
+/// 32736 = 8 * 4092 = the maximum single DMA transfer size (MAX_DMA_SIZE in esp-hal).
+/// Gives ~13 transactions for a full 410x502 frame vs ~101 at 4092 bytes.
+/// RX buffer is kept minimal (4 bytes) since we never read pixel data back.
+const DMA_BUF_SIZE: usize = 32736;
 
-/// Wraps the esp-hal blocking SPI bus and provides the `QspiWrite` impl.
+/// Wraps the esp-hal DMA SPI bus and provides the `QspiWrite` impl.
 ///
-/// Note: `half_duplex_write` in esp-hal 1.0.0 is synchronous even on async SPI,
-/// so we use `Blocking` here. The `QspiWrite` trait is still declared async for
-/// future DMA compatibility - the impl just completes without yielding.
+/// `'d` is the lifetime of the borrowed SPI and DMA peripherals taken from
+/// `esp_hal::init`. Construct via [`build_spi`].
 pub struct EspQspi<'d> {
-    spi:    Spi<'d, Blocking>,
-    bounce: [u8; BOUNCE],
+    spi: SpiDmaBus<'d, Blocking>,
 }
 
 impl<'d> QspiWrite for EspQspi<'d> {
     type Error = esp_hal::spi::Error;
 
+    /// Send one MIPI DCS command over 1-wire SPI (opcode 0x02).
+    ///
+    /// `params` may be empty - the SPI controller still sends the opcode and
+    /// address phase, just with no trailing data bytes.
     async fn write_cmd(&mut self, cmd: u8, params: &[u8]) -> Result<(), Self::Error> {
         self.spi.half_duplex_write(
             DataMode::Single,
@@ -61,26 +71,23 @@ impl<'d> QspiWrite for EspQspi<'d> {
 
     /// Write pixel bytes to the display.
     ///
-    /// Data may live in PSRAM. This method copies it through the internal
-    /// SRAM bounce buffer in BOUNCE-sized chunks before each DMA transfer,
-    /// satisfying the GDMA constraint that source memory must be internal SRAM.
+    /// Data may live in PSRAM. `SpiDmaBus::half_duplex_write` copies each
+    /// chunk into its internal DMA TX buffer (internal SRAM) before the
+    /// transfer, satisfying the GDMA constraint automatically.
     async fn write_pixels(&mut self, first: bool, data: &[u8]) -> Result<(), Self::Error> {
         let mut offset   = 0;
         let mut is_first = first;
 
         while offset < data.len() {
-            let n = (data.len() - offset).min(BOUNCE);
-
-            // Copy from PSRAM (or wherever) into internal SRAM bounce buffer.
-            self.bounce[..n].copy_from_slice(&data[offset..offset + n]);
-
+            let n   = (data.len() - offset).min(DMA_BUF_SIZE);
             let dcs = if is_first { RAMWR } else { RAMWRC };
+
             self.spi.half_duplex_write(
                 DataMode::Quad,
                 Command::_8Bit(OPCODE_PIXEL as u16, DataMode::Single),
                 Address::_24Bit((dcs as u32) << 8, DataMode::Single),
                 0,
-                &self.bounce[..n],
+                &data[offset..offset + n],
             )?;
 
             is_first = false;
@@ -90,7 +97,17 @@ impl<'d> QspiWrite for EspQspi<'d> {
     }
 }
 
-/// Build and configure the QSPI async SPI bus for the CO5300.
+/// Build and configure the QSPI DMA SPI bus for the CO5300.
+///
+/// # Parameters
+/// - `spi`  - SPI peripheral (use `p.SPI2`; SPI0/SPI1 are reserved for flash/PSRAM)
+/// - `sck`  - clock pin (LCD_SCLK, GPIO11)
+/// - `sio0` - data line 0 / MOSI (LCD_SDIO0, GPIO4)
+/// - `sio1` - data line 1 (LCD_SDIO1, GPIO5)
+/// - `sio2` - data line 2 (LCD_SDIO2, GPIO6)
+/// - `sio3` - data line 3 (LCD_SDIO3, GPIO7)
+/// - `cs`   - chip select, active low (LCD_CS, GPIO12)
+/// - `dma`  - GDMA channel; any of `p.DMA_CH0`/`CH1`/`CH2` not used elsewhere
 pub fn build_spi<'d>(
     spi:  impl esp_hal::spi::master::Instance + 'd,
     sck:  impl PeripheralOutput<'d>,
@@ -99,11 +116,20 @@ pub fn build_spi<'d>(
     sio2: impl PeripheralOutput<'d>,
     sio3: impl PeripheralOutput<'d>,
     cs:   impl PeripheralOutput<'d>,
+    dma:  impl DmaChannelFor<AnySpi<'d>>,
 ) -> EspQspi<'d> {
+    // RX=4 bytes (unused, minimum valid), TX=DMA_BUF_SIZE bytes.
+    let (rx_buffer, rx_descriptors, tx_buffer, tx_descriptors) =
+        esp_hal::dma_buffers!(4, DMA_BUF_SIZE);
+    let dma_rx_buf = DmaRxBuf::new(rx_descriptors, rx_buffer).unwrap();
+    let dma_tx_buf = DmaTxBuf::new(tx_descriptors, tx_buffer).unwrap();
+
+    // 80 MHz: exceeds the CO5300 15ns write spec (~66 MHz max) but works on
+    // most panels in practice. Drop to 40 MHz if you see display artifacts.
     let spi = Spi::new(
         spi,
         Config::default()
-            .with_frequency(Rate::from_mhz(40))
+            .with_frequency(Rate::from_mhz(80))
             .with_mode(Mode::_0),
     )
     .unwrap()
@@ -112,7 +138,9 @@ pub fn build_spi<'d>(
     .with_sio1(sio1)
     .with_sio2(sio2)
     .with_sio3(sio3)
-    .with_cs(cs);
+    .with_cs(cs)
+    .with_dma(dma)
+    .with_buffers(dma_rx_buf, dma_tx_buf);
 
-    EspQspi { spi, bounce: [0; BOUNCE] }
+    EspQspi { spi }
 }

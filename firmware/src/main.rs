@@ -70,12 +70,13 @@ async fn main(spawner: Spawner) {
     // --- Display setup ---
     let bus = display_hal::build_spi(
         p.SPI2,
-        p.GPIO11, // LCD_SCLK
-        p.GPIO4,  // LCD_SDIO0
-        p.GPIO5,  // LCD_SDIO1
-        p.GPIO6,  // LCD_SDIO2
-        p.GPIO7,  // LCD_SDIO3
-        p.GPIO12, // LCD_CS
+        p.GPIO11,  // LCD_SCLK
+        p.GPIO4,   // LCD_SDIO0
+        p.GPIO5,   // LCD_SDIO1
+        p.GPIO6,   // LCD_SDIO2
+        p.GPIO7,   // LCD_SDIO3
+        p.GPIO12,  // LCD_CS
+        p.DMA_CH0, // GDMA channel for SPI transfers
     );
     let reset = Output::new(p.GPIO8, Level::High, OutputConfig::default());
 
