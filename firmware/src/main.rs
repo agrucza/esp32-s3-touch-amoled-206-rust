@@ -45,6 +45,21 @@ async fn main(spawner: Spawner) {
     esp_println::logger::init_logger(log::LevelFilter::Info);
     log::info!("--- ESP32-S3-Touch-AMOLED-2.06 booting ---");
 
+    // --- SYS_OUT power latch: drive GPIO10 LOW to hold the SYS_OUT rail on.
+    // GPIO10 drives the gate of a BSS138LT1G N-channel MOSFET (T1).
+    //   Gate LOW  = FET off = SYS_OUT pulled HIGH via R11 (10K) = rail ENABLED
+    //   Gate HIGH = FET on  = SYS_OUT shorted to GND            = rail DISABLED
+    // The PWR button pulls the gate LOW while held to boot the system.
+    // Once running, we hold GPIO10 LOW in software to latch the rail on.
+    // Releasing this (driving HIGH or floating) will cut the SYS_OUT rail.
+    let _sys_out = Output::new(p.GPIO10, Level::Low, OutputConfig::default());
+    let mut motor = Output::new(p.GPIO18, Level::Low, OutputConfig::default());
+
+    // --- Buttons ---
+    // BOOT button (GPIO0, active-low, external 10K pull-up to VCC2V3).
+    // Also used as strapping pin - do not drive it as output.
+    let btn_boot = Input::new(p.GPIO0, InputConfig::default().with_pull(Pull::Up));
+
     // --- PMU: power on all rails before display or peripherals ---
     let mut i2c = I2c::new(
         p.I2C0,
@@ -203,6 +218,7 @@ async fn main(spawner: Spawner) {
 
     let colors = [color::RED, color::GREEN, color::BLUE];
     let mut color_index = 0;
+    let mut btn_boot_prev = false; // tracks last known pressed state
 
     loop {
         log::info!("Updating display to color index: {}", color_index);
@@ -212,6 +228,32 @@ async fn main(spawner: Spawner) {
 
         for _ in 0..50 {
             Timer::after(Duration::from_millis(20)).await;
+
+            // BOOT button (GPIO0, active-low) - fire only on falling edge.
+            let btn_boot_now = btn_boot.is_low();
+            if btn_boot_now && !btn_boot_prev {
+                log::info!("BTN: BOOT pressed");
+                motor.set_high();
+                Timer::after(Duration::from_millis(200)).await;
+                motor.set_low();
+            }
+            btn_boot_prev = btn_boot_now;
+
+            // PWR button via PMU interrupt status (AXP2101 PWRON pin).
+            // The IRQ pin is not wired to an ESP32 GPIO so we poll the registers.
+            if let Ok(irq) = pmu.read_interrupts(&mut i2c) {
+                if !irq.is_empty() {
+                    if irq.is_active(drivers::pmu::InterruptSource::PowerOnShortPress) {
+                        log::info!("BTN: PWR short press");
+                    }
+                    if irq.is_active(drivers::pmu::InterruptSource::PowerOnLongPress) {
+                        log::info!("BTN: PWR long press");
+                    }
+                    // Clear all active flags (write 1 to clear, RW1C).
+                    let _ = pmu.clear_interrupts(&mut i2c, &irq);
+                }
+            }
+
             if touch_int.is_low() || touch.is_pressed() {
                 match touch.read(&mut i2c) {
                     drivers::touch::TouchEvent::Pressed { x, y } => log::info!("Touch: ({}, {})", x, y),

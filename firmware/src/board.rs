@@ -64,16 +64,24 @@ pub const BTN_BOOT: u8 = 0;
 
 /// PWR button (Key3) - connected to AXP2101 PWRON pin only.
 /// There is NO direct ESP32 GPIO for this button. The AXP2101 handles
-/// press detection and wakes the ESP32 via CHIP_PU (enable pin).
+/// press detection; short/long press is readable via PMU interrupt registers.
+/// The system boots when the button pulls PWRON low long enough for the AXP2101
+/// to assert CHIP_PU (ESP32 enable pin).
 
 // =============================================================================
-// Software power control
+// SYS_OUT power latch
 // =============================================================================
 
-/// SYS_OUT MOSFET gate (GPIO10) - drives the gate of a BSS138LT1G transistor
-/// that controls the SYS_OUT power rail. This is NOT a button - it is a
-/// software-controlled output for power management.
-pub const SYS_OUT: u8 = 10;
+/// SYS_OUT MOSFET gate (GPIO10).
+///
+/// Drives the gate of BSS138LT1G N-channel MOSFET T1:
+///   LOW  = FET off = SYS_OUT rail HIGH (enabled via R11 10K pull-up)
+///   HIGH = FET on  = SYS_OUT rail shorted to GND (disabled)
+///
+/// The PWR button holds the gate LOW while the user presses it to boot.
+/// Firmware must drive this LOW immediately at startup to latch the rail on.
+/// Driving it HIGH (or floating it) will cut SYS_OUT and power down the system.
+pub const SYS_OUT_LATCH: u8 = 10;
 
 // =============================================================================
 // SD card - SPI interface
