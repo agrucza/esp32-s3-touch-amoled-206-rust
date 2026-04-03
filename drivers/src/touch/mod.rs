@@ -1,4 +1,4 @@
-//! FT3168 I²C capacitive touch controller driver — HAL-agnostic.
+//! FT3168 I²C capacitive touch controller driver - HAL-agnostic.
 //!
 //! Works with any I²C implementation that satisfies the `embedded-hal` traits.
 //! The I²C bus is passed by mutable reference on each call so it can be shared
@@ -8,13 +8,13 @@
 //! device and is only used during initialisation.
 //!
 //! Register map (FocalTech FT3x family):
-//!   0x02  TD_STATUS — touch point count [3:0]
-//!   0x03  P1_XH     — event[7:6], X[11:8][3:0]
-//!   0x04  P1_XL     — X[7:0]
-//!   0x05  P1_YH     — touch ID[7:4], Y[11:8][3:0]
-//!   0x06  P1_YL     — Y[7:0]
-//!   0xA3  CHIP_ID   — 0x54 for FT3168
-//!   0xA6  FW_VER    — firmware version
+//!   0x02  TD_STATUS - touch point count [3:0]
+//!   0x03  P1_XH     - event[7:6], X[11:8][3:0]
+//!   0x04  P1_XL     - X[7:0]
+//!   0x05  P1_YH     - touch ID[7:4], Y[11:8][3:0]
+//!   0x06  P1_YL     - Y[7:0]
+//!   0xA3  CHIP_ID   - 0x54 for FT3168
+//!   0xA6  FW_VER    - firmware version
 
 use embedded_hal::digital::OutputPin;
 use embedded_hal::i2c::I2c as I2cTrait;
@@ -30,11 +30,11 @@ const REG_FW_VER:    u8 = 0xA6;
 /// Touch event returned by [`FT3168::read`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TouchEvent {
-    /// Finger down or dragging — display coordinates (x, y).
+    /// Finger down or dragging - display coordinates (x, y).
     Pressed { x: u16, y: u16 },
     /// All fingers lifted (first read with count=0 after a press).
     Released,
-    /// No touch and no recent lift — nothing to report.
+    /// No touch and no recent lift - nothing to report.
     None,
 }
 
@@ -56,7 +56,7 @@ impl<RST: OutputPin> FT3168<RST> {
     /// Drive RST high (inactive).
     pub fn reset_high(&mut self) { self.reset.set_high().ok(); }
 
-    /// Drive RST low (active — resets the controller).
+    /// Drive RST low (active - resets the controller).
     pub fn reset_low(&mut self) { self.reset.set_low().ok(); }
 
     /// Verify device presence and read chip / firmware IDs.
@@ -98,9 +98,9 @@ impl<RST: OutputPin> FT3168<RST> {
     /// Read the current touch state.
     ///
     /// Call when INT is low, or poll freely. Returns:
-    /// - `Pressed { x, y }` — finger is on screen (raw panel coordinates)
-    /// - `Released`          — finger just lifted (first read after a press with count=0)
-    /// - `None`              — no touch, no change
+    /// - `Pressed { x, y }` - finger is on screen (raw panel coordinates)
+    /// - `Released`          - finger just lifted (first read after a press with count=0)
+    /// - `None`              - no touch, no change
     pub fn read<I2C, E>(&mut self, i2c: &mut I2C) -> TouchEvent
     where
         I2C: I2cTrait<Error = E>,

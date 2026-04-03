@@ -1,10 +1,17 @@
 //! ESP32-S3 HAL glue for the CO5300 QSPI display.
 //!
-//! This module contains only the hardware-specific parts:
-//!   - `build_spi`    — configure the esp-hal QSPI bus
-//!   - `EspQspi`      — newtype wrapper that implements `drivers::display::QspiWrite`
+//! Contains only the hardware-specific parts:
+//!   - `build_spi`  - configure the esp-hal QSPI DMA bus
+//!   - `EspQspi`    - newtype that implements `drivers::display::QspiWrite`
 //!
-//! The CO5300 driver itself (init, drawing, DrawTarget) lives in `drivers::display::co5300`.
+//! The CO5300 driver itself lives in `drivers::display::co5300`.
+//!
+//! ## Bounce buffer
+//!
+//! GDMA on ESP32-S3 cannot read from PSRAM directly. `EspQspi` holds a
+//! fixed-size bounce buffer in internal SRAM. `write_pixels` copies the
+//! incoming data (which may be in PSRAM) into the bounce buffer chunk by
+//! chunk before handing each chunk to the DMA engine.
 
 use drivers::display::QspiWrite;
 use esp_hal::{
@@ -15,26 +22,35 @@ use esp_hal::{
     Blocking,
 };
 
-// Re-export the DCS command bytes and colour constants so main.rs doesn't
-// need a separate import path.
-pub use drivers::display::{cmd, color, co5300::WIDTH, co5300::HEIGHT, CO5300, Rotation};
+pub use drivers::display::{color, co5300::FB_BYTES, co5300::HEIGHT, co5300::WIDTH, CO5300};
 
-/// DCS commands needed by `QspiWrite::write_pixels`.
+/// DCS commands used inside `write_pixels`.
 const RAMWR:  u8 = 0x2C;
 const RAMWRC: u8 = 0x3C;
 
-/// SPI instruction opcodes (not DCS commands).
-const OPCODE_CTRL:  u8 = 0x02; // 1-wire write (config commands)
-const OPCODE_PIXEL: u8 = 0x32; // Quad 4-wire pixel write
+/// SPI instruction opcodes.
+const OPCODE_CTRL:  u8 = 0x02; // 1-wire config/command writes
+const OPCODE_PIXEL: u8 = 0x32; // Quad 4-wire pixel writes
 
-/// Newtype wrapping the esp-hal blocking SPI bus.
-pub struct EspQspi<'d>(pub Spi<'d, Blocking>);
+/// Size of the bounce buffer - must match the ESP32-S3 SPI FIFO (64 bytes = 32 RGB565 pixels).
+/// half_duplex_write on blocking SPI (no DMA) cannot transfer more than 64 bytes at once.
+const BOUNCE: usize = 64;
+
+/// Wraps the esp-hal blocking SPI bus and provides the `QspiWrite` impl.
+///
+/// Note: `half_duplex_write` in esp-hal 1.0.0 is synchronous even on async SPI,
+/// so we use `Blocking` here. The `QspiWrite` trait is still declared async for
+/// future DMA compatibility - the impl just completes without yielding.
+pub struct EspQspi<'d> {
+    spi:    Spi<'d, Blocking>,
+    bounce: [u8; BOUNCE],
+}
 
 impl<'d> QspiWrite for EspQspi<'d> {
     type Error = esp_hal::spi::Error;
 
-    fn write_cmd(&mut self, cmd: u8, params: &[u8]) -> Result<(), Self::Error> {
-        self.0.half_duplex_write(
+    async fn write_cmd(&mut self, cmd: u8, params: &[u8]) -> Result<(), Self::Error> {
+        self.spi.half_duplex_write(
             DataMode::Single,
             Command::_8Bit(OPCODE_CTRL as u16, DataMode::Single),
             Address::_24Bit((cmd as u32) << 8, DataMode::Single),
@@ -43,19 +59,38 @@ impl<'d> QspiWrite for EspQspi<'d> {
         )
     }
 
-    fn write_pixels(&mut self, first: bool, data: &[u8]) -> Result<(), Self::Error> {
-        let dcs = if first { RAMWR } else { RAMWRC };
-        self.0.half_duplex_write(
-            DataMode::Quad,
-            Command::_8Bit(OPCODE_PIXEL as u16, DataMode::Single),
-            Address::_24Bit((dcs as u32) << 8, DataMode::Single),
-            0,
-            data,
-        )
+    /// Write pixel bytes to the display.
+    ///
+    /// Data may live in PSRAM. This method copies it through the internal
+    /// SRAM bounce buffer in BOUNCE-sized chunks before each DMA transfer,
+    /// satisfying the GDMA constraint that source memory must be internal SRAM.
+    async fn write_pixels(&mut self, first: bool, data: &[u8]) -> Result<(), Self::Error> {
+        let mut offset   = 0;
+        let mut is_first = first;
+
+        while offset < data.len() {
+            let n = (data.len() - offset).min(BOUNCE);
+
+            // Copy from PSRAM (or wherever) into internal SRAM bounce buffer.
+            self.bounce[..n].copy_from_slice(&data[offset..offset + n]);
+
+            let dcs = if is_first { RAMWR } else { RAMWRC };
+            self.spi.half_duplex_write(
+                DataMode::Quad,
+                Command::_8Bit(OPCODE_PIXEL as u16, DataMode::Single),
+                Address::_24Bit((dcs as u32) << 8, DataMode::Single),
+                0,
+                &self.bounce[..n],
+            )?;
+
+            is_first = false;
+            offset  += n;
+        }
+        Ok(())
     }
 }
 
-/// Build and configure the QSPI bus for the CO5300.
+/// Build and configure the QSPI async SPI bus for the CO5300.
 pub fn build_spi<'d>(
     spi:  impl esp_hal::spi::master::Instance + 'd,
     sck:  impl PeripheralOutput<'d>,
@@ -79,5 +114,5 @@ pub fn build_spi<'d>(
     .with_sio3(sio3)
     .with_cs(cs);
 
-    EspQspi(spi)
+    EspQspi { spi, bounce: [0; BOUNCE] }
 }

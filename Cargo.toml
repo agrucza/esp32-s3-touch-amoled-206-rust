@@ -6,7 +6,7 @@ members = [
     "firmware",
 ]
 
-# Shared dependency versions — single source of truth to avoid mismatches.
+# Shared dependency versions - single source of truth to avoid mismatches.
 [workspace.dependencies]
 defmt                  = "0.3"
 embedded-hal           = "1.0.0"

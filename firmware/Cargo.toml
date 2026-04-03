@@ -17,6 +17,7 @@ esp-bootloader-esp-idf = { version = "0.4.0", features = ["esp32s3"] }
 esp-hal = { version = "1.0.0", features = [
     "esp32s3",
     "unstable",     # required for many APIs in 1.0.x
+    "psram",        # enables PSRAM support and .ext_ram.bss linker section
 ] }
 esp-rtos = { version = "0.2.0", features = [
     "esp32s3",
@@ -48,3 +49,6 @@ app-core = { path = "../app-core" }
 drivers  = { path = "../drivers", features = ["display", "pmu", "rtc", "touch"] }
 
 embedded-graphics-core = { workspace = true }
+
+# --- PSRAM heap allocator ---
+esp-alloc = "0.9.0"

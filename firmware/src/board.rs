@@ -1,10 +1,10 @@
-//! board.rs — pin assignments and board-level constants for the
+//! board.rs - pin assignments and board-level constants for the
 //! Waveshare ESP32-S3-Touch-AMOLED-2.06 (32MB Flash + 8MB OPI PSRAM).
 //!
 //! Source: config.h from the working PlatformIO/Arduino reference project.
 
 // =============================================================================
-// Display — RM67162 AMOLED, QSPI interface
+// Display - RM67162 AMOLED, QSPI interface
 // Resolution: 410 x 502 px (portrait)
 // =============================================================================
 pub const LCD_SDIO0:  u8 = 4;   // QSPI Data 0 (MOSI)
@@ -31,24 +31,24 @@ pub const I2C_SDA: u8 = 15;
 pub const I2C_SCL: u8 = 14;
 
 // =============================================================================
-// Touch controller — FT3168 (I2C, shared bus)
+// Touch controller - FT3168 (I2C, shared bus)
 // =============================================================================
 pub const TOUCH_INT:       u8 = 38;    // Interrupt (active low)
 pub const TOUCH_RST:       u8 = 9;     // Reset (active low)
 pub const TOUCH_I2C_ADDR:  u8 = 0x38;  // FT3168 default I2C address
 
 // =============================================================================
-// IMU — QMI8658 (I2C, shared bus)
+// IMU - QMI8658 (I2C, shared bus)
 // =============================================================================
 pub const IMU_INT1: u8 = 21;    // Data-ready interrupt (INT2 only on test point TP15)
 
 // =============================================================================
-// RTC — PCF85063 (I2C, shared bus)
+// RTC - PCF85063 (I2C, shared bus)
 // =============================================================================
 pub const RTC_INT: u8 = 39;     // Alarm / timer interrupt
 
 // =============================================================================
-// Power management — AXP2101 (I2C, shared bus)
+// Power management - AXP2101 (I2C, shared bus)
 // IRQ pin goes to IO expander EXIO5 (not a direct ESP32 GPIO).
 // Deep sleep wakeup via power button uses CHIP_PU (ESP32 enable pin), not IRQ.
 // =============================================================================
@@ -57,12 +57,12 @@ pub const RTC_INT: u8 = 39;     // Alarm / timer interrupt
 // Buttons
 // =============================================================================
 
-/// Boot button (Key1) — GPIO0, active-low (pulled up via 10K to VCC2V3).
+/// Boot button (Key1) - GPIO0, active-low (pulled up via 10K to VCC2V3).
 /// Also used to enter download mode. Can be used as an ext-wakeup source
 /// from ESP32 deep sleep (triggers on low level).
 pub const BTN_BOOT: u8 = 0;
 
-/// PWR button (Key3) — connected to AXP2101 PWRON pin only.
+/// PWR button (Key3) - connected to AXP2101 PWRON pin only.
 /// There is NO direct ESP32 GPIO for this button. The AXP2101 handles
 /// press detection and wakes the ESP32 via CHIP_PU (enable pin).
 
@@ -70,13 +70,13 @@ pub const BTN_BOOT: u8 = 0;
 // Software power control
 // =============================================================================
 
-/// SYS_OUT MOSFET gate (GPIO10) — drives the gate of a BSS138LT1G transistor
-/// that controls the SYS_OUT power rail. This is NOT a button — it is a
+/// SYS_OUT MOSFET gate (GPIO10) - drives the gate of a BSS138LT1G transistor
+/// that controls the SYS_OUT power rail. This is NOT a button - it is a
 /// software-controlled output for power management.
 pub const SYS_OUT: u8 = 10;
 
 // =============================================================================
-// SD card — SPI interface
+// SD card - SPI interface
 // =============================================================================
 pub const SD_MOSI: u8 = 1;
 pub const SD_SCK:  u8 = 2;

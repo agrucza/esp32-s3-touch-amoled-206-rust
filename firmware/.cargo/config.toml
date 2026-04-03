@@ -14,4 +14,4 @@ rustflags = [
 # Pre-built std is not distributed for Xtensa targets, so Cargo must compile
 # it locally using the esp Xtensa fork.
 [unstable]
-build-std = ["core"]
+build-std = ["core", "alloc"]

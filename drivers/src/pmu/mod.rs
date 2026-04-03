@@ -1,10 +1,10 @@
-//! AXP2101 PMU (Power Management Unit) driver — HAL-agnostic.
+//! AXP2101 PMU (Power Management Unit) driver - HAL-agnostic.
 //!
 //! Works with any I²C implementation that satisfies the `embedded-hal` traits.
 //! The firmware passes in the concrete `esp_hal` I²C type; this driver never
 //! imports `esp_hal` directly.
 //!
-//! The I²C bus is **not** owned by this struct — it is passed by mutable
+//! The I²C bus is **not** owned by this struct - it is passed by mutable
 //! reference on each call. This allows the same bus to be shared with the
 //! touch controller, RTC, IMU, and any other I²C peripheral.
 //!
@@ -27,7 +27,7 @@ pub const DEFAULT_ADDRESS: u8 = 0x34;
 
 /// Error type for PMU operations.
 ///
-/// Generic over `E` — the I2C error type from whichever HAL is used.
+/// Generic over `E` - the I2C error type from whichever HAL is used.
 #[derive(Debug)]
 pub enum Error<E> {
     /// An I2C transaction failed; the inner value is the HAL's own error.
@@ -102,12 +102,12 @@ impl Pmu {
         let chip_id = self.check_device(i2c)?;
 
         // Set all output voltages while LDOs are still disabled.
-        self.set_aldo1_voltage(i2c, 3300)?; // VL1_3.3V — touch, IMU, RTC
-        self.set_aldo2_voltage(i2c, 3300)?; // VL2_3.3V — general 3.3 V
-        self.set_aldo3_voltage(i2c, 3300)?; // VCC3V    — general 3.3 V
-        self.set_aldo4_voltage(i2c, 1800)?; // VL3_1.8V — CO5300 VDDIO
-        self.set_bldo1_voltage(i2c, 1200)?; // VL_1.2V  — CO5300 VCORE
-        self.set_bldo2_voltage(i2c, 2800)?; // VL_2.8V  — CO5300 AVDD
+        self.set_aldo1_voltage(i2c, 3300)?; // VL1_3.3V - touch, IMU, RTC
+        self.set_aldo2_voltage(i2c, 3300)?; // VL2_3.3V - general 3.3 V
+        self.set_aldo3_voltage(i2c, 3300)?; // VCC3V    - general 3.3 V
+        self.set_aldo4_voltage(i2c, 1800)?; // VL3_1.8V - CO5300 VDDIO
+        self.set_bldo1_voltage(i2c, 1200)?; // VL_1.2V  - CO5300 VCORE
+        self.set_bldo2_voltage(i2c, 2800)?; // VL_2.8V  - CO5300 AVDD
 
         // Enable all six LDOs in one register write.
         self.enable_all_rails(i2c)?;
@@ -136,7 +136,7 @@ impl Pmu {
     /// Clear the interrupt flags that were set in `status` (write 1 to clear, RW1C).
     ///
     /// Pass the same `InterruptStatus` returned by [`read_interrupts`] so only
-    /// the bits that were active get cleared — any new events that arrived in
+    /// the bits that were active get cleared - any new events that arrived in
     /// between are preserved.
     ///
     /// [`read_interrupts`]: Pmu::read_interrupts

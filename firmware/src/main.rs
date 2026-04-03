@@ -1,6 +1,8 @@
 #![no_std]
 #![no_main]
 
+extern crate alloc;
+
 mod board;
 mod display_hal;
 mod tasks;
@@ -23,9 +25,18 @@ esp_bootloader_esp_idf::esp_app_desc!();
 
 #[esp_rtos::main]
 async fn main(spawner: Spawner) {
-    let p = esp_hal::init(esp_hal::Config::default());
+    let p = esp_hal::init(
+        esp_hal::Config::default()
+            .with_cpu_clock(esp_hal::clock::CpuClock::max())
+            //.with_psram(esp_hal::psram::PsramConfig::default())
+            .with_psram(esp_hal::psram::PsramConfig {
+                ram_frequency: esp_hal::psram::SpiRamFreq::Freq80m,
+                core_clock: core::prelude::v1::Some(esp_hal::psram::SpiTimingConfigCoreClock::SpiTimingConfigCoreClock160m),
+                ..Default::default()
+            })
+    );
 
-    // esp_rtos::start only needs the timer on Xtensa — the software interrupt
+    // esp_rtos::start only needs the timer on Xtensa - the software interrupt
     // argument is RISC-V only (#[cfg(riscv)] in esp-rtos source).
     let timg0 = TimerGroup::new(p.TIMG0);
     esp_rtos::start(timg0.timer0);
@@ -47,17 +58,17 @@ async fn main(spawner: Spawner) {
     match pmu.init(&mut i2c) {
         Ok(raw_id) => {
             let version = (raw_id >> 4) & 0x03; // bits 5:4 = chip_version
-            log::info!("PMU: AXP2101 rev {} (0x{:02X}) — all rails enabled", version, raw_id);
+            log::info!("PMU: AXP2101 rev {} (0x{:02X}) - all rails enabled", version, raw_id);
         }
         Err(_) => {
-            log::error!("PMU: initialization failed — halting");
+            log::error!("PMU: initialization failed - halting");
             loop {}
         }
     }
     Timer::after(Duration::from_millis(20)).await; // let rails stabilise
 
     // --- Display setup ---
-    let spi = display_hal::build_spi(
+    let bus = display_hal::build_spi(
         p.SPI2,
         p.GPIO11, // LCD_SCLK
         p.GPIO4,  // LCD_SDIO0
@@ -67,7 +78,19 @@ async fn main(spawner: Spawner) {
         p.GPIO12, // LCD_CS
     );
     let reset = Output::new(p.GPIO8, Level::High, OutputConfig::default());
-    let mut display = CO5300::new(spi, reset);
+
+
+    // Initialize PSRAM and point the global allocator at it.
+    // Must happen before any alloc::vec! or Box::new calls.
+    esp_alloc::psram_allocator!(p.PSRAM, esp_hal::psram);
+
+    // Allocate the ~400 KB framebuffer from PSRAM.
+    let mut fb = alloc::vec![0u8; display_hal::FB_BYTES];
+
+    let stats = esp_alloc::HEAP.stats();
+    log::info!("{}", stats);
+
+    let mut display = CO5300::new(bus, reset, &mut fb);
 
     // Hardware reset: short low pulse then settle
     display.reset_high();
@@ -77,24 +100,24 @@ async fn main(spawner: Spawner) {
     display.reset_high();
     Timer::after(Duration::from_millis(120)).await; // controller boot time
 
-    // Password unlock/lock + SPI mode + pixel format (no delays needed)
     log::info!("Main: Starting display init");
-    display.init();
+    display.init().await;
     log::info!("Main: Display init complete");
 
-    // Sleep out — must come AFTER config, BEFORE display on
+    // Sleep out - must come AFTER config, BEFORE display on
     log::info!("Main: Sending SLPOUT command");
-    display.wake();
+    display.wake().await;
     Timer::after(Duration::from_millis(120)).await;
 
     // Display on
     log::info!("Main: Sending DISPON command");
-    display.display_on();
+    display.display_on().await;
     Timer::after(Duration::from_millis(70)).await;
 
-    log::info!("Display initialised — filling screen red");
+    log::info!("Display initialised - filling screen red");
     display.fill_solid(0, 0, display_hal::WIDTH, display_hal::HEIGHT, color::RED);
-    log::info!("Fill done");
+    display.flush().await;
+    log::info!("Flush done");
 
     // --- Touch setup ---
     let touch_rst = Output::new(p.GPIO9, Level::High, OutputConfig::default());
@@ -109,31 +132,28 @@ async fn main(spawner: Spawner) {
     log::info!("Touch: initializing FT3168...");
     match touch.read_ids(&mut i2c) {
         Ok((chip_id, fw_ver)) => log::info!("Touch: chip ID=0x{:02X}, FW version=0x{:02X}", chip_id, fw_ver),
-        Err(_) => log::error!("Touch: device not found at I²C address 0x{:02X}", drivers::touch::ADDR),
+        Err(_) => log::error!("Touch: device not found at I2C address 0x{:02X}", drivers::touch::ADDR),
     }
 
     // --- RTC setup ---
     log::info!("RTC: initializing PCF85063...");
     let rtc = Rtc::new(RtcConfig::default());
     match rtc.init(&mut i2c) {
-        Err(_) => log::error!("RTC: device not found on I²C bus"),
+        Err(_) => log::error!("RTC: device not found on I2C bus"),
         Ok(os_flag) => {
             if os_flag {
-                log::warn!("RTC: oscillator-stop flag set — time is invalid");
+                log::warn!("RTC: oscillator-stop flag set - time is invalid");
             } else {
                 log::info!("RTC: oscillator running, time is valid");
             }
 
-            // Need to set time if oscillator stopped OR if the values are garbage.
-            // Some PCF85063 variants don't set the OS flag on first power-up,
-            // so we validate the read-back values as a second check.
             let needs_set = os_flag || match rtc.get(&mut i2c) {
                 Ok(ref dt) => !dt.is_valid(),
                 Err(_)     => true,
             };
 
             if needs_set {
-                log::warn!("RTC: time invalid — setting default");
+                log::warn!("RTC: time invalid - setting default");
                 let default_time = RtcDateTime::new(2026, 3, 30, 0, 12, 0, 0);
                 if rtc.set(&mut i2c, &default_time).is_err() {
                     log::error!("RTC: failed to set time");
@@ -153,15 +173,12 @@ async fn main(spawner: Spawner) {
     let colors = [color::RED, color::GREEN, color::BLUE];
     let mut color_index = 0;
 
-    // Read when INT is low (data ready) OR when a finger was last seen down.
-    // The second condition catches lift-off: FT3168 briefly pulses INT low on
-    // release, which a 20 ms poll can miss. Continuing to read until count=0
-    // guarantees the Released event is never skipped.
     loop {
-        // We will shift the display color around a bit
         log::info!("Updating display to color index: {}", color_index);
         display.fill_solid(0, 0, display_hal::WIDTH, display_hal::HEIGHT, colors[color_index]);
-        color_index = (color_index+1)%colors.len();
+        display.flush().await;
+        color_index = (color_index + 1) % colors.len();
+
         for _ in 0..50 {
             Timer::after(Duration::from_millis(20)).await;
             if touch_int.is_low() || touch.is_pressed() {

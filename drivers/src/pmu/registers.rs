@@ -4,7 +4,7 @@
 //! (X-power AXP2101 SWcharge V1.0), section 6.13.
 //!
 //! Naming convention:
-//!   REG_*  — register address (u8)
+//!   REG_*  - register address (u8)
 //!   Bit constants are provided as masks (1 << bit_position) in sub-modules.
 
 // =============================================================================
@@ -14,16 +14,16 @@
 /// Chip ID register address (REG 03h, read-only).
 ///
 /// Bit layout:
-///   7:6  chip_id_h    — upper ID bits (always 0b01 for AXP2101)
-///   5:4  chip_version — 00=A, 01=B
-///   3:0  chip_id_l    — lower ID bits
+///   7:6  chip_id_h    - upper ID bits (always 0b01 for AXP2101)
+///   5:4  chip_version - 00=A, 01=B
+///   3:0  chip_id_l    - lower ID bits
 ///
 /// Observed on ESP32-S3-Touch-AMOLED-2.06: 0x4A (version A).
 /// Verification uses only chip_id_h (bits 7:6 = 0b01) to be robust
 /// across chip versions and revisions.
 pub const CHIP_ID: u8 = 0x03;
 
-/// Mask for bits 7:6 (chip_id_h) — the stable part of the chip identity.
+/// Mask for bits 7:6 (chip_id_h) - the stable part of the chip identity.
 pub const CHIP_ID_MASK:  u8 = 0b1100_0000;
 /// Expected value of (raw_byte & CHIP_ID_MASK) for any AXP2101.
 pub const CHIP_ID_VALUE: u8 = 0b0100_0000; // chip_id_h = 0b01
@@ -32,9 +32,9 @@ pub const CHIP_ID_VALUE: u8 = 0b0100_0000; // chip_id_h = 0b01
 // Status registers (read-only)
 // =============================================================================
 
-/// PMU Status 1 (REG 00h) — power-path and battery state.
+/// PMU Status 1 (REG 00h) - power-path and battery state.
 pub const REG_PMU_STATUS1: u8 = 0x00;
-/// PMU Status 2 (REG 01h) — charging state and current direction.
+/// PMU Status 2 (REG 01h) - charging state and current direction.
 pub const REG_PMU_STATUS2: u8 = 0x01;
 
 // =============================================================================
@@ -67,7 +67,7 @@ pub const REG_DIE_TEMP_CFG: u8 = 0x13;
 /// Bits 2:0 → 3.2 + N×0.1 V  (default 101b = 3.7 V).
 pub const REG_SYS_VMIN: u8 = 0x14;
 
-/// Input voltage limit — VINDPM (REG 15h).
+/// Input voltage limit - VINDPM (REG 15h).
 /// Bits 3:0 → 3.88 + N×0.08 V  (default 0110b = 4.36 V).
 pub const REG_VINDPM: u8 = 0x15;
 
@@ -102,10 +102,10 @@ pub const REG_GPIO1_CFG: u8 = 0x1B;
 // Power-on / power-off status and control
 // =============================================================================
 
-/// PWRON status — sources that caused the last power-on (REG 20h, read-only).
+/// PWRON status - sources that caused the last power-on (REG 20h, read-only).
 pub const REG_PWRON_STATUS: u8 = 0x20;
 
-/// PWROFF status — sources that caused the last power-off (REG 21h, read-only).
+/// PWROFF status - sources that caused the last power-off (REG 21h, read-only).
 pub const REG_PWROFF_STATUS: u8 = 0x21;
 
 /// PWROFF enable (REG 22h).
@@ -174,11 +174,11 @@ pub const REG_TDIE_H: u8 = 0x3C;
 pub const REG_TDIE_L: u8 = 0x3D;
 
 // =============================================================================
-// IRQ — enable registers (REG 40h–42h)
+// IRQ - enable registers (REG 40h–42h)
 // Writing 1 to a bit enables that interrupt source.
 // =============================================================================
 
-/// IRQ Enable 0 (REG 40h) — gauge and battery temperature interrupts.
+/// IRQ Enable 0 (REG 40h) - gauge and battery temperature interrupts.
 ///
 /// | Bit | Source                                        |
 /// |-----|-----------------------------------------------|
@@ -192,7 +192,7 @@ pub const REG_TDIE_L: u8 = 0x3D;
 /// |  0  | Battery under-temp in work  (bwut_irq)        |
 pub const REG_IRQ_EN0: u8 = 0x40;
 
-/// IRQ Enable 1 (REG 41h) — VBUS, battery insert/remove, POWERON button.
+/// IRQ Enable 1 (REG 41h) - VBUS, battery insert/remove, POWERON button.
 ///
 /// | Bit | Source                                        |
 /// |-----|-----------------------------------------------|
@@ -206,7 +206,7 @@ pub const REG_IRQ_EN0: u8 = 0x40;
 /// |  0  | POWERON positive edge       (ponpe_irq)       |
 pub const REG_IRQ_EN1: u8 = 0x41;
 
-/// IRQ Enable 2 (REG 42h) — charger and protection interrupts.
+/// IRQ Enable 2 (REG 42h) - charger and protection interrupts.
 ///
 /// | Bit | Source                                        |
 /// |-----|-----------------------------------------------|
@@ -221,16 +221,16 @@ pub const REG_IRQ_EN1: u8 = 0x41;
 pub const REG_IRQ_EN2: u8 = 0x42;
 
 // =============================================================================
-// IRQ — status registers (REG 48h–4Ah)
+// IRQ - status registers (REG 48h–4Ah)
 // Read to check which interrupt fired. Write 1 to a bit to clear it (RW1C).
 // Layout mirrors the enable registers above.
 // =============================================================================
 
-/// IRQ Status 0 (REG 48h) — gauge and battery temperature events.
+/// IRQ Status 0 (REG 48h) - gauge and battery temperature events.
 pub const REG_IRQ_STATUS0: u8 = 0x48;
-/// IRQ Status 1 (REG 49h) — VBUS, battery insert/remove, POWERON button events.
+/// IRQ Status 1 (REG 49h) - VBUS, battery insert/remove, POWERON button events.
 pub const REG_IRQ_STATUS1: u8 = 0x49;
-/// IRQ Status 2 (REG 4Ah) — charger and protection events.
+/// IRQ Status 2 (REG 4Ah) - charger and protection events.
 pub const REG_IRQ_STATUS2: u8 = 0x4A;
 
 // =============================================================================

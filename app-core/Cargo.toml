@@ -13,4 +13,4 @@ defmt                  = { workspace = true, optional = true }
 embedded-graphics-core = { workspace = true }
 
 [dev-dependencies]
-# nothing extra — `cargo test` on host uses std automatically via the test harness
+# nothing extra - `cargo test` on host uses std automatically via the test harness

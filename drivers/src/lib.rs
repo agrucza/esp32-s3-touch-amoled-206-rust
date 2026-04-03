@@ -1,4 +1,4 @@
-//! drivers — HAL-agnostic peripheral drivers.
+//! drivers - HAL-agnostic peripheral drivers.
 //!
 //! Each driver is written against `embedded-hal` / `embedded-hal-async`
 //! traits, not against `esp-hal` types directly. This means:

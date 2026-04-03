@@ -1,4 +1,4 @@
-//! PCF85063A RTC driver — HAL-agnostic.
+//! PCF85063A RTC driver - HAL-agnostic.
 //!
 //! NXP PCF85063ATL on the shared I²C bus.
 //! Default address: 0x51.
@@ -7,30 +7,30 @@
 //! Register map (from PCF85063A datasheet Rev 7):
 //!
 //!   Control and status registers:
-//!   0x00  Control_1     — [7]=EXT_TEST [5]=STOP [4]=SR [2]=CIE [1]=12_24 [0]=CAP_SEL
-//!   0x01  Control_2     — [7]=AIE [6]=AF [5]=MI [4]=HMI [3]=TF [2:0]=COF[2:0]
-//!   0x02  Offset        — [7]=MODE [6:0]=OFFSET[6:0]
-//!   0x03  RAM_byte      — [7:0]=B[7:0]
+//!   0x00  Control_1     - [7]=EXT_TEST [5]=STOP [4]=SR [2]=CIE [1]=12_24 [0]=CAP_SEL
+//!   0x01  Control_2     - [7]=AIE [6]=AF [5]=MI [4]=HMI [3]=TF [2:0]=COF[2:0]
+//!   0x02  Offset        - [7]=MODE [6:0]=OFFSET[6:0]
+//!   0x03  RAM_byte      - [7:0]=B[7:0]
 //!
 //!   Time and date registers:
-//!   0x04  Seconds       — [7]=OS (oscillator-stop flag) [6:0]=BCD seconds
-//!   0x05  Minutes       — [6:0]=BCD minutes
-//!   0x06  Hours         — [5:0]=BCD hours (24h mode)
-//!   0x07  Days          — [5:0]=BCD days (1–31)
-//!   0x08  Weekdays      — [2:0]=weekday (0=Sunday…6=Saturday)
-//!   0x09  Months        — [4:0]=BCD months (1–12)
-//!   0x0A  Years         — [7:0]=BCD years (00–99, i.e. 2000–2099)
+//!   0x04  Seconds       - [7]=OS (oscillator-stop flag) [6:0]=BCD seconds
+//!   0x05  Minutes       - [6:0]=BCD minutes
+//!   0x06  Hours         - [5:0]=BCD hours (24h mode)
+//!   0x07  Days          - [5:0]=BCD days (1–31)
+//!   0x08  Weekdays      - [2:0]=weekday (0=Sunday…6=Saturday)
+//!   0x09  Months        - [4:0]=BCD months (1–12)
+//!   0x0A  Years         - [7:0]=BCD years (00–99, i.e. 2000–2099)
 //!
 //!   Alarm registers (AEN bit 7: 1 = field disabled / not compared):
-//!   0x0B  Second_alarm  — [7]=AEN_S [6:0]=BCD seconds
-//!   0x0C  Minute_alarm  — [7]=AEN_M [6:0]=BCD minutes
-//!   0x0D  Hour_alarm    — [7]=AEN_H [5:0]=BCD hours
-//!   0x0E  Day_alarm     — [7]=AEN_D [5:0]=BCD days
-//!   0x0F  Weekday_alarm — [7]=AEN_W [2:0]=weekday
+//!   0x0B  Second_alarm  - [7]=AEN_S [6:0]=BCD seconds
+//!   0x0C  Minute_alarm  - [7]=AEN_M [6:0]=BCD minutes
+//!   0x0D  Hour_alarm    - [7]=AEN_H [5:0]=BCD hours
+//!   0x0E  Day_alarm     - [7]=AEN_D [5:0]=BCD days
+//!   0x0F  Weekday_alarm - [7]=AEN_W [2:0]=weekday
 //!
 //!   Timer registers:
-//!   0x10  Timer_value   — [7:0]=T[7:0]
-//!   0x11  Timer_mode    — [4:3]=TCF[1:0] [2]=TE [1]=TIE [0]=TI_TP
+//!   0x10  Timer_value   - [7:0]=T[7:0]
+//!   0x11  Timer_mode    - [4:3]=TCF[1:0] [2]=TE [1]=TIE [0]=TI_TP
 //!
 //! Works with any I²C implementation that satisfies the `embedded-hal` traits.
 //! The I²C bus is passed by mutable reference on each call so it can be shared
@@ -54,15 +54,15 @@ const REG_TIMER_MODE:   u8 = 0x11;
 
 // ---- Control_2 bit masks --------------------------------------------------------
 
-const CTRL2_AIE: u8 = 1 << 7; // Alarm Interrupt Enable — drives INT# pin on alarm
-const CTRL2_AF:  u8 = 1 << 6; // Alarm Flag — set by chip on match, write 0 to clear
-const CTRL2_TF:  u8 = 1 << 3; // Timer Flag — set by chip on timer expiry, write 0 to clear
-const CTRL2_COF: u8 = 0x07;   // COF[2:0] mask — CLKOUT frequency bits
+const CTRL2_AIE: u8 = 1 << 7; // Alarm Interrupt Enable - drives INT# pin on alarm
+const CTRL2_AF:  u8 = 1 << 6; // Alarm Flag - set by chip on match, write 0 to clear
+const CTRL2_TF:  u8 = 1 << 3; // Timer Flag - set by chip on timer expiry, write 0 to clear
+const CTRL2_COF: u8 = 0x07;   // COF[2:0] mask - CLKOUT frequency bits
 
 // ---- Timer_mode bit masks -------------------------------------------------------
 
 const TIMER_TE:    u8 = 1 << 2; // Timer Enable
-const TIMER_TIE:   u8 = 1 << 1; // Timer Interrupt Enable — drives INT# pin on expiry
+const TIMER_TIE:   u8 = 1 << 1; // Timer Interrupt Enable - drives INT# pin on expiry
 const TIMER_TI_TP: u8 = 1 << 0; // 0 = interrupt (INT# held low), 1 = pulse
 
 // ---- Alarm register bit ---------------------------------------------------------
@@ -74,7 +74,7 @@ const AEN: u8 = 1 << 7;
 
 /// Error type for RTC operations.
 ///
-/// Generic over `E` — the I2C error type from whichever HAL is used.
+/// Generic over `E` - the I2C error type from whichever HAL is used.
 #[derive(Debug)]
 pub enum Error<E> {
     /// An I2C transaction failed; the inner value is the HAL's own error.
@@ -147,7 +147,7 @@ pub struct Alarm {
 }
 
 impl Alarm {
-    /// All fields disabled — no match will ever fire.
+    /// All fields disabled - no match will ever fire.
     pub fn disabled() -> Self {
         Self::default()
     }
@@ -159,13 +159,13 @@ impl Alarm {
 /// Total timeout = `value / frequency`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TimerClock {
-    /// 4096 Hz — minimum period ~244 µs, max ~62 ms.
+    /// 4096 Hz - minimum period ~244 µs, max ~62 ms.
     Hz4096 = 0b00,
-    /// 64 Hz — minimum period ~15.6 ms, max ~4 s.
+    /// 64 Hz - minimum period ~15.6 ms, max ~4 s.
     Hz64   = 0b01,
-    /// 1 Hz — minimum period 1 s, max 255 s.
+    /// 1 Hz - minimum period 1 s, max 255 s.
     Hz1    = 0b10,
-    /// 1/60 Hz — minimum period 60 s, max 255 min.
+    /// 1/60 Hz - minimum period 60 s, max 255 min.
     Per60  = 0b11,
 }
 
@@ -239,7 +239,7 @@ impl Rtc {
     /// Performs a software reset, then configures 24h mode with the clock
     /// running and the internal 7 pF quartz capacitor selected.
     ///
-    /// Returns `Ok(true)` if the oscillator-stop (OS) flag was set — meaning
+    /// Returns `Ok(true)` if the oscillator-stop (OS) flag was set - meaning
     /// the clock lost power and the stored time is invalid. Call `set()` with
     /// a known time in that case.
     pub fn init<I2C, E>(&self, i2c: &mut I2C) -> Result<bool, Error<E>>
@@ -318,8 +318,8 @@ impl Rtc {
     /// Program the alarm and enable the INT# interrupt pin.
     ///
     /// Only fields set to `Some(value)` are compared; `None` fields are
-    /// ignored by the chip (AEN bit set). The alarm fires — and the INT#
-    /// pin is driven low — when all enabled fields match simultaneously.
+    /// ignored by the chip (AEN bit set). The alarm fires - and the INT#
+    /// pin is driven low - when all enabled fields match simultaneously.
     ///
     /// Any previously pending alarm flag is cleared before the new alarm
     /// is armed, so the caller does not get a spurious interrupt.
@@ -380,7 +380,7 @@ impl Rtc {
     /// Clear the alarm flag (AF) to re-arm the INT# pin.
     ///
     /// Call this after handling an alarm interrupt. Does not disable the
-    /// alarm — it will fire again on the next match.
+    /// alarm - it will fire again on the next match.
     pub fn clear_alarm_flag<I2C, E>(&self, i2c: &mut I2C) -> Result<(), Error<E>>
     where
         I2C: I2cTrait<Error = E>,
@@ -497,7 +497,7 @@ impl Rtc {
     /// | Normal | Every two hours     | ±4.340 ppm   |
     /// | Coarse | Every minute        | ±4.069 ppm   |
     ///
-    /// Measure drift over several days before computing an offset — one step
+    /// Measure drift over several days before computing an offset - one step
     /// is small, so repeated adjustment is rarely needed.
     pub fn set_offset<I2C, E>(
         &self,

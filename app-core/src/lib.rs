@@ -1,4 +1,4 @@
-//! app-core — hardware-agnostic application logic.
+//! app-core - hardware-agnostic application logic.
 //!
 //! This crate is `no_std` when compiled for the embedded target, but compiles
 //! with `std` on the host so that `cargo test -p app-core` works without a
@@ -24,7 +24,7 @@ pub enum AppEvent {
     Tick(u64),
 }
 
-/// Top-level application state — extend as the UI grows.
+/// Top-level application state - extend as the UI grows.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct AppState {
     pub tick_count: u64,
