@@ -43,10 +43,11 @@ log = { version = "0.4.29", default-features = false }
 # --- embedded-hal traits (used by drivers crate) ---
 embedded-hal       = { workspace = true }
 embedded-hal-async = { workspace = true }
+embedded-hal-bus   = { version = "0.3.0" }
 
 # --- Local crates ---
 app-core = { path = "../app-core" }
-drivers  = { path = "../drivers", features = ["display", "imu", "pmu", "rtc", "touch"] }
+drivers  = { path = "../drivers", features = ["display", "imu", "pmu", "rtc", "touch", "sdcard"] }
 
 embedded-graphics-core = { workspace = true }
 

@@ -11,17 +11,20 @@
 #[cfg(feature = "display")]
 pub mod display;
 
-#[cfg(feature = "touch")]
-pub mod touch;
+#[cfg(feature = "imu")]
+pub mod imu;
 
 #[cfg(feature = "pmu")]
 pub mod pmu;
 
-#[cfg(feature = "imu")]
-pub mod imu;
-
 #[cfg(feature = "rtc")]
 pub mod rtc;
+
+#[cfg(feature = "sdcard")]
+pub mod sdcard;
+
+#[cfg(feature = "touch")]
+pub mod touch;
 
 pub use embedded_hal;
 
@@ -30,3 +33,6 @@ pub use defmt;
 
 #[cfg(feature = "pmu")]
 pub use pmu::*;
+
+#[cfg(feature = "sdcard")]
+pub use sdcard::*;

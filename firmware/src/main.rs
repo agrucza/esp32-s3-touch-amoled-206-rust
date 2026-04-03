@@ -5,9 +5,11 @@ extern crate alloc;
 
 mod board;
 mod display_hal;
+mod sdcard_hal;
 mod tasks;
 
 use display_hal::{CO5300, color};
+use drivers::sdcard::{BlockDevice as _, DummyTimeSource, FileMode, VolumeIdx};
 use drivers::imu::{Qmi8658, Config as ImuConfig};
 use drivers::touch::FT3168;
 use drivers::pmu::{Pmu, Config as PmuConfig};
@@ -150,6 +152,81 @@ async fn main(spawner: Spawner) {
     match touch.read_ids(&mut i2c) {
         Ok((chip_id, fw_ver)) => log::info!("Touch: chip ID=0x{:02X}, FW version=0x{:02X}", chip_id, fw_ver),
         Err(_) => log::error!("Touch: device not found at I2C address 0x{:02X}", drivers::touch::ADDR),
+    }
+
+    // --- SD card setup ---
+    // SPI3: MOSI=GPIO1, SCK=GPIO2, MISO=GPIO3, CS=GPIO17
+    // SPI2 is used by the display; SD card gets its own SPI3 peripheral.
+    log::info!("SD card: initializing...");
+    let sd_cs = Output::new(p.GPIO17, Level::High, OutputConfig::default());
+    let sd_card = sdcard_hal::build_sdcard(
+        p.SPI3,
+        p.GPIO2,  // SCK
+        p.GPIO1,  // MOSI
+        p.GPIO3,  // MISO
+        sd_cs,
+    );
+    // Quick size check before handing ownership to VolumeManager.
+    // SdCard uses RefCell internally so all methods take &self (no mut needed).
+    match sd_card.num_blocks() {
+        Ok(n) => log::info!("SD card: {} blocks ({} MB)", n.0, n.0 as u64 * 512 / 1_000_000),
+        Err(e) => log::error!("SD card: not found or init failed: {:?}", e),
+    }
+
+    let mut vol_mgr = sdcard_hal::EspVolumeManager::new(sd_card, DummyTimeSource);
+
+    match vol_mgr.open_raw_volume(VolumeIdx(0)) {
+        Err(e) => log::error!("SD card: open volume failed: {:?}", e),
+        Ok(vol) => {
+            match vol_mgr.open_root_dir(vol) {
+                Err(e) => {
+                    log::error!("SD card: open root dir failed: {:?}", e);
+                    vol_mgr.close_volume(vol).ok();
+                }
+                Ok(root_dir) => {
+                    // List root directory contents
+                    log::info!("SD card: root directory:");
+                    vol_mgr.iterate_dir(root_dir, |entry| {
+                        if !entry.attributes.is_volume() && !entry.attributes.is_hidden() {
+                            log::info!("  {:12} {:8} bytes{}",
+                                entry.name,
+                                entry.size,
+                                if entry.attributes.is_directory() { "/" } else { "" },
+                            );
+                        }
+                    }).ok();
+
+                    // Write a test file
+                    match vol_mgr.open_file_in_dir(root_dir, "TEST.TXT", FileMode::ReadWriteCreateOrTruncate) {
+                        Err(e) => log::error!("SD card: create TEST.TXT failed: {:?}", e),
+                        Ok(file) => {
+                            match vol_mgr.write(file, b"Hello from ESP32-S3!\n") {
+                                Ok(()) => log::info!("SD card: wrote TEST.TXT"),
+                                Err(e) => log::error!("SD card: write failed: {:?}", e),
+                            }
+                            vol_mgr.close_file(file).ok();
+                        }
+                    }
+
+                    // Read it back
+                    match vol_mgr.open_file_in_dir(root_dir, "TEST.TXT", FileMode::ReadOnly) {
+                        Err(e) => log::error!("SD card: open TEST.TXT failed: {:?}", e),
+                        Ok(file) => {
+                            let mut buf = [0u8; 64];
+                            match vol_mgr.read(file, &mut buf) {
+                                Ok(n) => log::info!("SD card: read {} bytes: {:?}",
+                                    n, core::str::from_utf8(&buf[..n]).unwrap_or("(invalid utf8)")),
+                                Err(e) => log::error!("SD card: read failed: {:?}", e),
+                            }
+                            vol_mgr.close_file(file).ok();
+                        }
+                    }
+
+                    vol_mgr.close_dir(root_dir).ok();
+                    vol_mgr.close_volume(vol).ok();
+                }
+            }
+        }
     }
 
     // --- RTC setup ---

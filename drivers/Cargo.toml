@@ -11,12 +11,14 @@ imu     = []
 pmu     = []
 rtc     = []
 touch   = []
+sdcard  = ["dep:embedded-sdmmc"]
 
 [dependencies]
 defmt              = { workspace = true, optional = true }
 embedded-hal       = { workspace = true }
 embedded-hal-async = { workspace = true }
 embedded-graphics-core = { workspace = true }
+embedded-sdmmc    = { version = "0.8.2", optional = true }
 
 [dev-dependencies]
 # Fake SPI/I2C buses for unit-testing drivers without hardware.
