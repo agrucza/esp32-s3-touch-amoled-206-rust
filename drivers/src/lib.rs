@@ -5,12 +5,6 @@
 //!
 //!  - Drivers are portable across any HAL that implements those traits.
 //!  - Drivers can be unit-tested on the host with `embedded-hal-mock`.
-//!
-//! Modules are added milestone by milestone:
-//!   Milestone 1: firmware (BASIC BUILD)
-//!   Milestone 2: display  (RM67162 QSPI AMOLED)
-//!   Milestone 3: touch    (FT3168 I2C)
-//!   Milestone 4: pmu      (AXP2101 I2C)
 
 #![no_std]
 
