@@ -1,0 +1,225 @@
+//! Public data types for the QMI8658C IMU driver.
+
+// ---- Error type -----------------------------------------------------------------
+
+/// Error type for IMU operations.
+#[derive(Debug)]
+pub enum Error<E> {
+    /// An I2C transaction failed.
+    I2c(E),
+    /// WHO_AM_I register did not return the expected chip ID (0x05).
+    DeviceNotFound,
+    /// A CTRL9 command did not signal completion within the retry limit.
+    Timeout,
+}
+
+// ---- Accelerometer full-scale range ---------------------------------------------
+
+/// Accelerometer full-scale range (CTRL2 bits 6:4 = aFS[2:0]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AccelScale {
+    /// ±2 g  - sensitivity 16384 LSB/g.
+    G2,
+    /// ±4 g  - sensitivity 8192 LSB/g.
+    G4,
+    /// ±8 g  - sensitivity 4096 LSB/g.
+    G8,
+    /// ±16 g - sensitivity 2048 LSB/g.
+    G16,
+}
+
+impl AccelScale {
+    /// Sensitivity in LSB per g for this range.
+    ///
+    /// Divide a raw accelerometer reading by this value to get acceleration in g.
+    pub const fn lsb_per_g(self) -> u16 {
+        match self {
+            Self::G2  => 16384,
+            Self::G4  =>  8192,
+            Self::G8  =>  4096,
+            Self::G16 =>  2048,
+        }
+    }
+
+    /// Register bit value for CTRL2 bits 6:4.
+    pub(crate) const fn ctrl2_bits(self) -> u8 {
+        match self {
+            Self::G2  => 0b000,
+            Self::G4  => 0b001,
+            Self::G8  => 0b010,
+            Self::G16 => 0b011,
+        }
+    }
+}
+
+// ---- Gyroscope full-scale range -------------------------------------------------
+
+/// Gyroscope full-scale range (CTRL3 bits 6:4 = gFS[2:0]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GyroScale {
+    /// ±16 dps   - sensitivity 2048 LSB/dps.
+    Dps16,
+    /// ±32 dps   - sensitivity 1024 LSB/dps.
+    Dps32,
+    /// ±64 dps   - sensitivity 512 LSB/dps.
+    Dps64,
+    /// ±128 dps  - sensitivity 256 LSB/dps.
+    Dps128,
+    /// ±256 dps  - sensitivity 128 LSB/dps.
+    Dps256,
+    /// ±512 dps  - sensitivity 64 LSB/dps.
+    Dps512,
+    /// ±1024 dps - sensitivity 32 LSB/dps.
+    Dps1024,
+    /// ±2048 dps - sensitivity 16 LSB/dps.
+    Dps2048,
+}
+
+impl GyroScale {
+    /// Sensitivity in LSB per dps for this range.
+    ///
+    /// Divide a raw gyroscope reading by this value to get angular rate in dps.
+    pub const fn lsb_per_dps(self) -> u16 {
+        match self {
+            Self::Dps16   => 2048,
+            Self::Dps32   => 1024,
+            Self::Dps64   =>  512,
+            Self::Dps128  =>  256,
+            Self::Dps256  =>  128,
+            Self::Dps512  =>   64,
+            Self::Dps1024 =>   32,
+            Self::Dps2048 =>   16,
+        }
+    }
+
+    /// Register bit value for CTRL3 bits 6:4.
+    pub(crate) const fn ctrl3_bits(self) -> u8 {
+        match self {
+            Self::Dps16   => 0b000,
+            Self::Dps32   => 0b001,
+            Self::Dps64   => 0b010,
+            Self::Dps128  => 0b011,
+            Self::Dps256  => 0b100,
+            Self::Dps512  => 0b101,
+            Self::Dps1024 => 0b110,
+            Self::Dps2048 => 0b111,
+        }
+    }
+}
+
+// ---- Output data rate -----------------------------------------------------------
+
+/// Output data rate for accelerometer and gyroscope (bits 3:0 of CTRL2 / CTRL3).
+///
+/// Both sensors use the same ODR field encoding. The gyroscope only supports
+/// the Normal-mode rates (Hz8000-Hz31_25); the low-power rates are accel-only
+/// and are listed in [`AccelLpOdr`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Odr {
+    /// 8000 Hz (Normal mode, 100% duty cycle).
+    Hz8000,
+    /// 4000 Hz (Normal mode, 100% duty cycle).
+    Hz4000,
+    /// 2000 Hz (Normal mode, 100% duty cycle).
+    Hz2000,
+    /// 1000 Hz (Normal mode, 100% duty cycle).
+    Hz1000,
+    /// 500 Hz (Normal mode, 100% duty cycle).
+    Hz500,
+    /// 250 Hz (Normal mode, 100% duty cycle).
+    Hz250,
+    /// 125 Hz (Normal mode, 100% duty cycle).
+    Hz125,
+    /// 62.5 Hz (Normal mode, 100% duty cycle).
+    Hz62_5,
+    /// 31.25 Hz (Normal mode, 100% duty cycle).
+    Hz31_25,
+}
+
+impl Odr {
+    /// Register bit value for bits 3:0 of CTRL2 or CTRL3.
+    pub(crate) const fn bits(self) -> u8 {
+        match self {
+            Self::Hz8000  => 0b0000,
+            Self::Hz4000  => 0b0001,
+            Self::Hz2000  => 0b0010,
+            Self::Hz1000  => 0b0011,
+            Self::Hz500   => 0b0100,
+            Self::Hz250   => 0b0101,
+            Self::Hz125   => 0b0110,
+            Self::Hz62_5  => 0b0111,
+            Self::Hz31_25 => 0b1000,
+        }
+    }
+}
+
+// ---- Low-pass filter ------------------------------------------------------------
+
+/// Low-pass filter bandwidth mode (CTRL5 bits 6:5 for gyro, bits 2:1 for accel).
+///
+/// Cutoff frequency is expressed as a percentage of the configured ODR.
+/// At 125 Hz ODR: Mode0 = 3.3 Hz, Mode1 = 4.5 Hz, Mode2 = 6.6 Hz, Mode3 = 17.5 Hz.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LpfMode {
+    /// 2.62% of ODR.
+    Mode0,
+    /// 3.59% of ODR.
+    Mode1,
+    /// 5.32% of ODR.
+    Mode2,
+    /// 14.0% of ODR.
+    Mode3,
+}
+
+impl LpfMode {
+    pub(crate) const fn bits(self) -> u8 {
+        match self {
+            Self::Mode0 => 0b00,
+            Self::Mode1 => 0b01,
+            Self::Mode2 => 0b10,
+            Self::Mode3 => 0b11,
+        }
+    }
+}
+
+// ---- Sensor data snapshot -------------------------------------------------------
+
+/// A single snapshot of all IMU sensor data.
+///
+/// All values are raw 16-bit signed integers straight from the device.
+/// Use [`AccelScale::lsb_per_g`] and [`GyroScale::lsb_per_dps`] to convert
+/// to physical units, or call [`ImuData::temp_celsius`] for temperature.
+///
+/// # Converting raw readings
+///
+/// ```ignore
+/// let accel_x_g   = data.accel_x as f32 / config.accel_scale.lsb_per_g() as f32;
+/// let gyro_x_dps  = data.gyro_x  as f32 / config.gyro_scale.lsb_per_dps() as f32;
+/// ```
+#[derive(Debug, Clone, Default)]
+pub struct ImuData {
+    /// X-axis acceleration (raw signed 16-bit, little-endian from device).
+    pub accel_x: i16,
+    /// Y-axis acceleration.
+    pub accel_y: i16,
+    /// Z-axis acceleration.
+    pub accel_z: i16,
+    /// X-axis angular rate (raw signed 16-bit, little-endian from device).
+    pub gyro_x: i16,
+    /// Y-axis angular rate.
+    pub gyro_y: i16,
+    /// Z-axis angular rate.
+    pub gyro_z: i16,
+    /// Raw temperature value.  Divide by 256 for degrees Celsius.
+    pub temp_raw: i16,
+}
+
+impl ImuData {
+    /// Temperature rounded to the nearest whole degree Celsius.
+    ///
+    /// The QMI8658C encodes temperature as a signed 16-bit value with 1/256 °C
+    /// resolution, so `temp_raw / 256` gives the integer part.
+    pub fn temp_celsius(&self) -> i8 {
+        (self.temp_raw >> 8) as i8
+    }
+}

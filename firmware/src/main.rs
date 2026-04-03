@@ -8,6 +8,7 @@ mod display_hal;
 mod tasks;
 
 use display_hal::{CO5300, color};
+use drivers::imu::{Qmi8658, Config as ImuConfig};
 use drivers::touch::FT3168;
 use drivers::pmu::{Pmu, Config as PmuConfig};
 use drivers::rtc::{Rtc, Config as RtcConfig, DateTime as RtcDateTime};
@@ -169,6 +170,35 @@ async fn main(spawner: Spawner) {
         }
     }
 
+    // --- IMU setup ---
+    log::info!("IMU: initializing QMI8658C...");
+    let imu_config = ImuConfig::default();
+    let mut imu = Qmi8658::new(ImuConfig::default());
+    match imu.init(&mut i2c, &imu_config) {
+        Err(_) => log::error!("IMU: device not found at I2C address 0x{:02X}", drivers::imu::ADDR),
+        Ok(()) => {
+            match imu.read_ids(&mut i2c) {
+                Ok((chip_id, rev)) => log::info!("IMU: QMI8658C chip_id=0x{:02X} rev=0x{:02X}", chip_id, rev),
+                Err(_)             => log::warn!("IMU: init OK but failed to read IDs"),
+            }
+
+            // Wait for the gyroscope to fully wake up before sampling bias.
+            // Datasheet: gyro turn-on time = 60 ms + 3/ODR (at 125 Hz = ~84 ms).
+            Timer::after(Duration::from_millis(100)).await;
+
+            // 64 samples at 125 Hz ODR = ~512 ms - keep the device still.
+            log::info!("IMU: collecting gyro bias (keep device still ~512ms)...");
+            match imu.collect_gyro_bias(&mut i2c, 64) {
+                Err(_) => log::error!("IMU: failed to collect gyro bias"),
+                Ok((bx, by, bz)) => {
+                    log::info!("IMU: gyro bias raw [{} {} {}]", bx, by, bz);
+                    imu.set_gyro_bias(bx, by, bz);
+                    log::info!("IMU: gyro bias applied (software)");
+                }
+            }
+        }
+    }
+
     spawner.must_spawn(tasks::heartbeat::heartbeat());
 
     let colors = [color::RED, color::GREEN, color::BLUE];
@@ -189,6 +219,25 @@ async fn main(spawner: Spawner) {
                     drivers::touch::TouchEvent::None             => {}
                 }
             }
+        }
+
+        match imu.read(&mut i2c) {
+            Ok(data) => {
+                let scale_a = imu.accel_scale().lsb_per_g() as i32;
+                let scale_g = imu.gyro_scale().lsb_per_dps() as i32;
+                // Scale to milli-g and milli-dps to avoid floating point.
+                let ax = data.accel_x as i32 * 1000 / scale_a;
+                let ay = data.accel_y as i32 * 1000 / scale_a;
+                let az = data.accel_z as i32 * 1000 / scale_a;
+                let gx = data.gyro_x  as i32 * 1000 / scale_g;
+                let gy = data.gyro_y  as i32 * 1000 / scale_g;
+                let gz = data.gyro_z  as i32 * 1000 / scale_g;
+                log::info!(
+                    "IMU: accel [{:6} {:6} {:6}] mg  gyro [{:7} {:7} {:7}] mdps  temp {}°C",
+                    ax, ay, az, gx, gy, gz, data.temp_celsius()
+                );
+            }
+            Err(_) => log::warn!("IMU: read failed"),
         }
     }
 }

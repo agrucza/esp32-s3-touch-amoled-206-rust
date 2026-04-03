@@ -46,7 +46,7 @@ embedded-hal-async = { workspace = true }
 
 # --- Local crates ---
 app-core = { path = "../app-core" }
-drivers  = { path = "../drivers", features = ["display", "pmu", "rtc", "touch"] }
+drivers  = { path = "../drivers", features = ["display", "imu", "pmu", "rtc", "touch"] }
 
 embedded-graphics-core = { workspace = true }
 

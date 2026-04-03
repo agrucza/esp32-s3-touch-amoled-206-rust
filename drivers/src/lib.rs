@@ -17,6 +17,9 @@ pub mod touch;
 #[cfg(feature = "pmu")]
 pub mod pmu;
 
+#[cfg(feature = "imu")]
+pub mod imu;
+
 #[cfg(feature = "rtc")]
 pub mod rtc;
 

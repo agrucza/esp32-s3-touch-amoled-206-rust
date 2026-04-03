@@ -7,6 +7,7 @@ edition = "2021"
 default = ["defmt"]
 defmt   = ["dep:defmt"]
 display = []
+imu     = []
 pmu     = []
 rtc     = []
 touch   = []
