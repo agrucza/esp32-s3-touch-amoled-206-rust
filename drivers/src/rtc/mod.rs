@@ -1,6 +1,6 @@
 //! PCF85063A RTC driver - HAL-agnostic.
 //!
-//! NXP PCF85063ATL on the shared I²C bus.
+//! NXP PCF85063ATL on the shared I2C bus.
 //! Default address: 0x51.
 //! Interrupt pin: GPIO39 (active-low, driven on alarm or timer match).
 //!
@@ -16,10 +16,10 @@
 //!   0x04  Seconds       - [7]=OS (oscillator-stop flag) [6:0]=BCD seconds
 //!   0x05  Minutes       - [6:0]=BCD minutes
 //!   0x06  Hours         - [5:0]=BCD hours (24h mode)
-//!   0x07  Days          - [5:0]=BCD days (1–31)
-//!   0x08  Weekdays      - [2:0]=weekday (0=Sunday…6=Saturday)
-//!   0x09  Months        - [4:0]=BCD months (1–12)
-//!   0x0A  Years         - [7:0]=BCD years (00–99, i.e. 2000–2099)
+//!   0x07  Days          - [5:0]=BCD days (1-31)
+//!   0x08  Weekdays      - [2:0]=weekday (0=Sunday...6=Saturday)
+//!   0x09  Months        - [4:0]=BCD months (1-12)
+//!   0x0A  Years         - [7:0]=BCD years (00-99, i.e. 2000-2099)
 //!
 //!   Alarm registers (AEN bit 7: 1 = field disabled / not compared):
 //!   0x0B  Second_alarm  - [7]=AEN_S [6:0]=BCD seconds
@@ -32,9 +32,12 @@
 //!   0x10  Timer_value   - [7:0]=T[7:0]
 //!   0x11  Timer_mode    - [4:3]=TCF[1:0] [2]=TE [1]=TIE [0]=TI_TP
 //!
-//! Works with any I²C implementation that satisfies the `embedded-hal` traits.
-//! The I²C bus is passed by mutable reference on each call so it can be shared
-//! with the touch controller, PMU, and any other I²C peripheral.
+//! Works with any I2C implementation that satisfies the `embedded-hal` traits.
+//! The I2C bus is passed by mutable reference on each call so it can be shared
+//! with the touch controller, PMU, and any other I2C peripheral.
+
+pub mod types;
+pub use types::*;
 
 use embedded_hal::i2c::I2c as I2cTrait;
 
@@ -47,8 +50,8 @@ const REG_CTRL1:        u8 = 0x00;
 const REG_CTRL2:        u8 = 0x01;
 const REG_OFFSET:       u8 = 0x02;
 const REG_RAM:          u8 = 0x03;
-const REG_SECONDS:      u8 = 0x04; // burst-read start for time: 0x04–0x0A (7 bytes)
-const REG_ALARM_SECOND: u8 = 0x0B; // burst-write start for alarm: 0x0B–0x0F (5 bytes)
+const REG_SECONDS:      u8 = 0x04; // burst-read start for time: 0x04-0x0A (7 bytes)
+const REG_ALARM_SECOND: u8 = 0x0B; // burst-write start for alarm: 0x0B-0x0F (5 bytes)
 const REG_TIMER_VALUE:  u8 = 0x10;
 const REG_TIMER_MODE:   u8 = 0x11;
 
@@ -70,141 +73,7 @@ const TIMER_TI_TP: u8 = 1 << 0; // 0 = interrupt (INT# held low), 1 = pulse
 /// Set in an alarm register to disable (not compare) that field.
 const AEN: u8 = 1 << 7;
 
-// ---- Public types ---------------------------------------------------------------
-
-/// Error type for RTC operations.
-///
-/// Generic over `E` - the I2C error type from whichever HAL is used.
-#[derive(Debug)]
-pub enum Error<E> {
-    /// An I2C transaction failed; the inner value is the HAL's own error.
-    I2c(E),
-}
-
-/// A calendar date and time.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct DateTime {
-    pub year:    u16, // 2000–2099
-    pub month:   u8,  // 1–12
-    pub day:     u8,  // 1–31
-    pub weekday: u8,  // 0=Sunday … 6=Saturday
-    pub hour:    u8,  // 0–23
-    pub minute:  u8,  // 0–59
-    pub second:  u8,  // 0–59
-}
-
-impl DateTime {
-    pub fn new(year: u16, month: u8, day: u8, weekday: u8,
-               hour: u8, minute: u8, second: u8) -> Self {
-        Self { year, month, day, weekday, hour, minute, second }
-    }
-
-    /// Returns true if all fields are within legal ranges.
-    ///
-    /// Some PCF85063A chips don't set the OS flag on first power-up,
-    /// so callers should validate the read-back value as a second check.
-    pub fn is_valid(&self) -> bool {
-        self.year   >= 2024 && self.year <= 2099
-            && self.month   >= 1  && self.month  <= 12
-            && self.day     >= 1  && self.day    <= 31
-            && self.weekday <= 6
-            && self.hour    <= 23
-            && self.minute  <= 59
-            && self.second  <= 59
-    }
-}
-
-/// Alarm match condition.
-///
-/// Each field is `Option<u8>`. `Some(value)` enables matching on that field;
-/// `None` disables it (the chip's AEN bit is set, meaning "don't compare").
-///
-/// The alarm fires when **all enabled fields** match simultaneously.
-///
-/// # Examples
-///
-/// Fire every minute at second 0:
-/// ```ignore
-/// Alarm { second: Some(0), ..Alarm::disabled() }
-/// ```
-///
-/// Fire once at 07:30:00 on any day:
-/// ```ignore
-/// Alarm { hour: Some(7), minute: Some(30), second: Some(0), ..Alarm::disabled() }
-/// ```
-#[derive(Debug, Clone, Default)]
-pub struct Alarm {
-    /// Match on second (0–59). `None` = don't compare.
-    pub second:  Option<u8>,
-    /// Match on minute (0–59). `None` = don't compare.
-    pub minute:  Option<u8>,
-    /// Match on hour (0–23). `None` = don't compare.
-    pub hour:    Option<u8>,
-    /// Match on day of month (1–31). `None` = don't compare.
-    pub day:     Option<u8>,
-    /// Match on weekday (0=Sunday…6=Saturday). `None` = don't compare.
-    pub weekday: Option<u8>,
-}
-
-impl Alarm {
-    /// All fields disabled - no match will ever fire.
-    pub fn disabled() -> Self {
-        Self::default()
-    }
-}
-
-/// Countdown timer clock source (TCF[1:0] in Timer_mode register).
-///
-/// Determines the tick rate for the timer countdown value (0–255 ticks).
-/// Total timeout = `value / frequency`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TimerClock {
-    /// 4096 Hz - minimum period ~244 µs, max ~62 ms.
-    Hz4096 = 0b00,
-    /// 64 Hz - minimum period ~15.6 ms, max ~4 s.
-    Hz64   = 0b01,
-    /// 1 Hz - minimum period 1 s, max 255 s.
-    Hz1    = 0b10,
-    /// 1/60 Hz - minimum period 60 s, max 255 min.
-    Per60  = 0b11,
-}
-
-/// Timer interrupt output mode (TI_TP bit in Timer_mode register).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TimerOutput {
-    /// INT# is held low until the timer flag (TF) is cleared. Default.
-    Interrupt,
-    /// INT# pulses for a short time when the timer expires.
-    Pulse,
-}
-
-/// CLKOUT output frequency (COF[2:0] in Control_2 register).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ClkoutFreq {
-    Hz32768 = 0b000,
-    Hz16384 = 0b001,
-    Hz8192  = 0b010,
-    Hz4096  = 0b011,
-    Hz2048  = 0b100,
-    Hz1024  = 0b101,
-    Hz1     = 0b110,
-    /// CLKOUT pin disabled (high-impedance).
-    Off     = 0b111,
-}
-
-/// Offset calibration mode (MODE bit in Offset register).
-///
-/// The offset value is a 7-bit two's complement integer (`-64` to `+63`).
-/// Positive values speed the clock up; negative values slow it down.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum OffsetMode {
-    /// Correction applied once every two hours.
-    /// Step size: ±4.340 ppm (fine).
-    Normal,
-    /// Correction applied once every minute.
-    /// Step size: ±4.069 ppm (coarse, larger range).
-    Coarse,
-}
+// ---- Driver configuration -------------------------------------------------------
 
 /// PCF85063A RTC driver configuration.
 pub struct Config {
@@ -218,9 +87,11 @@ impl Default for Config {
     }
 }
 
+// ---- Driver ---------------------------------------------------------------------
+
 /// PCF85063A RTC driver.
 ///
-/// Holds only the I²C address. The I²C bus is passed by mutable reference
+/// Holds only the I2C address. The I2C bus is passed by mutable reference
 /// on every call so it can be freely shared with other peripherals.
 pub struct Rtc {
     addr: u8,
@@ -332,7 +203,7 @@ impl Rtc {
     where
         I2C: I2cTrait<Error = E>,
     {
-        // Burst-write alarm registers 0x0B–0x0F.
+        // Burst-write alarm registers 0x0B-0x0F.
         // AEN=1 (bit 7) means that field is not compared.
         let buf = [
             REG_ALARM_SECOND,
@@ -393,7 +264,7 @@ impl Rtc {
 
     /// Start the countdown timer.
     ///
-    /// The timer counts down from `value` (1–255) at the rate set by `clock`.
+    /// The timer counts down from `value` (1-255) at the rate set by `clock`.
     /// When it reaches zero it sets the TF flag in Control_2 and, if `output`
     /// is [`TimerOutput::Interrupt`], drives the INT# pin (GPIO39) low until
     /// [`clear_timer_flag`] is called. With [`TimerOutput::Pulse`] the pin
@@ -494,8 +365,8 @@ impl Rtc {
     ///
     /// | Mode   | Correction interval | Step size    |
     /// |--------|---------------------|--------------|
-    /// | Normal | Every two hours     | ±4.340 ppm   |
-    /// | Coarse | Every minute        | ±4.069 ppm   |
+    /// | Normal | Every two hours     | +-4.340 ppm  |
+    /// | Coarse | Every minute        | +-4.069 ppm  |
     ///
     /// Measure drift over several days before computing an offset - one step
     /// is small, so repeated adjustment is rarely needed.
