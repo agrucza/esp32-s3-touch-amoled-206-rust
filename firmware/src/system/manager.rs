@@ -4,6 +4,10 @@ use crate::display_hal::{self, CO5300, EspQspi};
 use crate::events::SystemEvent;
 use crate::sdcard_hal::EspVolumeManager;
 use crate::system::{audio::AudioSystem, input::InputSystem, power::PowerSystem, sensors::SensorSystem};
+use crate::ui::frame;
+use crate::ui::screens::ActiveScreen;
+use crate::ui::types::{Action, ScreenId, SystemData};
+use embedded_graphics::draw_target::DrawTarget;
 use embassy_time::{Duration, Timer};
 use esp_hal::{
     Blocking,
@@ -36,6 +40,12 @@ pub struct SystemManager<'d> {
     // DMA transfers
     tx_transfer: AudioTx<'d>,
     rx_transfer: AudioRx<'d>,
+
+    // UI
+    screen: ActiveScreen,
+    tick_count: u32,
+    touch_pos: Option<(u16, u16)>,
+    needs_redraw: bool,
 }
 
 /// All peripheral tokens needed by the system manager.
@@ -97,6 +107,9 @@ pub struct Peripherals<'d> {
 }
 
 impl<'d> SystemManager<'d> {
+    /// All available screens for the carousel dots.
+    const SCREENS: [ScreenId; 2] = [ScreenId::Status, ScreenId::CornerTest];
+
     /// Initialize all subsystems and assemble the system manager.
     ///
     /// This is the single entry point for the entire system. Call it from
@@ -177,13 +190,17 @@ impl<'d> SystemManager<'d> {
             storage,
             tx_transfer,
             rx_transfer,
+            screen: ActiveScreen::new(ScreenId::Status),
+            tick_count: 0,
+            touch_pos: None,
+            needs_redraw: true, // first frame always draws
         }
     }
 
     /// Run one iteration of the main loop.
     ///
-    /// Drains the audio DMA buffer, polls all event sources,
-    /// dispatches events, then sleeps for the tick interval.
+    /// Drains audio DMA, polls events, routes them through the
+    /// active screen. Only redraws the display when something changed.
     pub async fn tick(&mut self) {
         // Drain mic RX buffer to prevent overflow
         {
@@ -191,40 +208,71 @@ impl<'d> SystemManager<'d> {
             let _ = self.rx_transfer.pop(&mut pcm).await;
         }
 
-        // Poll phase - collect events from all subsystems
+        // Poll all subsystems for events
         let mut events: heapless::Vec<SystemEvent, 8> = heapless::Vec::new();
         self.input.poll(&mut self.i2c, &mut events);
         self.power.poll(&mut self.i2c, &mut events);
+        self.sensors.poll(&mut self.i2c, &mut events);
 
-        // Dispatch phase
+        // Track touch state and battery from events
         for event in events.iter() {
-            self.handle_event(event).await;
-        }
-
-        Timer::after(Duration::from_millis(10)).await;
-    }
-
-    /// Handle a single system event.
-    async fn handle_event(&mut self, event: &SystemEvent) {
-        match event {
-            SystemEvent::BootButtonPressed => {
-                log::info!("BTN: BOOT pressed");
-                self.power.buzz();
-                Timer::after(Duration::from_millis(200)).await;
-                self.power.buzz_stop();
-            }
-            SystemEvent::PowerButtonShort => {
-                log::info!("BTN: PWR short press");
-            }
-            SystemEvent::PowerButtonLong => {
-                log::info!("BTN: PWR long press");
-            }
-            SystemEvent::TouchPressed { x, y } => {
-                log::info!("Touch: ({}, {})", x, y);
-            }
-            SystemEvent::TouchReleased => {
-                log::info!("Touch: released");
+            match event {
+                SystemEvent::TouchPressed { x, y } => self.touch_pos = Some((*x, *y)),
+                SystemEvent::TouchReleased => self.touch_pos = None,
+                _ => {}
             }
         }
+
+        // Any event triggers a redraw
+        if !events.is_empty() {
+            self.needs_redraw = true;
+        }
+
+        // Build data snapshot for rendering
+        let time = self.sensors.read_time(&mut self.i2c);
+        let imu = self.sensors.imu.read(&mut self.i2c).ok();
+        let battery = self.power.battery_percent(&mut self.i2c);
+        let data = SystemData::from_sensors(
+            time.as_ref(),
+            imu.as_ref(),
+            self.touch_pos,
+            battery,
+            self.tick_count,
+        );
+
+        for event in events.iter() {
+            match self.screen.on_event(event, &data) {
+                Action::None => {}
+                Action::Redraw => self.needs_redraw = true,
+                Action::SwitchScreen(id) => {
+                    self.screen.switch_to(id);
+                    self.needs_redraw = true;
+                }
+                Action::Shutdown => {
+                    log::info!("System: shutdown requested");
+                    self.power.shutdown();
+                }
+            }
+        }
+
+        // Haptic feedback on boot button (system-level, not screen-specific)
+        if events.iter().any(|e| matches!(e, SystemEvent::BootButtonPressed)) {
+            self.power.buzz();
+            Timer::after(Duration::from_millis(100)).await;
+            self.power.buzz_stop();
+        }
+
+        // Only redraw when something changed
+        if self.needs_redraw {
+            self.display.clear(crate::ui::theme::BG).ok();
+            frame::draw_header(&mut self.display, &data);
+            frame::draw_footer(&mut self.display, self.screen.id(), &Self::SCREENS);
+            self.screen.render(&mut self.display, &data);
+            self.display.flush().await;
+            self.needs_redraw = false;
+        }
+
+        self.tick_count = self.tick_count.wrapping_add(1);
+        Timer::after(Duration::from_millis(50)).await;
     }
 }

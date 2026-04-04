@@ -5,8 +5,9 @@ use esp_hal::gpio::Output;
 
 pub struct PowerSystem<'d> {
     pmu: Pmu,
-    _sys_out: Output<'d>,
+    sys_out: Output<'d>,
     motor: Output<'d>,
+    last_battery: u8,
 }
 
 impl<'d> PowerSystem<'d> {
@@ -37,13 +38,15 @@ impl<'d> PowerSystem<'d> {
 
         Ok(Self {
             pmu,
-            _sys_out: sys_out,
+            sys_out,
             motor,
+            last_battery: 0xFF,
         })
     }
 
-    /// Poll PMU interrupt registers and return any power button events.
-    pub fn poll(&self, i2c: &mut impl I2c, events: &mut heapless::Vec<SystemEvent, 8>) {
+    /// Poll PMU interrupts and battery level, push events for any changes.
+    pub fn poll(&mut self, i2c: &mut impl I2c, events: &mut heapless::Vec<SystemEvent, 8>) {
+        // Power button interrupts
         if let Ok(irq) = self.pmu.read_interrupts(i2c) {
             if !irq.is_empty() {
                 if irq.is_active(InterruptSource::PowerOnShortPress) {
@@ -55,6 +58,25 @@ impl<'d> PowerSystem<'d> {
                 let _ = self.pmu.clear_interrupts(i2c, &irq);
             }
         }
+
+        // Battery percentage change
+        if let Ok(pct) = self.pmu.battery_percent(i2c) {
+            if pct != self.last_battery {
+                self.last_battery = pct;
+                let _ = events.push(SystemEvent::BatteryChanged { percent: pct });
+            }
+        }
+    }
+
+    /// Release the SYS_OUT latch - powers down the board.
+    pub fn shutdown(&mut self) {
+        log::info!("PWR: releasing SYS_OUT latch - powering off");
+        self.sys_out.set_high();
+    }
+
+    /// Read battery percentage (0-100%).
+    pub fn battery_percent(&self, i2c: &mut impl I2c) -> Option<u8> {
+        self.pmu.battery_percent(i2c).ok()
     }
 
     pub fn buzz(&mut self) {

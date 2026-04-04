@@ -10,6 +10,7 @@ mod sdcard_hal;
 mod audio_hal;
 mod system;
 mod tasks;
+mod ui;
 
 use system::manager::{SystemManager, Peripherals};
 use esp_backtrace as _;

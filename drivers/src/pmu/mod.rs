@@ -112,6 +112,9 @@ impl Pmu {
         // Enable all six LDOs in one register write.
         self.enable_all_rails(i2c)?;
 
+        // Enable battery ADC and fuel gauge for battery monitoring.
+        self.enable_battery_monitor(i2c)?;
+
         Ok(chip_id)
     }
 
@@ -240,6 +243,47 @@ impl Pmu {
     {
         self.write_register(i2c, registers::REG_LDO_EN0, 0x00)?;
         self.write_register(i2c, registers::REG_LDO_EN1, 0x00)
+    }
+
+    // ---- Battery monitoring ---------------------------------------------------
+
+    /// Enable battery voltage ADC and fuel gauge.
+    ///
+    /// Called automatically during `init()`. The fuel gauge needs a few
+    /// seconds after enabling to produce an accurate percentage reading.
+    pub fn enable_battery_monitor<I2C, E>(&self, i2c: &mut I2C) -> Result<(), Error<E>>
+    where
+        I2C: I2cTrait<Error = E>,
+    {
+        // Enable battery voltage ADC (bit 0 of REG_ADC_EN)
+        let adc = self.read_register(i2c, registers::REG_ADC_EN)?;
+        self.write_register(i2c, registers::REG_ADC_EN, adc | registers::adc_en::BAT_VOLT)?;
+
+        // Enable fuel gauge (bit 3 of REG_CHARGER_GAUGE_WDT_EN)
+        let gauge = self.read_register(i2c, registers::REG_CHARGER_GAUGE_WDT_EN)?;
+        self.write_register(i2c, registers::REG_CHARGER_GAUGE_WDT_EN, gauge | (1 << 3))
+    }
+
+    /// Read battery state of charge (0-100%).
+    ///
+    /// Returns `None` if the fuel gauge hasn't produced a reading yet.
+    pub fn battery_percent<I2C, E>(&self, i2c: &mut I2C) -> Result<u8, Error<E>>
+    where
+        I2C: I2cTrait<Error = E>,
+    {
+        self.read_register(i2c, registers::REG_BAT_PERCENT)
+    }
+
+    /// Read battery voltage in millivolts.
+    ///
+    /// The ADC produces a 14-bit value with 1 mV per LSB.
+    pub fn battery_voltage_mv<I2C, E>(&self, i2c: &mut I2C) -> Result<u16, Error<E>>
+    where
+        I2C: I2cTrait<Error = E>,
+    {
+        let hi = self.read_register(i2c, registers::REG_VBAT_H)? as u16;
+        let lo = self.read_register(i2c, registers::REG_VBAT_L)? as u16;
+        Ok((hi << 8) | lo)
     }
 
     // ---- private helpers ----------------------------------------------------

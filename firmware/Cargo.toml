@@ -50,6 +50,7 @@ app-core = { path = "../app-core" }
 drivers  = { path = "../drivers", features = ["display", "imu", "pmu", "rtc", "touch", "sdcard", "es8311", "es7210"] }
 
 embedded-graphics-core = { workspace = true }
+embedded-graphics      = "0.8.2"
 
 # --- Stack-allocated collections ---
 heapless = "0.9.2"

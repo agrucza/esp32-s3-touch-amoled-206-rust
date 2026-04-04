@@ -5,6 +5,7 @@
 /// event handling (actions/state changes).
 #[derive(Debug, Clone)]
 pub enum SystemEvent {
+    // -- Input --
     /// BOOT button pressed (falling edge)
     BootButtonPressed,
     /// Power button short press (from PMU interrupt)
@@ -15,4 +16,10 @@ pub enum SystemEvent {
     TouchPressed { x: u16, y: u16 },
     /// Touch screen released
     TouchReleased,
+
+    // -- State changes --
+    /// Clock minute changed
+    MinuteChanged,
+    /// Battery percentage changed
+    BatteryChanged { percent: u8 },
 }

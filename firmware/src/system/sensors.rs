@@ -1,3 +1,4 @@
+use crate::events::SystemEvent;
 use drivers::imu::{Qmi8658, Config as ImuConfig};
 use drivers::rtc::{Rtc, Config as RtcConfig, DateTime as RtcDateTime};
 use embedded_hal::i2c::I2c;
@@ -6,6 +7,7 @@ use embassy_time::{Duration, Timer};
 pub struct SensorSystem {
     pub imu: Qmi8658,
     pub rtc: Rtc,
+    last_minute: u8,
 }
 
 impl SensorSystem {
@@ -70,7 +72,17 @@ impl SensorSystem {
             }
         }
 
-        Self { imu, rtc }
+        Self { imu, rtc, last_minute: 0xFF }
+    }
+
+    /// Poll for time changes, push MinuteChanged when the minute rolls over.
+    pub fn poll(&mut self, i2c: &mut impl I2c, events: &mut heapless::Vec<SystemEvent, 8>) {
+        if let Ok(dt) = self.rtc.get(i2c) {
+            if dt.minute != self.last_minute {
+                self.last_minute = dt.minute;
+                let _ = events.push(SystemEvent::MinuteChanged);
+            }
+        }
     }
 
     /// Read current time from RTC.
