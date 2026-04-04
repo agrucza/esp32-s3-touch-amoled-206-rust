@@ -47,7 +47,7 @@ embedded-hal-bus   = { version = "0.3.0" }
 
 # --- Local crates ---
 app-core = { path = "../app-core" }
-drivers  = { path = "../drivers", features = ["display", "imu", "pmu", "rtc", "touch", "sdcard"] }
+drivers  = { path = "../drivers", features = ["display", "imu", "pmu", "rtc", "touch", "sdcard", "es8311", "es7210"] }
 
 embedded-graphics-core = { workspace = true }
 

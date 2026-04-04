@@ -96,8 +96,8 @@ pub const SD_CS:   u8 = 17;
 // =============================================================================
 pub const SPEAKER_MCLK:  u8 = 16;
 pub const SPEAKER_SCLK:  u8 = 41;
-pub const MIC_DSIN:      u8 = 40;
-pub const MIC_ASDOUT:    u8 = 42;
+pub const MIC_DSIN:      u8 = 40;  // ESP32 TX -> ES8311 DAC data in (DSDIN)
+pub const MIC_ASDOUT:    u8 = 42;  // ES7210 ADC data out -> ESP32 RX (ASDOUT)
 pub const MIC_LRCK:      u8 = 45;
 pub const MIC_PA_CTRL:   u8 = 46;  // PA enable (active high)
 

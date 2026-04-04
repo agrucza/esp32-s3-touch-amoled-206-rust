@@ -26,6 +26,12 @@ pub mod sdcard;
 #[cfg(feature = "touch")]
 pub mod touch;
 
+#[cfg(feature = "es8311")]
+pub mod es8311;
+
+#[cfg(feature = "es7210")]
+pub mod es7210;
+
 pub use embedded_hal;
 
 #[cfg(feature = "defmt")]

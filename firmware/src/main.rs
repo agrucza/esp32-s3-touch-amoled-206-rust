@@ -6,6 +6,7 @@ extern crate alloc;
 mod board;
 mod display_hal;
 mod sdcard_hal;
+mod audio_hal;
 mod tasks;
 
 use display_hal::{CO5300, color};
@@ -14,8 +15,11 @@ use drivers::imu::{Qmi8658, Config as ImuConfig};
 use drivers::touch::FT3168;
 use drivers::pmu::{Pmu, Config as PmuConfig};
 use drivers::rtc::{Rtc, Config as RtcConfig, DateTime as RtcDateTime};
+use drivers::es8311::Es8311;
+use drivers::es7210::Es7210;
 use embassy_executor::Spawner;
 use embassy_time::{Duration, Timer};
+use embedded_hal::i2c;
 use esp_backtrace as _;
 use esp_hal::{
     gpio::{Input, InputConfig, Level, Output, OutputConfig, Pull},
@@ -291,11 +295,90 @@ async fn main(spawner: Spawner) {
         }
     }
 
+    // --- I2S setup (must start before codec init so MCLK is running) ---
+    // 100 ms of 16-bit stereo at 16 kHz = 16000 * 2ch * 2B * 0.1s = 6400 bytes
+    // Round up to 8192 for comfortable DMA headroom.
+    let (rx_buffer, rx_descriptors, tx_buffer, tx_descriptors) =
+        esp_hal::dma_circular_buffers!(16384, 16384);
+
+    let pa_pin = Output::new(p.GPIO46, Level::Low, OutputConfig::default());
+    let mut speaker_amp = audio_hal::SpeakerAmp::new(pa_pin);
+
+    let (mut i2s_tx, mut i2s_rx) = audio_hal::build_i2s(
+        p.I2S0,
+        p.DMA_CH1,
+        p.GPIO16, // MCLK
+        p.GPIO41, // BCLK/SCLK
+        p.GPIO45, // LRCK/WS
+        p.GPIO40, // DOUT: ESP32 TX -> ES8311 DSDIN
+        p.GPIO42, // DIN:  ES7210 ASDOUT -> ESP32 RX
+        tx_descriptors,
+        rx_descriptors,
+    );
+
+    // Start async circular DMA (buffer is zeroed = silence)
+    let mut tx_transfer = i2s_tx.write_dma_circular_async(tx_buffer).unwrap();
+    let mut rx_transfer = i2s_rx.read_dma_circular_async(rx_buffer).unwrap();
+    log::info!("Audio: I2S DMA started");
+
+    // Let MCLK stabilize before configuring codecs
+    Timer::after(Duration::from_millis(10)).await;
+
+    // --- Codec (ES8311 DAC) setup - requires MCLK ---
+    log::info!("Codec: initializing ES8311...");
+    let codec = Es8311::new();
+    match codec.init(&mut i2c) {
+        Ok(()) => {
+            match codec.read_ids(&mut i2c) {
+                Ok(ids) => log::info!("Codec: ES8311 ids [{:02X} {:02X} {:02X}]", ids[0], ids[1], ids[2]),
+                Err(_)  => log::warn!("Codec: init OK but failed to read IDs"),
+            }
+        }
+        Err(_) => log::error!("Codec: ES8311 not found at I2C address 0x{:02X}", drivers::es8311::ADDR),
+    }
+
+    // --- ADC/mic (ES7210) setup - requires MCLK, three-step init with delays ---
+    log::info!("Mic ADC: initializing ES7210...");
+    let adc_mic = Es7210::new();
+    match adc_mic.init(&mut i2c) {
+        Ok(()) => {
+            Timer::after(Duration::from_millis(10)).await;
+            match adc_mic.init_after_delay(&mut i2c) {
+                Ok(()) => {
+                    Timer::after(Duration::from_millis(10)).await;
+                    match adc_mic.finalize(&mut i2c) {
+                        Ok(()) => log::info!("Mic ADC: ES7210 ready"),
+                        Err(_) => log::error!("Mic ADC: finalize failed"),
+                    }
+                }
+                Err(_) => log::error!("Mic ADC: config failed"),
+            }
+        }
+        Err(_) => log::error!("Mic ADC: ES7210 not found at I2C address 0x{:02X}", drivers::es7210::ADDR),
+    }
+
+    // Enable speaker amp after codecs are configured
+    speaker_amp.enable();
+    log::info!("Audio: ready");
+
+    // Drain any stale mic data that accumulated during init
+    {
+        let mut drain = alloc::vec![0u8; 16384];
+        match rx_transfer.pop(&mut drain).await {
+            Ok(n) => log::info!("Audio: drained {} bytes", n),
+            Err(_) => log::info!("Audio: drain skipped"),
+        }
+    }
+
+    // Reduce speaker volume slightly to help prevent mic feedback
+    // 0xBF = 0dB, 0xAF = -8dB, 0x9F = -16dB
+    let _ = codec.set_volume(&mut i2c, 0xAF);
+
     spawner.must_spawn(tasks::heartbeat::heartbeat());
 
     let colors = [color::RED, color::GREEN, color::BLUE];
     let mut color_index = 0;
-    let mut btn_boot_prev = false; // tracks last known pressed state
+    let mut btn_boot_prev = false;
 
     loop {
         log::info!("Updating display to color index: {}", color_index);
@@ -304,7 +387,11 @@ async fn main(spawner: Spawner) {
         color_index = (color_index + 1) % colors.len();
 
         for _ in 0..50 {
-            Timer::after(Duration::from_millis(20)).await;
+            // Drain mic RX buffer to prevent overflow (data not used yet)
+            {
+                let mut pcm = alloc::vec![0u8; 16384];
+                let _ = rx_transfer.pop(&mut pcm).await;
+            }
 
             // BOOT button (GPIO0, active-low) - fire only on falling edge.
             let btn_boot_now = btn_boot.is_low();
@@ -317,7 +404,6 @@ async fn main(spawner: Spawner) {
             btn_boot_prev = btn_boot_now;
 
             // PWR button via PMU interrupt status (AXP2101 PWRON pin).
-            // The IRQ pin is not wired to an ESP32 GPIO so we poll the registers.
             if let Ok(irq) = pmu.read_interrupts(&mut i2c) {
                 if !irq.is_empty() {
                     if irq.is_active(drivers::pmu::InterruptSource::PowerOnShortPress) {
@@ -326,7 +412,6 @@ async fn main(spawner: Spawner) {
                     if irq.is_active(drivers::pmu::InterruptSource::PowerOnLongPress) {
                         log::info!("BTN: PWR long press");
                     }
-                    // Clear all active flags (write 1 to clear, RW1C).
                     let _ = pmu.clear_interrupts(&mut i2c, &irq);
                 }
             }
@@ -344,7 +429,6 @@ async fn main(spawner: Spawner) {
             Ok(data) => {
                 let scale_a = imu.accel_scale().lsb_per_g() as i32;
                 let scale_g = imu.gyro_scale().lsb_per_dps() as i32;
-                // Scale to milli-g and milli-dps to avoid floating point.
                 let ax = data.accel_x as i32 * 1000 / scale_a;
                 let ay = data.accel_y as i32 * 1000 / scale_a;
                 let az = data.accel_z as i32 * 1000 / scale_a;

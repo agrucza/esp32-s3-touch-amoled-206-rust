@@ -12,6 +12,8 @@ pmu     = []
 rtc     = []
 touch   = []
 sdcard  = ["dep:embedded-sdmmc"]
+es8311  = []
+es7210  = []
 
 [dependencies]
 defmt              = { workspace = true, optional = true }
