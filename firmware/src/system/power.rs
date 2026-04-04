@@ -1,3 +1,4 @@
+use crate::events::SystemEvent;
 use drivers::pmu::{Pmu, Config as PmuConfig, InterruptSource};
 use embedded_hal::i2c::I2c;
 use esp_hal::gpio::Output;
@@ -41,15 +42,15 @@ impl<'d> PowerSystem<'d> {
         })
     }
 
-    /// Poll PMU interrupt registers for power button events.
-    pub fn poll_pwr_button(&self, i2c: &mut impl I2c) {
+    /// Poll PMU interrupt registers and return any power button events.
+    pub fn poll(&self, i2c: &mut impl I2c, events: &mut heapless::Vec<SystemEvent, 8>) {
         if let Ok(irq) = self.pmu.read_interrupts(i2c) {
             if !irq.is_empty() {
                 if irq.is_active(InterruptSource::PowerOnShortPress) {
-                    log::info!("BTN: PWR short press");
+                    let _ = events.push(SystemEvent::PowerButtonShort);
                 }
                 if irq.is_active(InterruptSource::PowerOnLongPress) {
-                    log::info!("BTN: PWR long press");
+                    let _ = events.push(SystemEvent::PowerButtonLong);
                 }
                 let _ = self.pmu.clear_interrupts(i2c, &irq);
             }

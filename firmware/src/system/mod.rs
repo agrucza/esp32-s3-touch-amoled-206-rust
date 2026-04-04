@@ -1,6 +1,7 @@
-pub mod power;
+pub mod audio;
 pub mod display;
 pub mod input;
+pub mod manager;
+pub mod power;
 pub mod sensors;
-pub mod audio;
 pub mod storage;

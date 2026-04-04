@@ -1,3 +1,4 @@
+use crate::events::SystemEvent;
 use drivers::touch::{FT3168, TouchEvent};
 use embedded_hal::i2c::I2c;
 use embassy_time::{Duration, Timer};
@@ -6,8 +7,8 @@ use esp_hal::gpio::{Input, Output};
 pub struct InputSystem<'d> {
     btn_boot: Input<'d>,
     btn_boot_prev: bool,
-    pub touch: FT3168<Output<'d>>,
-    pub touch_int: Input<'d>,
+    touch: FT3168<Output<'d>>,
+    touch_int: Input<'d>,
 }
 
 impl<'d> InputSystem<'d> {
@@ -44,20 +45,26 @@ impl<'d> InputSystem<'d> {
         }
     }
 
-    /// Returns true on the falling edge of the BOOT button (press detected).
-    pub fn poll_boot_button(&mut self) -> bool {
+    /// Poll all input sources and push events into the buffer.
+    pub fn poll(&mut self, i2c: &mut impl I2c, events: &mut heapless::Vec<SystemEvent, 8>) {
+        // BOOT button - falling edge detection
         let now = self.btn_boot.is_low();
-        let pressed = now && !self.btn_boot_prev;
+        if now && !self.btn_boot_prev {
+            let _ = events.push(SystemEvent::BootButtonPressed);
+        }
         self.btn_boot_prev = now;
-        pressed
-    }
 
-    /// Poll touch controller if the interrupt pin or state indicates activity.
-    pub fn poll_touch(&mut self, i2c: &mut impl I2c) -> TouchEvent {
+        // Touch controller
         if self.touch_int.is_low() || self.touch.is_pressed() {
-            self.touch.read(i2c)
-        } else {
-            TouchEvent::None
+            match self.touch.read(i2c) {
+                TouchEvent::Pressed { x, y } => {
+                    let _ = events.push(SystemEvent::TouchPressed { x, y });
+                }
+                TouchEvent::Released => {
+                    let _ = events.push(SystemEvent::TouchReleased);
+                }
+                TouchEvent::None => {}
+            }
         }
     }
 }
