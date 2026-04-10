@@ -16,10 +16,32 @@ pub enum SystemEvent {
     TouchPressed { x: u16, y: u16 },
     /// Touch screen released
     TouchReleased,
+    /// Swipe gesture completed on release
+    Swipe { dir: SwipeDir, region: SwipeRegion },
 
     // -- State changes --
     /// Clock minute changed
     MinuteChanged,
     /// Battery percentage changed
     BatteryChanged { percent: u8 },
+}
+
+/// Direction of a swipe gesture.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SwipeDir {
+    Left,
+    Right,
+    Up,
+    Down,
+}
+
+/// Screen region where a swipe gesture started.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SwipeRegion {
+    /// Gesture started in the header band (above CONTENT_TOP).
+    Header,
+    /// Gesture started in the content band.
+    Content,
+    /// Gesture started in the footer band (below CONTENT_BOTTOM).
+    Footer,
 }

@@ -9,6 +9,7 @@ pub const RED:      Rgb565 = Rgb565::new(31, 0, 2);     // #F80010 - warning/dan
 pub const YELLOW:   Rgb565 = Rgb565::new(31, 58, 0);    // #F8E800 - highlights/active
 pub const DIM_CYAN: Rgb565 = Rgb565::new(0, 20, 10);    // #005050 - inactive/border dim
 pub const DARK_RED: Rgb565 = Rgb565::new(10, 0, 0);     // #500000 - bar background
+pub const PANEL_BG: Rgb565 = Rgb565::new(1, 1, 1);      // dark grey overlay background
 
 // -- Screen geometry --
 pub const SCREEN_W: u16 = 410;

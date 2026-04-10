@@ -61,6 +61,7 @@ pub struct SystemData {
 
     // Power
     pub battery_percent: Option<u8>,
+    pub battery_voltage_mv: Option<u16>,
 
     // System
     pub tick_count: u32,
@@ -72,6 +73,7 @@ impl SystemData {
         imu: Option<&ImuData>,
         touch: Option<(u16, u16)>,
         battery_percent: Option<u8>,
+        battery_voltage_mv: Option<u16>,
         tick_count: u32,
     ) -> Self {
         Self {
@@ -91,6 +93,7 @@ impl SystemData {
             touch_x: touch.map(|(x, _)| x),
             touch_y: touch.map(|(_, y)| y),
             battery_percent,
+            battery_voltage_mv,
             tick_count,
         }
     }

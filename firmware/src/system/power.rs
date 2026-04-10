@@ -79,6 +79,11 @@ impl<'d> PowerSystem<'d> {
         self.pmu.battery_percent(i2c).ok()
     }
 
+    /// Read battery voltage in millivolts.
+    pub fn battery_voltage_mv(&self, i2c: &mut impl I2c) -> Option<u16> {
+        self.pmu.battery_voltage_mv(i2c).ok()
+    }
+
     pub fn buzz(&mut self) {
         self.motor.set_high();
     }

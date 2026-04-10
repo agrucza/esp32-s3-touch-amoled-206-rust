@@ -1,10 +1,11 @@
 extern crate alloc;
 
 use crate::display_hal::{self, CO5300, EspQspi};
-use crate::events::SystemEvent;
+use crate::events::{SwipeDir, SwipeRegion, SystemEvent};
 use crate::sdcard_hal::EspVolumeManager;
 use crate::system::{audio::AudioSystem, input::InputSystem, power::PowerSystem, sensors::SensorSystem};
 use crate::ui::frame;
+use crate::ui::panel;
 use crate::ui::screens::ActiveScreen;
 use crate::ui::types::{Action, ScreenId, SystemData};
 use embedded_graphics::draw_target::DrawTarget;
@@ -43,6 +44,7 @@ pub struct SystemManager<'d> {
 
     // UI
     screen: ActiveScreen,
+    panel_open: bool,
     tick_count: u32,
     touch_pos: Option<(u16, u16)>,
     needs_redraw: bool,
@@ -109,6 +111,18 @@ pub struct Peripherals<'d> {
 impl<'d> SystemManager<'d> {
     /// All available screens for the carousel dots.
     const SCREENS: [ScreenId; 2] = [ScreenId::Status, ScreenId::CornerTest];
+
+    /// Return the next (forward=true) or previous screen in SCREENS, wrapping.
+    fn cycle_screen(current: ScreenId, forward: bool) -> ScreenId {
+        let idx = Self::SCREENS.iter().position(|s| *s == current).unwrap_or(0);
+        let len = Self::SCREENS.len();
+        let next = if forward {
+            (idx + 1) % len
+        } else {
+            (idx + len - 1) % len
+        };
+        Self::SCREENS[next]
+    }
 
     /// Initialize all subsystems and assemble the system manager.
     ///
@@ -191,6 +205,7 @@ impl<'d> SystemManager<'d> {
             tx_transfer,
             rx_transfer,
             screen: ActiveScreen::new(ScreenId::Status),
+            panel_open: false,
             tick_count: 0,
             touch_pos: None,
             needs_redraw: true, // first frame always draws
@@ -232,15 +247,71 @@ impl<'d> SystemManager<'d> {
         let time = self.sensors.read_time(&mut self.i2c);
         let imu = self.sensors.imu.read(&mut self.i2c).ok();
         let battery = self.power.battery_percent(&mut self.i2c);
+        let battery_mv = self.power.battery_voltage_mv(&mut self.i2c);
         let data = SystemData::from_sensors(
             time.as_ref(),
             imu.as_ref(),
             self.touch_pos,
             battery,
+            battery_mv,
             self.tick_count,
         );
 
         for event in events.iter() {
+            // Log every swipe so we can verify detection across all regions.
+            if let SystemEvent::Swipe { dir, region } = event {
+                log::info!("Swipe: {:?} in {:?}", dir, region);
+            }
+
+            // ---------- Panel is open: absorb events ----------
+            if self.panel_open {
+                match event {
+                    // Close on any upward swipe.
+                    SystemEvent::Swipe { dir: SwipeDir::Up, .. } => {
+                        self.panel_open = false;
+                        self.needs_redraw = true;
+                    }
+                    // Close on tap inside the close-button hit box.
+                    SystemEvent::TouchPressed { x, y } if panel::hit_close(*x, *y) => {
+                        self.panel_open = false;
+                        self.needs_redraw = true;
+                    }
+                    _ => {}
+                }
+                // While the panel owns the UI, nothing else sees this event.
+                continue;
+            }
+
+            // ---------- Panel is closed: normal routing ----------
+
+            // Swipe-down in the header opens the panel.
+            if let SystemEvent::Swipe { dir: SwipeDir::Down, region: SwipeRegion::Header } = event {
+                self.panel_open = true;
+                self.needs_redraw = true;
+                continue;
+            }
+
+            // Content left/right swipes cycle screens and are NOT forwarded
+            // to the active screen. Screens can use up/down swipes for their
+            // own scrolling/interaction.
+            if let SystemEvent::Swipe { dir, region: SwipeRegion::Content } = event {
+                match dir {
+                    SwipeDir::Right => {
+                        let next = Self::cycle_screen(self.screen.id(), true);
+                        self.screen.switch_to(next);
+                        self.needs_redraw = true;
+                        continue;
+                    }
+                    SwipeDir::Left => {
+                        let prev = Self::cycle_screen(self.screen.id(), false);
+                        self.screen.switch_to(prev);
+                        self.needs_redraw = true;
+                        continue;
+                    }
+                    _ => {}
+                }
+            }
+
             match self.screen.on_event(event, &data) {
                 Action::None => {}
                 Action::Redraw => self.needs_redraw = true,
@@ -265,9 +336,14 @@ impl<'d> SystemManager<'d> {
         // Only redraw when something changed
         if self.needs_redraw {
             self.display.clear(crate::ui::theme::BG).ok();
+            // Always draw the normal screen stack - the panel (when open)
+            // overlays the top 2/3 and leaves the bottom third visible.
             frame::draw_header(&mut self.display, &data);
             frame::draw_footer(&mut self.display, self.screen.id(), &Self::SCREENS);
             self.screen.render(&mut self.display, &data);
+            if self.panel_open {
+                panel::draw(&mut self.display, &data);
+            }
             self.display.flush().await;
             self.needs_redraw = false;
         }
