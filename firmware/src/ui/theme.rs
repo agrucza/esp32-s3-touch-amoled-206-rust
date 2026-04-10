@@ -1,29 +1,59 @@
-//! Cyberpunk color palette and layout constants.
+//! Deus Ex: Mankind Divided inspired palette and layout constants.
+//!
+//! Dominant amber on true-black with white data values. Teal for the
+//! battery accent, green for success, red for warnings. Pure black
+//! background keeps AMOLED pixels off when idle.
 
 use embedded_graphics::pixelcolor::Rgb565;
 
-// -- Primary palette --
-pub const BG:       Rgb565 = Rgb565::new(0, 0, 0);     // true black - AMOLED pixels off
-pub const CYAN:     Rgb565 = Rgb565::new(0, 63, 31);    // #00FFFF
-pub const RED:      Rgb565 = Rgb565::new(31, 0, 2);     // #F80010 - warning/danger
-pub const YELLOW:   Rgb565 = Rgb565::new(31, 58, 0);    // #F8E800 - highlights/active
-pub const DIM_CYAN: Rgb565 = Rgb565::new(0, 20, 10);    // #005050 - inactive/border dim
-pub const DARK_RED: Rgb565 = Rgb565::new(10, 0, 0);     // #500000 - bar background
-pub const PANEL_BG: Rgb565 = Rgb565::new(1, 1, 1);      // dark grey overlay background
+// -- Palette -----------------------------------------------------------------
 
-// -- Screen geometry --
+/// Background: true black so inactive AMOLED pixels are fully off.
+pub const BG:         Rgb565 = Rgb565::new(0, 0, 0);
+/// Subtle panel fill for overlays (barely above pure black).
+pub const PANEL_BG:   Rgb565 = Rgb565::new(2, 4, 2);
+/// Primary accent: Jensen amber. Used for labels, headings, brackets.
+pub const AMBER:      Rgb565 = Rgb565::new(29, 40, 0);
+/// Highlighted amber for active/selected elements.
+pub const AMBER_HI:   Rgb565 = Rgb565::new(31, 48, 2);
+/// Dim amber for inactive borders, dividers, empty bars.
+pub const AMBER_DIM:  Rgb565 = Rgb565::new(12, 16, 0);
+/// Primary white for data values and selected rows.
+pub const TEXT_WHITE: Rgb565 = Rgb565::new(31, 63, 31);
+/// Secondary/dim text.
+pub const TEXT_DIM:   Rgb565 = Rgb565::new(16, 32, 16);
+/// Sparse teal accent used for the battery meter.
+pub const TEAL:       Rgb565 = Rgb565::new(8, 48, 28);
+/// Dim teal for the battery meter trough.
+pub const TEAL_DIM:   Rgb565 = Rgb565::new(2, 14, 8);
+/// Success state ("ACCESS GRANTED").
+pub const GREEN:      Rgb565 = Rgb565::new(0, 48, 0);
+/// Warning/danger state.
+pub const RED:        Rgb565 = Rgb565::new(31, 0, 2);
+
+// -- Screen geometry ---------------------------------------------------------
+
 pub const SCREEN_W: u16 = 410;
 pub const SCREEN_H: u16 = 502;
 
-// -- Rounded corner safe zones --
-pub const CORNER_R: i32 = 98;          // bezel corner radius in pixels
+/// Bezel rounded-corner radius. No content should land outside this inset
+/// from each corner.
+pub const CORNER_R: i32 = 98;
 
-// -- Layout zones --
-pub const HEADER_Y: i32 = 40;          // vertical center of header content
-pub const CONTENT_TOP: i32 = CORNER_R; // main content starts here (full width safe)
-pub const CONTENT_BOTTOM: i32 = (SCREEN_H as i32) - CORNER_R; // main content ends here
-pub const CONTENT_H: i32 = CONTENT_BOTTOM - CONTENT_TOP; // 306px
-pub const FOOTER_Y: i32 = (SCREEN_H as i32) - 58; // vertical center of footer content
+// -- Layout zones ------------------------------------------------------------
 
-pub const MARGIN: i32 = 8;             // side margin for content area
-pub const CUT: i32 = 8;               // corner cut size for cyberpunk boxes
+/// Vertical center of header content (clock area).
+pub const HEADER_Y: i32 = 40;
+/// Content band starts here (full width safe).
+pub const CONTENT_TOP: i32 = CORNER_R;
+/// Content band ends here.
+pub const CONTENT_BOTTOM: i32 = (SCREEN_H as i32) - CORNER_R;
+/// Content band height (306 px).
+pub const CONTENT_H: i32 = CONTENT_BOTTOM - CONTENT_TOP;
+/// Vertical center of footer content.
+pub const FOOTER_Y: i32 = (SCREEN_H as i32) - 58;
+
+/// Side margin for content area.
+pub const MARGIN: i32 = 8;
+/// Default arm length (px) for L-shaped corner brackets.
+pub const BRACKET_ARM: i32 = 10;

@@ -40,11 +40,11 @@ impl Screen for CornerTestScreen {
 
         let w = theme::SCREEN_W as i32;
         let h = theme::SCREEN_H as i32;
-        let font = MonoTextStyle::new(&ascii::FONT_6X10, theme::YELLOW);
+        let font = MonoTextStyle::new(&ascii::FONT_6X10, theme::TEXT_WHITE);
 
         // -- TOP: horizontal lines every 2px --
         for y in (0..=BAND).step_by(2) {
-            let color = if (y / 2) % 2 == 0 { theme::CYAN } else { theme::RED };
+            let color = if (y / 2) % 2 == 0 { theme::AMBER } else { theme::RED };
             let style = PrimitiveStyle::with_stroke(color, 1);
             Line::new(Point::new(0, y), Point::new(w - 1, y))
                 .into_styled(style).draw(display).ok();
@@ -57,7 +57,7 @@ impl Screen for CornerTestScreen {
 
         // -- BOTTOM: horizontal lines every 2px --
         for y in (h - BAND..h).step_by(2) {
-            let color = if ((h - y) / 2) % 2 == 0 { theme::CYAN } else { theme::RED };
+            let color = if ((h - y) / 2) % 2 == 0 { theme::AMBER } else { theme::RED };
             let style = PrimitiveStyle::with_stroke(color, 1);
             Line::new(Point::new(0, y), Point::new(w - 1, y))
                 .into_styled(style).draw(display).ok();
@@ -70,7 +70,7 @@ impl Screen for CornerTestScreen {
 
         // -- LEFT: vertical lines every 2px --
         for x in (0..=BAND).step_by(2) {
-            let color = if (x / 2) % 2 == 0 { theme::CYAN } else { theme::RED };
+            let color = if (x / 2) % 2 == 0 { theme::AMBER } else { theme::RED };
             let style = PrimitiveStyle::with_stroke(color, 1);
             Line::new(Point::new(x, 0), Point::new(x, h - 1))
                 .into_styled(style).draw(display).ok();
@@ -78,7 +78,7 @@ impl Screen for CornerTestScreen {
 
         // -- RIGHT: vertical lines every 2px --
         for x in (w - BAND..w).step_by(2) {
-            let color = if ((w - x) / 2) % 2 == 0 { theme::CYAN } else { theme::RED };
+            let color = if ((w - x) / 2) % 2 == 0 { theme::AMBER } else { theme::RED };
             let style = PrimitiveStyle::with_stroke(color, 1);
             Line::new(Point::new(x, 0), Point::new(x, h - 1))
                 .into_styled(style).draw(display).ok();
