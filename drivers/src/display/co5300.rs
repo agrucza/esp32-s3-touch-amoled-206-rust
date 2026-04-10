@@ -273,9 +273,12 @@ impl<'fb, B, RST> DrawTarget for CO5300<'fb, B, RST> {
         I: IntoIterator<Item = Pixel<Rgb565>>,
     {
         for Pixel(pt, color) in pixels {
-            if pt.x >= 0 && pt.y >= 0
-                && (pt.x as u16) < WIDTH
-                && (pt.y as u16) < HEIGHT
+            // Compare in i32 so values outside the u16 range can't wrap
+            // through `as u16` into an apparently-valid coordinate.
+            if pt.x >= 0
+                && pt.y >= 0
+                && pt.x < WIDTH  as i32
+                && pt.y < HEIGHT as i32
             {
                 let raw = ((color.r() as u16) << 11)
                     | ((color.g() as u16) << 5)
@@ -296,23 +299,50 @@ impl<'fb, B, RST> DrawTarget for CO5300<'fb, B, RST> {
     where
         I: IntoIterator<Item = Rgb565>,
     {
-        let x0 = area.top_left.x.max(0) as u16;
-        let y0 = area.top_left.y.max(0) as u16;
-        let x1 = ((area.top_left.x + area.size.width  as i32 - 1)
-                    .min(WIDTH  as i32 - 1)) as u16;
-        let y1 = ((area.top_left.y + area.size.height as i32 - 1)
-                    .min(HEIGHT as i32 - 1)) as u16;
+        // Work entirely in signed i32 so we can reason about areas that
+        // straddle the framebuffer edges (e.g. a rectangle with negative
+        // y origin). Casting an i32 < 0 to u16 wraps to a huge value
+        // and silently breaks any subsequent .min() clipping.
+        let ax0 = area.top_left.x;
+        let ay0 = area.top_left.y;
+        let ax1 = ax0 + area.size.width  as i32; // exclusive
+        let ay1 = ay0 + area.size.height as i32; // exclusive
 
-        if x0 > x1 || y0 > y1 { return Ok(()); }
+        // Completely outside the framebuffer - nothing to draw and the
+        // source iterator can simply be dropped.
+        if ax1 <= 0 || ay1 <= 0 || ax0 >= WIDTH as i32 || ay0 >= HEIGHT as i32 {
+            return Ok(());
+        }
+
+        // Clip to framebuffer bounds, exclusive on the right/bottom.
+        let cx0 = ax0.max(0);
+        let cy0 = ay0.max(0);
+        let cx1 = ax1.min(WIDTH  as i32);
+        let cy1 = ay1.min(HEIGHT as i32);
+
+        // Count of source pixels to skip on each side of the clip. These
+        // are always >= 0 because of the .max(0) / .min(...) clamps.
+        let skip_left  = (cx0 - ax0) as usize;
+        let skip_right = (ax1 - cx1) as usize;
+        let skip_top   = (cy0 - ay0) as usize;
+        let src_row_w  = area.size.width as usize;
 
         let mut colors = colors.into_iter();
-        for row in y0..=y1 {
-            // Skip pixels clipped on the left
-            let clip_left = (x0 as i32 - area.top_left.x).max(0) as usize;
-            for _ in 0..clip_left { colors.next(); }
+
+        // Advance past any entirely-clipped top rows so the first drawn
+        // row reads the correct source pixels.
+        for _ in 0..(skip_top * src_row_w) {
+            if colors.next().is_none() { return Ok(()); }
+        }
+
+        for row in cy0..cy1 {
+            // Skip pixels clipped on the left edge.
+            for _ in 0..skip_left {
+                if colors.next().is_none() { return Ok(()); }
+            }
 
             let row_base = row as usize * WIDTH as usize;
-            for col in x0..=x1 {
+            for col in cx0..cx1 {
                 match colors.next() {
                     None => return Ok(()),
                     Some(color) => {
@@ -326,10 +356,10 @@ impl<'fb, B, RST> DrawTarget for CO5300<'fb, B, RST> {
                 }
             }
 
-            // Skip pixels clipped on the right
-            let clip_right = ((area.top_left.x + area.size.width as i32 - 1)
-                               - x1 as i32).max(0) as usize;
-            for _ in 0..clip_right { colors.next(); }
+            // Skip pixels clipped on the right edge.
+            for _ in 0..skip_right {
+                if colors.next().is_none() { return Ok(()); }
+            }
         }
         Ok(())
     }
