@@ -1,190 +1,142 @@
-//! Drawing primitives for the Mankind Divided inspired UI.
+//! Drawing primitives for the rounded / pill UI.
 //!
-//! - `title_box` - signature MD screen/section title, uppercase text in an
-//!   outlined rectangle
-//! - `bracket_corners` - L-shaped corner decorations for content panels
-//! - `diamond` - rhombus marker (carousel dots, notifications)
-//! - `triangle_bullet` - small right-pointing selection marker
+//! - `rounded_panel` - rounded rectangle with optional fill and 1px border
+//! - `pill_solid` - filled pill (radius = h/2)
+//! - `pill_button_rect` - returns the bounding rect a pill button will
+//!   use for a given label (so callers can hit-test before drawing)
+//! - `pill_button` - draws a solid pill with centered text; returns the
+//!   bounding rect
+//! - `dot_carousel` - row of filled dots with one highlighted entry
 //! - `section_rule` - thin horizontal divider
-//! - `text_button` - outlined rectangle containing uppercase text,
-//!   returns its hit rect for tap detection
-//! - `flat_bar` - solid progress bar (replaces segmented cyberpunk bars)
+//! - `flat_bar` - solid progress bar (trough + fill)
 
 use embedded_graphics::{
     draw_target::DrawTarget,
     geometry::{Point, Size},
-    mono_font::{ascii, MonoTextStyle, MonoFont},
+    mono_font::{ascii, MonoTextStyle},
     pixelcolor::Rgb565,
     prelude::Primitive,
-    primitives::{Line, PrimitiveStyle, Rectangle, Triangle},
+    primitives::{Circle, Line, PrimitiveStyle, PrimitiveStyleBuilder, Rectangle, RoundedRectangle},
     text::{Baseline, Text},
     Drawable,
 };
 
-use super::theme;
+// -- Rounded panel -----------------------------------------------------------
 
-// -- Title box ---------------------------------------------------------------
-
-/// Draw the signature MD title: uppercase text inside an outlined rectangle.
-/// Returns the bounding rectangle so callers can lay out adjacent elements.
-///
-/// `font` selects the size. Padding is proportional to the font height.
-pub fn title_box<D: DrawTarget<Color = Rgb565>>(
+/// Draw a rounded rectangle with optional fill and border. Returns the
+/// axis-aligned bounding rectangle so callers can lay content inside it.
+pub fn rounded_panel<D: DrawTarget<Color = Rgb565>>(
     display: &mut D,
-    x: i32,
-    y: i32,
-    text: &str,
-    fg: Rgb565,
-    border: Rgb565,
-    font: &MonoFont<'static>,
+    x: i32, y: i32, w: i32, h: i32,
+    radius: u32,
+    fill: Option<Rgb565>,
+    border: Option<Rgb565>,
 ) -> Rectangle {
-    let text_style = MonoTextStyle::new(font, fg);
-    let ch_w = font.character_size.width as i32;
-    let ch_h = font.character_size.height as i32;
-    let pad_x = 8;
-    let pad_y = 4;
-    let w = text.len() as i32 * ch_w + pad_x * 2;
-    let h = ch_h + pad_y * 2;
-
     let rect = Rectangle::new(Point::new(x, y), Size::new(w as u32, h as u32));
-    rect.into_styled(PrimitiveStyle::with_stroke(border, 1))
-        .draw(display).ok();
+    let rr = RoundedRectangle::with_equal_corners(rect, Size::new(radius, radius));
 
-    Text::with_baseline(
-        text,
-        Point::new(x + pad_x, y + pad_y),
-        text_style,
-        Baseline::Top,
-    )
-    .draw(display).ok();
+    let mut sb = PrimitiveStyleBuilder::new();
+    if let Some(c) = fill { sb = sb.fill_color(c); }
+    if let Some(c) = border { sb = sb.stroke_color(c).stroke_width(1); }
+    rr.into_styled(sb.build()).draw(display).ok();
 
     rect
 }
 
-// -- Bracket corners ---------------------------------------------------------
+// -- Pills -------------------------------------------------------------------
 
-/// Draw L-shaped bracket markers at the four corners of a rectangle.
-/// Replaces the HR-era `cut_box` - cheaper, cleaner, and the defining
-/// frame motif of Mankind Divided content panels.
-pub fn bracket_corners<D: DrawTarget<Color = Rgb565>>(
+/// Draw a solid pill (rounded rect with radius = h/2).
+pub fn pill_solid<D: DrawTarget<Color = Rgb565>>(
     display: &mut D,
     x: i32, y: i32, w: i32, h: i32,
-    arm: i32,
-    color: Rgb565,
+    fill: Rgb565,
 ) {
-    let s = PrimitiveStyle::with_stroke(color, 1);
-    let x2 = x + w - 1;
-    let y2 = y + h - 1;
-
-    // Top-left
-    Line::new(Point::new(x, y), Point::new(x + arm, y)).into_styled(s).draw(display).ok();
-    Line::new(Point::new(x, y), Point::new(x, y + arm)).into_styled(s).draw(display).ok();
-    // Top-right
-    Line::new(Point::new(x2 - arm, y), Point::new(x2, y)).into_styled(s).draw(display).ok();
-    Line::new(Point::new(x2, y), Point::new(x2, y + arm)).into_styled(s).draw(display).ok();
-    // Bottom-left
-    Line::new(Point::new(x, y2 - arm), Point::new(x, y2)).into_styled(s).draw(display).ok();
-    Line::new(Point::new(x, y2), Point::new(x + arm, y2)).into_styled(s).draw(display).ok();
-    // Bottom-right
-    Line::new(Point::new(x2 - arm, y2), Point::new(x2, y2)).into_styled(s).draw(display).ok();
-    Line::new(Point::new(x2, y2 - arm), Point::new(x2, y2)).into_styled(s).draw(display).ok();
+    let radius = (h as u32) / 2;
+    rounded_panel(display, x, y, w, h, radius, Some(fill), None);
 }
 
-// -- Diamond marker ----------------------------------------------------------
+// Shared pill-button geometry so draw + hit-test agree.
+const PILL_PAD_X: i32 = 16;
+const PILL_PAD_Y: i32 = 6;
+const PILL_CH_W: i32 = 10; // FONT_10X20
+const PILL_CH_H: i32 = 20;
 
-/// Draw a rhombus marker centered at (cx, cy) with half-diagonal `size`.
-/// When `filled` is true the interior is filled via horizontal scanlines.
-pub fn diamond<D: DrawTarget<Color = Rgb565>>(
+/// Compute the bounding rectangle a pill button would occupy. Does
+/// not draw anything; used for hit-testing without re-rendering.
+pub fn pill_button_rect(x: i32, y: i32, text: &str) -> Rectangle {
+    let w = text.len() as i32 * PILL_CH_W + PILL_PAD_X * 2;
+    let h = PILL_CH_H + PILL_PAD_Y * 2;
+    Rectangle::new(Point::new(x, y), Size::new(w as u32, h as u32))
+}
+
+/// Draw a solid pill with centered text. Returns the bounding rect.
+pub fn pill_button<D: DrawTarget<Color = Rgb565>>(
     display: &mut D,
-    cx: i32, cy: i32, size: i32,
-    color: Rgb565,
-    filled: bool,
-) {
-    if filled {
-        // Fill with horizontal lines shrinking toward the tips.
-        let stroke = PrimitiveStyle::with_stroke(color, 1);
-        for dy in -size..=size {
-            let w = size - dy.abs();
-            Line::new(
-                Point::new(cx - w, cy + dy),
-                Point::new(cx + w, cy + dy),
-            ).into_styled(stroke).draw(display).ok();
-        }
-    } else {
-        let s = PrimitiveStyle::with_stroke(color, 1);
-        let top = Point::new(cx, cy - size);
-        let right = Point::new(cx + size, cy);
-        let bot = Point::new(cx, cy + size);
-        let left = Point::new(cx - size, cy);
-        Line::new(top, right).into_styled(s).draw(display).ok();
-        Line::new(right, bot).into_styled(s).draw(display).ok();
-        Line::new(bot, left).into_styled(s).draw(display).ok();
-        Line::new(left, top).into_styled(s).draw(display).ok();
-    }
+    x: i32, y: i32,
+    text: &str,
+    fg: Rgb565,
+    bg: Rgb565,
+) -> Rectangle {
+    let rect = pill_button_rect(x, y, text);
+    let w = rect.size.width as i32;
+    let h = rect.size.height as i32;
+
+    // Filled pill background
+    let radius = (h as u32) / 2;
+    RoundedRectangle::with_equal_corners(
+        rect,
+        Size::new(radius, radius),
+    )
+    .into_styled(PrimitiveStyle::with_fill(bg))
+    .draw(display).ok();
+
+    // Centered text
+    let text_w = text.len() as i32 * PILL_CH_W;
+    let text_x = x + (w - text_w) / 2;
+    let text_y = y + (h - PILL_CH_H) / 2;
+    let style = MonoTextStyle::new(&ascii::FONT_10X20, fg);
+    Text::with_baseline(text, Point::new(text_x, text_y), style, Baseline::Top)
+        .draw(display).ok();
+
+    rect
 }
 
-// -- Triangle bullet ---------------------------------------------------------
+// -- Dot carousel ------------------------------------------------------------
 
-/// Small right-pointing filled triangle, used as the MD list selection
-/// marker. Top-left corner of the bounding box is (x, y); default size
-/// is 6x10 pixels.
-pub fn triangle_bullet<D: DrawTarget<Color = Rgb565>>(
-    display: &mut D, x: i32, y: i32, color: Rgb565,
+/// Draw a horizontal row of filled circles, with one highlighted. The
+/// entire row is horizontally centered around `cx` at the given `cy`.
+pub fn dot_carousel<D: DrawTarget<Color = Rgb565>>(
+    display: &mut D,
+    cx: i32, cy: i32,
+    count: usize,
+    active_idx: usize,
+    active_color: Rgb565,
+    dim_color: Rgb565,
 ) {
-    Triangle::new(
-        Point::new(x, y),
-        Point::new(x, y + 10),
-        Point::new(x + 7, y + 5),
-    )
-    .into_styled(PrimitiveStyle::with_fill(color))
-    .draw(display).ok();
+    if count == 0 { return; }
+    let spacing = 12i32;
+    let diameter = 6u32;
+    let total_w = (count as i32 - 1) * spacing;
+    let start_x = cx - total_w / 2;
+
+    for i in 0..count {
+        let x = start_x + i as i32 * spacing;
+        let color = if i == active_idx { active_color } else { dim_color };
+        Circle::with_center(Point::new(x, cy), diameter)
+            .into_styled(PrimitiveStyle::with_fill(color))
+            .draw(display).ok();
+    }
 }
 
 // -- Section rule ------------------------------------------------------------
 
-/// Thin 1-px horizontal rule. Used as section divider under headers and
-/// between rows.
+/// Thin 1-px horizontal rule.
 pub fn section_rule<D: DrawTarget<Color = Rgb565>>(
     display: &mut D, x: i32, y: i32, w: i32, color: Rgb565,
 ) {
     Line::new(Point::new(x, y), Point::new(x + w - 1, y))
         .into_styled(PrimitiveStyle::with_stroke(color, 1))
         .draw(display).ok();
-}
-
-// -- Text button -------------------------------------------------------------
-
-/// Outlined rectangle with centered uppercase text. Returns the hit
-/// rectangle so the caller can hit-test touch events against it.
-pub fn text_button<D: DrawTarget<Color = Rgb565>>(
-    display: &mut D,
-    x: i32, y: i32,
-    text: &str,
-    fg: Rgb565,
-    border: Rgb565,
-) -> Rectangle {
-    let font = &ascii::FONT_10X20;
-    let text_style = MonoTextStyle::new(font, fg);
-    let ch_w = font.character_size.width as i32;
-    let ch_h = font.character_size.height as i32;
-    let pad_x = 14;
-    let pad_y = 6;
-    let w = text.len() as i32 * ch_w + pad_x * 2;
-    let h = ch_h + pad_y * 2;
-
-    let rect = Rectangle::new(Point::new(x, y), Size::new(w as u32, h as u32));
-    rect.into_styled(PrimitiveStyle::with_stroke(border, 1))
-        .draw(display).ok();
-
-    Text::with_baseline(
-        text,
-        Point::new(x + pad_x, y + pad_y),
-        text_style,
-        Baseline::Top,
-    )
-    .draw(display).ok();
-
-    rect
 }
 
 // -- Flat progress bar -------------------------------------------------------
@@ -197,7 +149,6 @@ pub fn flat_bar<D: DrawTarget<Color = Rgb565>>(
     fill: Rgb565,
     bg: Rgb565,
 ) {
-    // Trough
     Rectangle::new(Point::new(x, y), Size::new(w as u32, h as u32))
         .into_styled(PrimitiveStyle::with_fill(bg))
         .draw(display).ok();

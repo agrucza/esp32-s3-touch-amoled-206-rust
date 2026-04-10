@@ -109,8 +109,9 @@ pub struct Peripherals<'d> {
 }
 
 impl<'d> SystemManager<'d> {
-    /// All available screens for the carousel dots.
-    const SCREENS: [ScreenId; 2] = [ScreenId::Status, ScreenId::CornerTest];
+    /// All available screens, in carousel order. Clock is the default
+    /// home screen.
+    const SCREENS: [ScreenId; 3] = [ScreenId::Clock, ScreenId::Status, ScreenId::CornerTest];
 
     /// Return the next (forward=true) or previous screen in SCREENS, wrapping.
     fn cycle_screen(current: ScreenId, forward: bool) -> ScreenId {
@@ -204,7 +205,7 @@ impl<'d> SystemManager<'d> {
             storage,
             tx_transfer,
             rx_transfer,
-            screen: ActiveScreen::new(ScreenId::Status),
+            screen: ActiveScreen::new(ScreenId::Clock),
             panel_open: false,
             tick_count: 0,
             touch_pos: None,
@@ -338,7 +339,7 @@ impl<'d> SystemManager<'d> {
             self.display.clear(crate::ui::theme::BG).ok();
             // Always draw the normal screen stack - the panel (when open)
             // overlays the top 2/3 and leaves the bottom third visible.
-            frame::draw_header(&mut self.display, &data);
+            frame::draw_header(&mut self.display, &data, self.screen.id());
             frame::draw_footer(&mut self.display, self.screen.id(), &Self::SCREENS);
             self.screen.render(&mut self.display, &data);
             if self.panel_open {

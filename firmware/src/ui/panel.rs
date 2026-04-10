@@ -1,18 +1,16 @@
-//! Pull-down system panel (Mankind Divided styling).
+//! Pull-down system panel.
 //!
-//! Opened by a swipe-down in the header. Covers the upper two-thirds of
-//! the screen with a near-black overlay and shows quick system info
-//! (battery, voltage, uptime) plus a CLOSE text-button. Closed by:
-//! - swipe-up anywhere
-//! - tap inside the close button hit-box
+//! Opens on a swipe-down from the header. Covers the top two-thirds of
+//! the display with a rounded panel, leaving the active screen
+//! visible below for context. Closed by a swipe-up or a tap on the
+//! CLOSE pill button.
 
 use embedded_graphics::{
     draw_target::DrawTarget,
-    geometry::{Point, Size},
+    geometry::Point,
     mono_font::{ascii, MonoTextStyle},
     pixelcolor::Rgb565,
-    prelude::Primitive,
-    primitives::{PrimitiveStyle, Rectangle},
+    primitives::Rectangle,
     text::{Baseline, Text},
     Drawable,
 };
@@ -24,67 +22,73 @@ use super::types::SystemData;
 /// Panel occupies the top two-thirds of the screen.
 pub const PANEL_H: i32 = (theme::SCREEN_H as i32) * 2 / 3;
 
-// -- Close button hit box ----------------------------------------------------
-//
-// Matches the geometry produced by `primitives::text_button` for the
-// label "CLOSE" rendered with FONT_10X20 (10 px per glyph, 14 px padding
-// each side -> 78 px wide, 32 px tall).
-
 const CLOSE_LABEL: &str = "CLOSE";
-const CLOSE_W: i32 = (CLOSE_LABEL.len() as i32) * 10 + 14 * 2;
-const CLOSE_H: i32 = 20 + 6 * 2;
-const CLOSE_X: i32 = ((theme::SCREEN_W as i32) - CLOSE_W) / 2;
-const CLOSE_Y: i32 = PANEL_H - CLOSE_H - 24;
 
-/// Returns true when (x, y) lands inside the close button's hit box.
-pub fn hit_close(x: u16, y: u16) -> bool {
-    let x = x as i32;
-    let y = y as i32;
-    x >= CLOSE_X && x < CLOSE_X + CLOSE_W && y >= CLOSE_Y && y < CLOSE_Y + CLOSE_H
+/// Rectangle occupied by the CLOSE pill button, computed from the
+/// same geometry helper the drawing code uses so hit-tests always
+/// match what the user sees.
+fn close_rect() -> Rectangle {
+    let template = primitives::pill_button_rect(0, 0, CLOSE_LABEL);
+    let w = template.size.width as i32;
+    let h = template.size.height as i32;
+    let x = ((theme::SCREEN_W as i32) - w) / 2;
+    let y = PANEL_H - h - 24;
+    Rectangle::new(Point::new(x, y), template.size)
 }
 
-/// Render the panel overlay on top of whatever the screen already drew.
-/// Fills the top 2/3 of the display with `PANEL_BG` so the active
-/// screen remains visible in the bottom third for context.
+/// Returns true when (x, y) lands inside the CLOSE pill button.
+pub fn hit_close(x: u16, y: u16) -> bool {
+    let r = close_rect();
+    let px = x as i32;
+    let py = y as i32;
+    px >= r.top_left.x
+        && px < r.top_left.x + r.size.width as i32
+        && py >= r.top_left.y
+        && py < r.top_left.y + r.size.height as i32
+}
+
+/// Render the panel on top of whatever the active screen already drew.
 pub fn draw<D: DrawTarget<Color = Rgb565>>(display: &mut D, data: &SystemData) {
-    // Opaque background fill covering the full panel area.
-    Rectangle::new(
-        Point::new(0, 0),
-        Size::new(theme::SCREEN_W as u32, PANEL_H as u32),
-    )
-    .into_styled(PrimitiveStyle::with_fill(theme::PANEL_BG))
-    .draw(display).ok();
-
-    // Content area starts below the rounded-corner zone.
-    let content_x = theme::MARGIN * 2;
-    let content_y = theme::CORNER_R + 6;
-    let content_w = (theme::SCREEN_W as i32) - theme::MARGIN * 4;
-    let content_h = PANEL_H - content_y - 8;
-
-    // Bracket corners frame the content area (MD signature panel look).
-    primitives::bracket_corners(
-        display, content_x, content_y, content_w, content_h,
-        theme::BRACKET_ARM, theme::AMBER,
-    );
-
-    // :SYSTEM title-box in the top-left of the content area, hanging
-    // slightly above the bracket top-left corner.
-    let title_rect = primitives::title_box(
+    // Rounded panel background. Starts at y=0 - the top rounded corners
+    // fall entirely inside the 98px bezel corner zone and are hidden
+    // behind the bezel, so visually the panel reads as having square
+    // top edges. The bottom corners sit visibly inside the content area.
+    let px = theme::MARGIN;
+    let py = 0;
+    let pw = (theme::SCREEN_W as i32) - theme::MARGIN * 2;
+    let ph = PANEL_H;
+    primitives::rounded_panel(
         display,
-        content_x + 8,
-        content_y - 14,
-        "SYSTEM",
-        theme::TEXT_WHITE,
-        theme::AMBER,
-        &ascii::FONT_10X20,
+        px, py, pw, ph,
+        theme::CARD_RADIUS * 2,
+        Some(theme::PANEL_BG),
+        Some(theme::AMBER_DIM),
     );
+
+    // SYSTEM pill label at the top-left of the panel.
+    let sys_label = "SYSTEM";
+    let sys_font = MonoTextStyle::new(&ascii::FONT_10X20, theme::BG);
+    let sys_pad_x = 14i32;
+    let sys_pad_y = 4i32;
+    let sys_w = sys_label.len() as i32 * 10 + sys_pad_x * 2;
+    let sys_h = 20 + sys_pad_y * 2;
+    let sys_x = px + 24;
+    let sys_y = theme::CORNER_R - 4; // hang just below the bezel curve
+    primitives::pill_solid(display, sys_x, sys_y, sys_w, sys_h, theme::AMBER);
+    Text::with_baseline(
+        sys_label,
+        Point::new(sys_x + sys_pad_x, sys_y + sys_pad_y),
+        sys_font,
+        Baseline::Top,
+    )
+    .draw(display).ok();
 
     // Data rows: amber labels, white values.
     let lbl_font = MonoTextStyle::new(&ascii::FONT_10X20, theme::AMBER);
     let val_font = MonoTextStyle::new(&ascii::FONT_10X20, theme::TEXT_WHITE);
-    let row_x = content_x + 24;
-    let val_x = content_x + 170;
-    let mut row_y = title_rect.top_left.y + title_rect.size.height as i32 + 20;
+    let row_x = px + 30;
+    let val_x = px + 180;
+    let mut row_y = sys_y + sys_h + 24;
 
     // Battery percentage
     Text::with_baseline("BATTERY", Point::new(row_x, row_y), lbl_font, Baseline::Top)
@@ -115,7 +119,7 @@ pub fn draw<D: DrawTarget<Color = Rgb565>>(display: &mut D, data: &SystemData) {
         .draw(display).ok();
     row_y += 28;
 
-    // Uptime - tick count * 50 ms tick period
+    // Uptime
     Text::with_baseline("UPTIME", Point::new(row_x, row_y), lbl_font, Baseline::Top)
         .draw(display).ok();
     let total_secs = (data.tick_count as u64) * 50 / 1000;
@@ -127,10 +131,16 @@ pub fn draw<D: DrawTarget<Color = Rgb565>>(display: &mut D, data: &SystemData) {
     Text::with_baseline(&buf, Point::new(val_x, row_y), val_font, Baseline::Top)
         .draw(display).ok();
 
-    // CLOSE text-button near the bottom of the panel.
-    primitives::text_button(
-        display, CLOSE_X, CLOSE_Y, CLOSE_LABEL,
-        theme::TEXT_WHITE, theme::AMBER,
+    // CLOSE pill button (solid amber, black text) centered near the
+    // bottom of the panel.
+    let r = close_rect();
+    primitives::pill_button(
+        display,
+        r.top_left.x,
+        r.top_left.y,
+        CLOSE_LABEL,
+        theme::BG,
+        theme::AMBER,
     );
 
     // Hint line below the button.
@@ -138,6 +148,11 @@ pub fn draw<D: DrawTarget<Color = Rgb565>>(display: &mut D, data: &SystemData) {
     let hint = "swipe up or tap to close";
     let hint_w = hint.len() as i32 * 6;
     let hint_x = ((theme::SCREEN_W as i32) - hint_w) / 2;
-    Text::new(hint, Point::new(hint_x, CLOSE_Y + CLOSE_H + 14), hint_font)
-        .draw(display).ok();
+    Text::with_baseline(
+        hint,
+        Point::new(hint_x, r.top_left.y + r.size.height as i32 + 8),
+        hint_font,
+        Baseline::Top,
+    )
+    .draw(display).ok();
 }

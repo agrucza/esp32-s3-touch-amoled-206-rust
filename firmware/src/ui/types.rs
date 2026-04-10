@@ -11,9 +11,10 @@ use drivers::rtc::DateTime;
 /// Identifies which screen to switch to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScreenId {
+    Clock,
     Status,
     CornerTest,
-    // Future: Clock, Sensors, Settings, ...
+    // Future: Sensors, Settings, ...
 }
 
 // -- Actions -----------------------------------------------------------------

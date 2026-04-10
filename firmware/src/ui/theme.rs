@@ -55,5 +55,5 @@ pub const FOOTER_Y: i32 = (SCREEN_H as i32) - 58;
 
 /// Side margin for content area.
 pub const MARGIN: i32 = 8;
-/// Default arm length (px) for L-shaped corner brackets.
-pub const BRACKET_ARM: i32 = 10;
+/// Default corner radius for rounded panels and cards.
+pub const CARD_RADIUS: u32 = 12;

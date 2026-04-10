@@ -1,3 +1,4 @@
+pub mod clock;
 pub mod corner_test;
 pub mod status;
 
@@ -10,14 +11,16 @@ use super::types::{Action, Screen, ScreenId, SystemData};
 ///
 /// Add new screen variants here as they're created.
 pub enum ActiveScreen {
+    Clock(clock::ClockScreen),
     Status(status::StatusScreen),
     CornerTest(corner_test::CornerTestScreen),
 }
 
 impl ActiveScreen {
-    /// Create the default startup screen.
+    /// Create a fresh screen for the given id.
     pub fn new(id: ScreenId) -> Self {
         match id {
+            ScreenId::Clock => Self::Clock(clock::ClockScreen::new()),
             ScreenId::Status => Self::Status(status::StatusScreen::new()),
             ScreenId::CornerTest => Self::CornerTest(corner_test::CornerTestScreen::new()),
         }
@@ -25,6 +28,7 @@ impl ActiveScreen {
 
     pub fn render<D: DrawTarget<Color = Rgb565>>(&self, display: &mut D, data: &SystemData) {
         match self {
+            Self::Clock(s) => s.render(display, data),
             Self::Status(s) => s.render(display, data),
             Self::CornerTest(s) => s.render(display, data),
         }
@@ -32,6 +36,7 @@ impl ActiveScreen {
 
     pub fn on_event(&mut self, event: &SystemEvent, data: &SystemData) -> Action {
         match self {
+            Self::Clock(s) => s.on_event(event, data),
             Self::Status(s) => s.on_event(event, data),
             Self::CornerTest(s) => s.on_event(event, data),
         }
@@ -40,6 +45,7 @@ impl ActiveScreen {
     /// Which screen is currently active.
     pub fn id(&self) -> ScreenId {
         match self {
+            Self::Clock(_) => ScreenId::Clock,
             Self::Status(_) => ScreenId::Status,
             Self::CornerTest(_) => ScreenId::CornerTest,
         }

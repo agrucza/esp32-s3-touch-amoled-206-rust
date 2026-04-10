@@ -1,7 +1,9 @@
 //! Large seven-segment style digit renderer.
 //!
-//! Draws chunky blocky digits using filled rectangles - cyberpunk style.
-//! Each digit is drawn on a grid of `W` x `H` pixels with `T` thick segments.
+//! Draws blocky digits using filled rectangles. `DigitStyle` controls
+//! the size via width, height, segment thickness, and inter-digit gap.
+//! Three presets are provided: SMALL (header glance clock), NORMAL
+//! (original size), LARGE (dedicated clock face).
 
 use embedded_graphics::{
     draw_target::DrawTarget,
@@ -12,17 +14,39 @@ use embedded_graphics::{
     Drawable,
 };
 
-// Digit dimensions
-const W: i32 = 24;   // digit width
-const H: i32 = 44;   // digit height
-const T: i32 = 5;    // segment thickness
-const GAP: i32 = 4;  // gap between digits
-const COLON_W: i32 = T + 8; // colon width including gaps
+/// Dimensions of a single digit (and the inter-digit gap).
+#[derive(Debug, Clone, Copy)]
+pub struct DigitStyle {
+    /// Digit width.
+    pub w: i32,
+    /// Digit height.
+    pub h: i32,
+    /// Segment thickness.
+    pub t: i32,
+    /// Horizontal gap between digits.
+    pub gap: i32,
+}
 
-/// Total pixel width of a HH:MM display.
-pub const TIME_WIDTH: i32 = 4 * (W + GAP) + COLON_W - GAP;
+impl DigitStyle {
+    /// Small glance-size clock for the compact header.
+    pub const SMALL:  Self = Self { w: 16, h: 28, t: 4, gap: 3 };
+    /// Original size used elsewhere.
+    pub const NORMAL: Self = Self { w: 24, h: 44, t: 5, gap: 4 };
+    /// Big clock face size for the dedicated Clock screen.
+    pub const LARGE:  Self = Self { w: 48, h: 88, t: 9, gap: 6 };
 
-// Seven segment layout:
+    /// Total pixel width of a HH:MM display in this style.
+    ///
+    /// Matches the advances done inside `draw_time` exactly so that
+    /// centering calculations line up with what gets drawn.
+    pub const fn time_width(&self) -> i32 {
+        // Per draw_time advances:
+        //   4 digits + 4 inter-element gaps + colon core (t) + 4
+        4 * self.w + 4 * self.gap + self.t + 4
+    }
+}
+
+// Seven-segment layout:
 //  _AAA_
 // |     |
 // F     B
@@ -56,77 +80,56 @@ fn draw_segment<D: DrawTarget<Color = Rgb565>>(
         .draw(display).ok();
 }
 
-/// Draw a single large digit at position (x, y).
+/// Draw a single digit at position (x, y).
 fn draw_digit<D: DrawTarget<Color = Rgb565>>(
-    display: &mut D, x: i32, y: i32, digit: u8, color: Rgb565,
+    display: &mut D, x: i32, y: i32, digit: u8, color: Rgb565, s: &DigitStyle,
 ) {
-    let s = SEGMENTS[digit as usize];
-    let inner_w = W - T * 2;
-    let half_h = (H - T * 3) / 2;
+    let segs = SEGMENTS[digit as usize];
+    let inner_w = s.w - s.t * 2;
+    let half_h = (s.h - s.t * 3) / 2;
 
-    // A - top horizontal
-    if s & 0x01 != 0 {
-        draw_segment(display, x + T, y, inner_w, T, color);
-    }
-    // B - top-right vertical
-    if s & 0x02 != 0 {
-        draw_segment(display, x + W - T, y + T, T, half_h, color);
-    }
-    // C - bottom-right vertical
-    if s & 0x04 != 0 {
-        draw_segment(display, x + W - T, y + T * 2 + half_h, T, half_h, color);
-    }
-    // D - bottom horizontal
-    if s & 0x08 != 0 {
-        draw_segment(display, x + T, y + H - T, inner_w, T, color);
-    }
-    // E - bottom-left vertical
-    if s & 0x10 != 0 {
-        draw_segment(display, x, y + T * 2 + half_h, T, half_h, color);
-    }
-    // F - top-left vertical
-    if s & 0x20 != 0 {
-        draw_segment(display, x, y + T, T, half_h, color);
-    }
-    // G - middle horizontal
-    if s & 0x40 != 0 {
-        draw_segment(display, x + T, y + T + half_h, inner_w, T, color);
-    }
+    if segs & 0x01 != 0 { draw_segment(display, x + s.t, y, inner_w, s.t, color); }
+    if segs & 0x02 != 0 { draw_segment(display, x + s.w - s.t, y + s.t, s.t, half_h, color); }
+    if segs & 0x04 != 0 { draw_segment(display, x + s.w - s.t, y + s.t * 2 + half_h, s.t, half_h, color); }
+    if segs & 0x08 != 0 { draw_segment(display, x + s.t, y + s.h - s.t, inner_w, s.t, color); }
+    if segs & 0x10 != 0 { draw_segment(display, x, y + s.t * 2 + half_h, s.t, half_h, color); }
+    if segs & 0x20 != 0 { draw_segment(display, x, y + s.t, s.t, half_h, color); }
+    if segs & 0x40 != 0 { draw_segment(display, x + s.t, y + s.t + half_h, inner_w, s.t, color); }
 }
 
-/// Draw a colon separator (two squares).
+/// Draw a colon separator (two square dots).
 fn draw_colon<D: DrawTarget<Color = Rgb565>>(
-    display: &mut D, x: i32, y: i32, color: Rgb565,
+    display: &mut D, x: i32, y: i32, color: Rgb565, s: &DigitStyle,
 ) {
-    let dot = T + 1;
+    let dot = s.t + 1;
     let cx = x + 2;
-    draw_segment(display, cx, y + H / 3 - dot / 2, dot, dot, color);
-    draw_segment(display, cx, y + H * 2 / 3 - dot / 2, dot, dot, color);
+    draw_segment(display, cx, y + s.h / 3 - dot / 2, dot, dot, color);
+    draw_segment(display, cx, y + s.h * 2 / 3 - dot / 2, dot, dot, color);
 }
 
-/// Draw `HH:MM` at position (x, y) using large seven-segment digits.
-///
-/// Returns the total width used.
+/// Draw HH:MM at (x, y) using the given digit style. Returns the
+/// actual pixel width used.
 pub fn draw_time<D: DrawTarget<Color = Rgb565>>(
     display: &mut D, x: i32, y: i32, hour: u8, minute: u8, color: Rgb565,
+    style: &DigitStyle,
 ) -> i32 {
     let mut cx = x;
 
     // Hours
-    draw_digit(display, cx, y, hour / 10, color);
-    cx += W + GAP;
-    draw_digit(display, cx, y, hour % 10, color);
-    cx += W + GAP;
+    draw_digit(display, cx, y, hour / 10, color, style);
+    cx += style.w + style.gap;
+    draw_digit(display, cx, y, hour % 10, color, style);
+    cx += style.w + style.gap;
 
     // Colon
-    draw_colon(display, cx, y, color);
-    cx += T + GAP + 4;
+    draw_colon(display, cx, y, color, style);
+    cx += style.t + style.gap + 4;
 
     // Minutes
-    draw_digit(display, cx, y, minute / 10, color);
-    cx += W + GAP;
-    draw_digit(display, cx, y, minute % 10, color);
-    cx += W;
+    draw_digit(display, cx, y, minute / 10, color, style);
+    cx += style.w + style.gap;
+    draw_digit(display, cx, y, minute % 10, color, style);
+    cx += style.w;
 
     cx - x
 }
