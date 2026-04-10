@@ -16,7 +16,7 @@ use embedded_graphics::{
     mono_font::{ascii, MonoTextStyle},
     pixelcolor::Rgb565,
     prelude::Primitive,
-    primitives::{Circle, Line, PrimitiveStyle, PrimitiveStyleBuilder, Rectangle, RoundedRectangle},
+    primitives::{Circle, Line, PrimitiveStyle, PrimitiveStyleBuilder, Rectangle, RoundedRectangle, StrokeAlignment},
     text::{Baseline, Text},
     Drawable,
 };
@@ -137,6 +137,101 @@ pub fn section_rule<D: DrawTarget<Color = Rgb565>>(
     Line::new(Point::new(x, y), Point::new(x + w - 1, y))
         .into_styled(PrimitiveStyle::with_stroke(color, 1))
         .draw(display).ok();
+}
+
+// -- Battery indicators ------------------------------------------------------
+
+/// Pick the right status color for a given battery percentage.
+pub fn battery_color(percent: u8) -> Rgb565 {
+    use super::theme;
+    if percent > 50 { theme::TEAL }
+    else if percent >= 20 { theme::AMBER }
+    else { theme::RED }
+}
+
+/// Draw a small battery glyph (rectangle + nub) with a color-coded
+/// fill level. `(x, y)` is the top-left of the body. Total width
+/// including the nub is 33 px; body height is 14 px.
+pub fn battery_icon<D: DrawTarget<Color = Rgb565>>(
+    display: &mut D,
+    x: i32, y: i32,
+    percent: u8,
+    border: Rgb565,
+) {
+    let body_w: i32 = 30;
+    let body_h: i32 = 14;
+    let nub_w: i32 = 3;
+    let nub_h: i32 = 6;
+
+    // Body outline
+    Rectangle::new(Point::new(x, y), Size::new(body_w as u32, body_h as u32))
+        .into_styled(PrimitiveStyle::with_stroke(border, 1))
+        .draw(display).ok();
+    // Nub on the right side, vertically centered
+    Rectangle::new(
+        Point::new(x + body_w, y + (body_h - nub_h) / 2),
+        Size::new(nub_w as u32, nub_h as u32),
+    )
+    .into_styled(PrimitiveStyle::with_fill(border))
+    .draw(display).ok();
+
+    // Fill level inset 2 px from the body outline
+    let inner_max_w = body_w - 4;
+    let inner_h = body_h - 4;
+    let pct = percent.min(100) as i32;
+    let fill_w = inner_max_w * pct / 100;
+    if fill_w > 0 {
+        Rectangle::new(
+            Point::new(x + 2, y + 2),
+            Size::new(fill_w as u32, inner_h as u32),
+        )
+        .into_styled(PrimitiveStyle::with_fill(battery_color(percent)))
+        .draw(display).ok();
+    }
+}
+
+// -- System overlays ---------------------------------------------------------
+
+/// Draw a colored rounded-rect frame that runs parallel to the bezel
+/// curve, used as a system-wide low-battery warning overlay: amber at
+/// 10-19%, red below 10%. No frame at 20% or above.
+///
+/// Important: the frame is *inset* from the framebuffer edges so its
+/// corner arc stays well inside the bezel. We can't trace the bezel
+/// edge directly because the measured `CORNER_R` is approximate -
+/// drawing at the exact bezel radius leaves the corner pixels right
+/// at (or just outside) the visible region, where they get clipped.
+///
+/// By using `(INSET, INSET)` as the rect origin and `CORNER_R - INSET`
+/// as the arc radius, the frame's arc center lands at `(CORNER_R,
+/// CORNER_R)` - the same center as the bezel arc - and the frame arc
+/// runs exactly `INSET` px inside the bezel arc at every point. As
+/// long as the bezel is at least `INSET` px more conservative than
+/// our radius assumption, the frame is fully visible.
+pub fn battery_warning_frame<D: DrawTarget<Color = Rgb565>>(
+    display: &mut D,
+    percent: u8,
+) {
+    use super::theme;
+    if percent >= 20 { return; }
+    let color = if percent < 10 { theme::RED } else { theme::AMBER };
+
+    const INSET: i32 = 12;
+    let w = theme::SCREEN_W as i32 - INSET * 2;
+    let h = theme::SCREEN_H as i32 - INSET * 2;
+    let radius = (theme::CORNER_R - INSET) as u32;
+
+    let style = PrimitiveStyleBuilder::new()
+        .stroke_color(color)
+        .stroke_width(3)
+        .stroke_alignment(StrokeAlignment::Inside)
+        .build();
+    RoundedRectangle::with_equal_corners(
+        Rectangle::new(Point::new(INSET, INSET), Size::new(w as u32, h as u32)),
+        Size::new(radius, radius),
+    )
+    .into_styled(style)
+    .draw(display).ok();
 }
 
 // -- Flat progress bar -------------------------------------------------------

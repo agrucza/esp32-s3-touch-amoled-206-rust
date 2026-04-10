@@ -4,8 +4,8 @@ use crate::display_hal::{self, CO5300, EspQspi};
 use crate::events::{SwipeDir, SwipeRegion, SystemEvent};
 use crate::sdcard_hal::EspVolumeManager;
 use crate::system::{audio::AudioSystem, input::InputSystem, power::PowerSystem, sensors::SensorSystem};
-use crate::ui::frame;
 use crate::ui::panel;
+use crate::ui::primitives;
 use crate::ui::screens::ActiveScreen;
 use crate::ui::types::{Action, ScreenId, SystemData};
 use embedded_graphics::draw_target::DrawTarget;
@@ -109,9 +109,11 @@ pub struct Peripherals<'d> {
 }
 
 impl<'d> SystemManager<'d> {
-    /// All available screens, in carousel order. Clock is the default
-    /// home screen.
-    const SCREENS: [ScreenId; 3] = [ScreenId::Clock, ScreenId::Status, ScreenId::CornerTest];
+    /// All available home-row screens, in carousel order. Clock is the
+    /// default home screen. CornerTest has been retired from the rotation
+    /// but its variant is still available for direct navigation from
+    /// debug/diagnostic code.
+    const SCREENS: [ScreenId; 2] = [ScreenId::Clock, ScreenId::Status];
 
     /// Return the next (forward=true) or previous screen in SCREENS, wrapping.
     fn cycle_screen(current: ScreenId, forward: bool) -> ScreenId {
@@ -337,14 +339,24 @@ impl<'d> SystemManager<'d> {
         // Only redraw when something changed
         if self.needs_redraw {
             self.display.clear(crate::ui::theme::BG).ok();
-            // Always draw the normal screen stack - the panel (when open)
-            // overlays the top 2/3 and leaves the bottom third visible.
-            frame::draw_header(&mut self.display, &data, self.screen.id());
-            frame::draw_footer(&mut self.display, self.screen.id(), &Self::SCREENS);
+
+            // Full-screen app rendering - each screen owns the entire
+            // display. No persistent header or footer chrome.
             self.screen.render(&mut self.display, &data);
+
+            // System-wide low-battery warning: a 1-px colored frame
+            // tracing the physical display edge. Drawn over the app so
+            // it remains visible no matter what is rendered.
+            if let Some(pct) = data.battery_percent {
+                primitives::battery_warning_frame(&mut self.display, pct);
+            }
+
+            // Pull-down panel is drawn last so it overlays everything
+            // including any system warnings.
             if self.panel_open {
                 panel::draw(&mut self.display, &data);
             }
+
             self.display.flush().await;
             self.needs_redraw = false;
         }

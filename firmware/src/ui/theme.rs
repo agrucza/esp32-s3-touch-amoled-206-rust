@@ -41,17 +41,17 @@ pub const SCREEN_H: u16 = 502;
 pub const CORNER_R: i32 = 98;
 
 // -- Layout zones ------------------------------------------------------------
+//
+// These describe the bezel-safe content band. Full-screen apps may
+// still draw into the corner zones, but content placed there needs
+// to stay horizontally centered enough to clear the rounded bezel.
 
-/// Vertical center of header content (clock area).
-pub const HEADER_Y: i32 = 40;
-/// Content band starts here (full width safe).
+/// Full-width-safe content band starts here.
 pub const CONTENT_TOP: i32 = CORNER_R;
-/// Content band ends here.
+/// Full-width-safe content band ends here.
 pub const CONTENT_BOTTOM: i32 = (SCREEN_H as i32) - CORNER_R;
-/// Content band height (306 px).
+/// Full-width-safe content band height (306 px).
 pub const CONTENT_H: i32 = CONTENT_BOTTOM - CONTENT_TOP;
-/// Vertical center of footer content.
-pub const FOOTER_Y: i32 = (SCREEN_H as i32) - 58;
 
 /// Side margin for content area.
 pub const MARGIN: i32 = 8;
