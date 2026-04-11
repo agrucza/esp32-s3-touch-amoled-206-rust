@@ -1,149 +1,164 @@
-//! Status screen - full-screen sensor view with a title and three
-//! rounded cards (ACCEL, GYRO, ENV). No system chrome; this screen
-//! owns the entire display.
+//! Status screen - paginated sensor view in the modern smartwatch
+//! style. Each page presents its data as a stack of "value cards":
+//! filled rounded rectangles with a small grey label centered on top
+//! and a large bold white value centered below (matches the concept's
+//! "All Bookings" list pattern).
+//!
+//! Pages (swipe up/down to navigate):
+//! - Page 0: ACCEL  (X / Y / Z value cards)
+//! - Page 1: GYRO   (X / Y / Z value cards)
+//! - Page 2: ENV    (TEMP and TOUCH cards)
 
 use core::fmt::Write;
 
 use embedded_graphics::{
     draw_target::DrawTarget,
-    geometry::Point,
-    mono_font::{ascii, MonoTextStyle},
     pixelcolor::Rgb565,
-    text::{Baseline, Text},
-    Drawable,
 };
 
-use crate::events::SystemEvent;
-use crate::ui::{primitives, theme};
+use crate::events::{SwipeDir, SwipeRegion, SystemEvent};
+use crate::ui::{fonts, primitives, theme};
 use crate::ui::types::{Action, Screen, SystemData};
 
-pub struct StatusScreen;
+const PAGE_COUNT: u8 = 3;
+const PAGE_TITLES: [&str; PAGE_COUNT as usize] = [
+    "ACCELEROMETER",
+    "GYROSCOPE",
+    "ENVIRONMENT",
+];
+
+pub struct StatusScreen {
+    page: u8,
+}
 
 impl StatusScreen {
-    pub fn new() -> Self { Self }
+    pub fn new() -> Self { Self { page: 0 } }
 }
 
 impl Screen for StatusScreen {
     fn render<D: DrawTarget<Color = Rgb565>>(&self, display: &mut D, data: &SystemData) {
         let w = theme::SCREEN_W as i32;
-        let m = theme::MARGIN * 2;
-        let card_w = w - m * 2;
-        let card_h = 100;
 
-        // Screen title near the top of the display. Centered text sits
-        // well inside the bezel corner curve at y=50.
-        let title_font = MonoTextStyle::new(&ascii::FONT_10X20, theme::AMBER);
-        let title = "STATUS";
-        let title_w = title.len() as i32 * 10;
-        Text::with_baseline(
-            title,
-            Point::new(w / 2 - title_w / 2, 50),
-            title_font,
-            Baseline::Top,
-        ).draw(display).ok();
+        // Page title at the top - small grey headline.
+        let title = PAGE_TITLES[self.page as usize];
+        fonts::draw_centered(
+            display, &fonts::headline(),
+            title, w / 2, 80,
+            theme::TEXT_DIM,
+        );
 
-        // Three stacked cards.
-        let mut y = 100;
-        let gap = 10;
+        // Page-specific cards.
+        match self.page {
+            0 => render_axes_cards(display, data.accel_x, data.accel_y, data.accel_z),
+            1 => render_axes_cards(display, data.gyro_x, data.gyro_y, data.gyro_z),
+            2 => render_env_cards(display, data),
+            _ => {}
+        }
 
-        draw_axis_card(display, "ACCEL", m, y, card_w, card_h,
-            data.accel_x, data.accel_y, data.accel_z, 4096);
-        y += card_h + gap;
-
-        draw_axis_card(display, "GYRO", m, y, card_w, card_h,
-            data.gyro_x, data.gyro_y, data.gyro_z, 2048);
-        y += card_h + gap;
-
-        draw_env_card(display, m, y, card_w, card_h, data);
+        // Page indicator dots at the bottom.
+        primitives::dot_carousel(
+            display,
+            w / 2, 410,
+            PAGE_COUNT as usize,
+            self.page as usize,
+            theme::AMBER,
+            theme::AMBER_DIM,
+        );
     }
 
     fn on_event(&mut self, event: &SystemEvent, _data: &SystemData) -> Action {
         match event {
             SystemEvent::PowerButtonLong => Action::Shutdown,
+            SystemEvent::Swipe { dir: SwipeDir::Up, region: SwipeRegion::Content } => {
+                self.page = (self.page + 1) % PAGE_COUNT;
+                Action::Redraw
+            }
+            SystemEvent::Swipe { dir: SwipeDir::Down, region: SwipeRegion::Content } => {
+                self.page = (self.page + PAGE_COUNT - 1) % PAGE_COUNT;
+                Action::Redraw
+            }
             _ => Action::None,
         }
     }
 }
 
-/// Rounded card with a title label and three X/Y/Z rows (label + value + bar).
-fn draw_axis_card<D: DrawTarget<Color = Rgb565>>(
+// Card layout constants - shared by all status pages so the cards
+// line up consistently between page transitions.
+const CARD_X: i32 = 35;
+const CARD_W: i32 = 340;
+const CARD_H: i32 = 80;
+const CARD_GAP: i32 = 12;
+const FIRST_CARD_Y: i32 = 120;
+
+/// Filled rounded value card: small grey label centered on top, big
+/// bold white value centered below. Matches the reference's
+/// "All Bookings" list tile pattern.
+fn draw_value_card<D: DrawTarget<Color = Rgb565>>(
     display: &mut D,
-    label: &str,
     x: i32, y: i32, w: i32, h: i32,
-    vx: i16, vy: i16, vz: i16,
-    range: i32,
+    label: &str, value: &str,
 ) {
-    primitives::rounded_panel(display, x, y, w, h, theme::CARD_RADIUS, None, Some(theme::AMBER_DIM));
+    primitives::rounded_panel(
+        display, x, y, w, h, theme::CARD_RADIUS,
+        Some(theme::PANEL_BG), None,
+    );
 
-    let title_font = MonoTextStyle::new(&ascii::FONT_6X10, theme::AMBER);
-    Text::with_baseline(label, Point::new(x + 12, y + 8), title_font, Baseline::Top)
-        .draw(display).ok();
+    // Label uses body (14 px) instead of caption (10 px) - at caption
+    // size the label was visually lost next to the big value.
+    fonts::draw_centered(
+        display, &fonts::body(),
+        label, x + w / 2, y + 16,
+        theme::TEXT_DIM,
+    );
 
-    let lbl_font = MonoTextStyle::new(&ascii::FONT_10X20, theme::AMBER);
-    let val_font = MonoTextStyle::new(&ascii::FONT_10X20, theme::TEXT_WHITE);
-    let bar_x = x + 120;
-    let bar_w = w - 132;
-
-    let axes: [(i16, &str); 3] = [(vx, "X"), (vy, "Y"), (vz, "Z")];
-    for (i, (val, label)) in axes.iter().enumerate() {
-        let row_y = y + 24 + i as i32 * 22;
-
-        Text::with_baseline(label, Point::new(x + 16, row_y), lbl_font, Baseline::Top)
-            .draw(display).ok();
-
-        let mut buf = heapless::String::<8>::new();
-        write!(buf, "{:>6}", val).ok();
-        Text::with_baseline(&buf, Point::new(x + 36, row_y), val_font, Baseline::Top)
-            .draw(display).ok();
-
-        let bar_val = ((*val as i32 + range).clamp(0, range * 2) * 100 / (range * 2)) as u16;
-        primitives::flat_bar(display, bar_x, row_y + 6, bar_w, 8, bar_val, 100, theme::AMBER, theme::AMBER_DIM);
-    }
+    fonts::draw_centered(
+        display, &fonts::value(),
+        value, x + w / 2, y + 38,
+        theme::TEXT_WHITE,
+    );
 }
 
-/// Rounded card combining temperature and touch state.
-fn draw_env_card<D: DrawTarget<Color = Rgb565>>(
+/// Three stacked value cards for X / Y / Z axes.
+fn render_axes_cards<D: DrawTarget<Color = Rgb565>>(
     display: &mut D,
-    x: i32, y: i32, w: i32, h: i32,
-    data: &SystemData,
+    vx: i16, vy: i16, vz: i16,
 ) {
-    primitives::rounded_panel(display, x, y, w, h, theme::CARD_RADIUS, None, Some(theme::AMBER_DIM));
+    let mut buf: heapless::String<8> = heapless::String::new();
+    let mut y = FIRST_CARD_Y;
 
-    let title_font = MonoTextStyle::new(&ascii::FONT_6X10, theme::AMBER);
-    Text::with_baseline("ENV", Point::new(x + 12, y + 8), title_font, Baseline::Top)
-        .draw(display).ok();
+    write!(buf, "{}", vx).ok();
+    draw_value_card(display, CARD_X, y, CARD_W, CARD_H, "X", &buf);
+    buf.clear();
+    y += CARD_H + CARD_GAP;
 
-    let lbl_font = MonoTextStyle::new(&ascii::FONT_10X20, theme::AMBER);
-    let val_font = MonoTextStyle::new(&ascii::FONT_10X20, theme::TEXT_WHITE);
+    write!(buf, "{}", vy).ok();
+    draw_value_card(display, CARD_X, y, CARD_W, CARD_H, "Y", &buf);
+    buf.clear();
+    y += CARD_H + CARD_GAP;
 
-    // TEMP row
-    Text::with_baseline("TEMP", Point::new(x + 16, y + 28), lbl_font, Baseline::Top)
-        .draw(display).ok();
+    write!(buf, "{}", vz).ok();
+    draw_value_card(display, CARD_X, y, CARD_W, CARD_H, "Z", &buf);
+}
+
+/// Two value cards for the environment page (TEMP and TOUCH).
+fn render_env_cards<D: DrawTarget<Color = Rgb565>>(
+    display: &mut D, data: &SystemData,
+) {
+    let mut y = FIRST_CARD_Y;
+
     let temp_c = data.temp_raw / 256;
-    let mut buf = heapless::String::<8>::new();
-    write!(buf, "{}C", temp_c).ok();
-    Text::with_baseline(&buf, Point::new(x + 80, y + 28), val_font, Baseline::Top)
-        .draw(display).ok();
-    let bar_val = (temp_c as u16).clamp(0, 60);
-    primitives::flat_bar(display, x + 140, y + 34, w - 152, 8, bar_val, 60, theme::TEAL, theme::TEAL_DIM);
+    let mut temp_buf: heapless::String<12> = heapless::String::new();
+    let _ = write!(temp_buf, "{} C", temp_c);
+    draw_value_card(display, CARD_X, y, CARD_W, CARD_H, "TEMP", &temp_buf);
+    y += CARD_H + CARD_GAP;
 
-    // TOUCH row
-    let active = data.touch_x.is_some();
-    Text::with_baseline("TOUCH", Point::new(x + 16, y + 62), lbl_font, Baseline::Top)
-        .draw(display).ok();
-    match (data.touch_x, data.touch_y) {
+    let mut touch_buf: heapless::String<24> = heapless::String::new();
+    let touch_value: &str = match (data.touch_x, data.touch_y) {
         (Some(tx), Some(ty)) => {
-            let mut buf = heapless::String::<24>::new();
-            write!(buf, "{:>3},{:>3}", tx, ty).ok();
-            let color = if active { theme::AMBER_HI } else { theme::TEXT_WHITE };
-            let font = MonoTextStyle::new(&ascii::FONT_10X20, color);
-            Text::with_baseline(&buf, Point::new(x + 96, y + 62), font, Baseline::Top)
-                .draw(display).ok();
+            let _ = write!(touch_buf, "{}, {}", tx, ty);
+            touch_buf.as_str()
         }
-        _ => {
-            let font = MonoTextStyle::new(&ascii::FONT_10X20, theme::TEXT_DIM);
-            Text::with_baseline("NO CONTACT", Point::new(x + 96, y + 62), font, Baseline::Top)
-                .draw(display).ok();
-        }
-    }
+        _ => "NO CONTACT",
+    };
+    draw_value_card(display, CARD_X, y, CARD_W, CARD_H, "TOUCH", touch_value);
 }

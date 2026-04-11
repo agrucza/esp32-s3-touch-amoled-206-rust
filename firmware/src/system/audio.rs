@@ -11,6 +11,11 @@ use esp_hal::{
     i2s::AnyI2s,
 };
 
+/// Owns the hardware drivers for the audio subsystem. The fields are
+/// held here purely so their Drop impls don't run (which would
+/// deinitialize the DAC/ADC and disable the amplifier). We don't read
+/// them yet, but removing them would silently break audio output.
+#[allow(dead_code)]
 pub struct AudioSystem<'d> {
     pub speaker_amp: SpeakerAmp<'d>,
     pub codec: Es8311,

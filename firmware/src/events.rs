@@ -3,6 +3,7 @@
 /// The main loop collects these each tick, then dispatches them
 /// to handlers. This separates event production (polling) from
 /// event handling (actions/state changes).
+#[allow(dead_code)] // event payload fields are part of the public API
 #[derive(Debug, Clone)]
 pub enum SystemEvent {
     // -- Input --

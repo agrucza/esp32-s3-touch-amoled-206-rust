@@ -24,6 +24,10 @@ pub type Display<'d> = CO5300<'static, EspQspi<'d>, Output<'d>>;
 pub type AudioTx<'d> = I2sWriteDmaTransferAsync<'d, &'static mut [u8]>;
 pub type AudioRx<'d> = I2sReadDmaTransferAsync<'d, &'static mut [u8]>;
 
+// `audio`, `storage`, and `tx_transfer` are currently held-but-not-read:
+// they own hardware resources whose Drop impls would deinitialize the
+// peripherals. They stay as fields so the hardware keeps running.
+#[allow(dead_code)]
 pub struct SystemManager<'d> {
     // Bus
     i2c: I2c<'d, Blocking>,

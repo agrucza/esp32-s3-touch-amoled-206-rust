@@ -11,16 +11,14 @@ use core::fmt::Write;
 use embedded_graphics::{
     draw_target::DrawTarget,
     geometry::Point,
-    mono_font::{ascii, MonoTextStyle},
     pixelcolor::Rgb565,
     prelude::Primitive,
     primitives::{Line, PrimitiveStyle},
-    text::Text,
     Drawable,
 };
 
 use crate::events::SystemEvent;
-use crate::ui::theme;
+use crate::ui::{fonts, theme};
 use crate::ui::types::{Action, Screen, SystemData};
 
 /// How many pixels deep the measurement lines extend from each edge.
@@ -40,7 +38,7 @@ impl Screen for CornerTestScreen {
 
         let w = theme::SCREEN_W as i32;
         let h = theme::SCREEN_H as i32;
-        let font = MonoTextStyle::new(&ascii::FONT_6X10, theme::TEXT_WHITE);
+        let label_font = fonts::caption();
 
         // -- TOP: horizontal lines every 2px --
         for y in (0..=BAND).step_by(2) {
@@ -52,7 +50,7 @@ impl Screen for CornerTestScreen {
         for y in (0..=BAND).step_by(10) {
             let mut buf = heapless::String::<8>::new();
             write!(buf, "{}", y).ok();
-            Text::new(&buf, Point::new(w / 2 - 10, y + 9), font).draw(display).ok();
+            fonts::draw_centered(display, &label_font, &buf, w / 2, y, theme::TEXT_WHITE);
         }
 
         // -- BOTTOM: horizontal lines every 2px --
@@ -65,7 +63,7 @@ impl Screen for CornerTestScreen {
         for y in (h - BAND..h).step_by(10) {
             let mut buf = heapless::String::<8>::new();
             write!(buf, "{}", y).ok();
-            Text::new(&buf, Point::new(w / 2 - 10, y + 9), font).draw(display).ok();
+            fonts::draw_centered(display, &label_font, &buf, w / 2, y, theme::TEXT_WHITE);
         }
 
         // -- LEFT: vertical lines every 2px --

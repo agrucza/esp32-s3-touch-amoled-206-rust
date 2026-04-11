@@ -2,6 +2,14 @@
 //! Waveshare ESP32-S3-Touch-AMOLED-2.06 (32MB Flash + 8MB OPI PSRAM).
 //!
 //! Source: config.h from the working PlatformIO/Arduino reference project.
+//!
+//! These constants are a reference table for the hardware layout. They
+//! are intentionally kept feature-complete even when nothing currently
+//! imports them - any new subsystem that needs a pin number should be
+//! able to pull it from here instead of re-deriving it from the
+//! schematic.
+
+#![allow(dead_code)]
 
 // =============================================================================
 // Display - RM67162 AMOLED, QSPI interface

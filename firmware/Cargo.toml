@@ -52,6 +52,9 @@ drivers  = { path = "../drivers", features = ["display", "imu", "pmu", "rtc", "t
 embedded-graphics-core = { workspace = true }
 embedded-graphics      = "0.8.2"
 
+# --- Larger / fancier fonts (u8g2 fonts wrapped for embedded-graphics) ---
+u8g2-fonts = "0.7.2"
+
 # --- Stack-allocated collections ---
 heapless = "0.9.2"
 

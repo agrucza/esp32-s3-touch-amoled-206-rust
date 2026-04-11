@@ -22,7 +22,7 @@
 use esp_hal::{
     Async,
     dma::{DmaChannelFor, DmaDescriptor},
-    gpio::{Level, Output, OutputConfig, interconnect::{PeripheralInput, PeripheralOutput}},
+    gpio::{Output, interconnect::{PeripheralInput, PeripheralOutput}},
     i2s::master::{I2s, I2sRx, I2sTx, Config, DataFormat, Channels},
     time::Rate,
 };
@@ -42,6 +42,7 @@ impl<'d> SpeakerAmp<'d> {
     }
 
     pub fn enable(&mut self)  { self.ctrl.set_high(); }
+    #[allow(dead_code)]
     pub fn disable(&mut self) { self.ctrl.set_low();  }
 }
 

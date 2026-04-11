@@ -20,6 +20,12 @@ pub enum ScreenId {
 // -- Actions -----------------------------------------------------------------
 
 /// What a screen wants the system to do after processing an event.
+///
+/// `SwitchScreen` is currently unused but stays as part of the screen
+/// API - screens may want to programmatically navigate (e.g., a
+/// settings screen returning to Clock, an alarm firing jumping to a
+/// timer screen).
+#[allow(dead_code)] // SwitchScreen is reserved for programmatic nav
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Action {
     /// Nothing to do.
@@ -38,6 +44,7 @@ pub enum Action {
 ///
 /// Screens pick what they need from this. Adding new fields here
 /// makes them available to all screens without changing the trait.
+#[allow(dead_code)] // `second` is read by future screens (e.g. a seconds face)
 pub struct SystemData {
     // Time
     pub hour: u8,
