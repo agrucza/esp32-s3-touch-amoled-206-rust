@@ -124,12 +124,13 @@ pub fn build_spi<'d>(
     let dma_rx_buf = DmaRxBuf::new(rx_descriptors, rx_buffer).unwrap();
     let dma_tx_buf = DmaTxBuf::new(tx_descriptors, tx_buffer).unwrap();
 
-    // 80 MHz: exceeds the CO5300 15ns write spec (~66 MHz max) but works on
-    // most panels in practice. Drop to 40 MHz if you see display artifacts.
+    // 66 MHz: at the CO5300 15ns write spec limit. If this turns out
+    // to be unstable in practice we can drop to 40 MHz or push back
+    // up to 80 MHz (out of spec but known to work on most panels).
     let spi = Spi::new(
         spi,
         Config::default()
-            .with_frequency(Rate::from_mhz(80))
+            .with_frequency(Rate::from_mhz(66))
             .with_mode(Mode::_0),
     )
     .unwrap()

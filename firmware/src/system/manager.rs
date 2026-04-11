@@ -413,20 +413,23 @@ impl<'d> SystemManager<'d> {
 
         self.tick_count = self.tick_count.wrapping_add(1);
 
-        // Adaptive sleep:
-        //   - While a finger is down, keep the 50 ms cadence so the
-        //     drag stream stays smooth.
-        //   - Idle: wait up to 150 ms on the touch INT line. The mic
-        //     I2S DMA ring holds ~256 ms at 16 kHz stereo; 150 ms
-        //     leaves a comfortable margin before overflow while still
-        //     waking instantly on the next touch.
-        if self.touch_pos.is_some() {
-            Timer::after(Duration::from_millis(50)).await;
+        // Always sleep on the touch INT line with an adaptive timeout.
+        // The FT3168 asserts INT whenever a new sample is ready, so
+        // waking on the edge gives us the tightest drag sample rate
+        // the controller can provide (60-120 Hz typical) instead of
+        // the 20 Hz we'd get with a fixed tick timer.
+        //
+        // Timeout role is just a safety net:
+        //   - 50 ms while a finger is down, to cover the case where
+        //     INT misses or the controller doesn't re-assert.
+        //   - 150 ms idle, to bound mic I2S drain and battery/clock
+        //     polling. The mic DMA ring holds ~256 ms at 16 kHz
+        //     stereo so 150 ms leaves comfortable overflow margin.
+        let sleep = if self.touch_pos.is_some() {
+            Duration::from_millis(50)
         } else {
-            let _ = with_timeout(
-                Duration::from_millis(150),
-                self.input.wait_for_touch_int(),
-            ).await;
-        }
+            Duration::from_millis(150)
+        };
+        let _ = with_timeout(sleep, self.input.wait_for_touch_int()).await;
     }
 }
