@@ -1,6 +1,6 @@
 extern crate alloc;
 
-use crate::display_hal::{self, CO5300, EspQspi};
+use crate::display_hal::{self, CO5300, EspQspi, WIDTH, HEIGHT};
 use crate::events::{SwipeDir, SwipeRegion, SystemEvent};
 use crate::sdcard_hal::EspVolumeManager;
 use crate::system::{audio::AudioSystem, input::InputSystem, power::PowerSystem, sensors::SensorSystem};
@@ -8,7 +8,7 @@ use crate::ui::primitives;
 use crate::ui::screens::{self, ActiveScreen};
 use crate::ui::types::{Action, ScreenId, SystemData};
 use embedded_graphics::draw_target::DrawTarget;
-use embassy_time::{Duration, Timer};
+use embassy_time::{Duration, Timer, with_timeout};
 use esp_hal::{
     Blocking,
     dma::DmaDescriptor,
@@ -22,6 +22,28 @@ use esp_hal::{
 pub type Display<'d> = CO5300<'static, EspQspi<'d>, Output<'d>>;
 pub type AudioTx<'d> = I2sWriteDmaTransferAsync<'d, &'static mut [u8]>;
 pub type AudioRx<'d> = I2sReadDmaTransferAsync<'d, &'static mut [u8]>;
+
+/// Size of the per-tick mic RX drain buffer. Matches the I2S RX DMA
+/// buffer in `main.rs` so one `pop()` can empty a full buffer.
+const MIC_DRAIN_BUF_SIZE: usize = 16_384;
+
+/// Framebuffer row stride in bytes. Used by the dirty-row flush path.
+const ROW_STRIDE: usize = WIDTH as usize * 2;
+
+/// FNV-1a 32-bit hash of one framebuffer row. Rows are `WIDTH * 2`
+/// bytes = 820 bytes = 205 u32 words, so we process the row as u32
+/// chunks (the row width is hardware-fixed to an even number of u32s,
+/// so there is no tail to worry about).
+#[inline]
+fn row_hash(row: &[u8]) -> u32 {
+    let mut h: u32 = 0x811c_9dc5;
+    for chunk in row.chunks_exact(4) {
+        let v = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+        h ^= v;
+        h = h.wrapping_mul(0x0100_0193);
+    }
+    h
+}
 
 // `audio`, `storage`, and `tx_transfer` are currently held-but-not-read:
 // they own hardware resources whose Drop impls would deinitialize the
@@ -41,6 +63,11 @@ pub struct SystemManager<'d> {
     pub sensors: SensorSystem,
     pub storage: Option<EspVolumeManager<'d>>,
 
+    // Tearing-effect line from the display. We wait for its rising
+    // edge (vblank start) before pushing pixels so partial flushes
+    // don't land mid-scanout.
+    lcd_te: Input<'d>,
+
     // DMA transfers
     tx_transfer: AudioTx<'d>,
     rx_transfer: AudioRx<'d>,
@@ -50,6 +77,17 @@ pub struct SystemManager<'d> {
     tick_count: u32,
     touch_pos: Option<(u16, u16)>,
     needs_redraw: bool,
+
+    // Pre-allocated drain buffer for the mic RX DMA ring. Lives as a
+    // field so tick() never hits the heap.
+    mic_drain_buf: alloc::boxed::Box<[u8]>,
+
+    // Per-row FNV-1a hashes from the previous frame. Compared against
+    // the current frame to determine which rows actually changed, so
+    // only the dirty horizontal band is pushed over QSPI.
+    // Initialized to zero, which ensures the first frame sees every
+    // row as dirty and performs a full flush.
+    row_hashes: alloc::boxed::Box<[u32]>,
 }
 
 /// All peripheral tokens needed by the system manager.
@@ -80,6 +118,7 @@ pub struct Peripherals<'d> {
     pub lcd_cs: esp_hal::peripherals::GPIO12<'d>,
     pub dma_ch0: esp_hal::peripherals::DMA_CH0<'d>,
     pub lcd_reset: esp_hal::peripherals::GPIO8<'d>,
+    pub lcd_te: esp_hal::peripherals::GPIO13<'d>,
 
     // Input
     pub btn_boot: esp_hal::peripherals::GPIO0<'d>,
@@ -152,6 +191,11 @@ impl<'d> SystemManager<'d> {
             fb,
         ).await;
 
+        // TE (tearing-effect) input. The CO5300 init already enabled
+        // TE in vblank-only mode (cmd 0x35 [0x00]); we just need to
+        // watch the rising edge before each flush.
+        let lcd_te = Input::new(p.lcd_te, InputConfig::default().with_pull(Pull::None));
+
         // 5. Input (buttons + touch)
         let input = InputSystem::init(
             Input::new(p.btn_boot, InputConfig::default().with_pull(Pull::Up)),
@@ -189,12 +233,15 @@ impl<'d> SystemManager<'d> {
             audio,
             sensors,
             storage,
+            lcd_te,
             tx_transfer,
             rx_transfer,
             screen: ActiveScreen::new(ScreenId::Clock),
             tick_count: 0,
             touch_pos: None,
             needs_redraw: true, // first frame always draws
+            mic_drain_buf: alloc::vec![0u8; MIC_DRAIN_BUF_SIZE].into_boxed_slice(),
+            row_hashes: alloc::vec![0u32; HEIGHT as usize].into_boxed_slice(),
         }
     }
 
@@ -203,11 +250,9 @@ impl<'d> SystemManager<'d> {
     /// Drains audio DMA, polls events, routes them through the
     /// active screen. Only redraws the display when something changed.
     pub async fn tick(&mut self) {
-        // Drain mic RX buffer to prevent overflow
-        {
-            let mut pcm = alloc::vec![0u8; 16384];
-            let _ = self.rx_transfer.pop(&mut pcm).await;
-        }
+        // Drain mic RX buffer to prevent overflow. The buffer is a
+        // field so this never allocates.
+        let _ = self.rx_transfer.pop(&mut self.mic_drain_buf).await;
 
         // Poll all subsystems for events
         let mut events: heapless::Vec<SystemEvent, 8> = heapless::Vec::new();
@@ -263,33 +308,35 @@ impl<'d> SystemManager<'d> {
                 }
             }
 
-            // Quick-nav: content left/right swipes cycle through the
-            // home-row apps directly (only when we're on a home-row
-            // app itself - panel has its own L/R handling and isn't
-            // in the carousel).
-            if !matches!(self.screen.id(), ScreenId::Panel) {
-                if let SystemEvent::Swipe { dir, region: SwipeRegion::Content } = event {
-                    match dir {
-                        SwipeDir::Right => {
-                            let next = screens::cycle_home_app(self.screen.id(), true);
-                            self.screen.switch_to(next);
-                            self.needs_redraw = true;
-                            continue;
+            // Forward to the active screen first. If the screen returns
+            // Action::None and the event is a content L/R swipe, fall
+            // through to the home-row nav fallback below. This lets a
+            // screen (e.g. a horizontal slider) own its L/R gestures by
+            // returning anything other than None.
+            match self.screen.on_event(event, &data) {
+                Action::None => {
+                    // Home-row nav fallback: content L/R swipes cycle
+                    // through the home-row apps. Panel is modal and
+                    // never participates in the carousel, so we skip
+                    // the fallback when it's active.
+                    if !matches!(self.screen.id(), ScreenId::Panel) {
+                        if let SystemEvent::Swipe { dir, region: SwipeRegion::Content } = event {
+                            match dir {
+                                SwipeDir::Right => {
+                                    let next = screens::cycle_home_app(self.screen.id(), true);
+                                    self.screen.switch_to(next);
+                                    self.needs_redraw = true;
+                                }
+                                SwipeDir::Left => {
+                                    let prev = screens::cycle_home_app(self.screen.id(), false);
+                                    self.screen.switch_to(prev);
+                                    self.needs_redraw = true;
+                                }
+                                _ => {}
+                            }
                         }
-                        SwipeDir::Left => {
-                            let prev = screens::cycle_home_app(self.screen.id(), false);
-                            self.screen.switch_to(prev);
-                            self.needs_redraw = true;
-                            continue;
-                        }
-                        _ => {}
                     }
                 }
-            }
-
-            // Everything else is forwarded to the active screen.
-            match self.screen.on_event(event, &data) {
-                Action::None => {}
                 Action::Redraw => self.needs_redraw = true,
                 Action::SwitchScreen(id) => {
                     self.screen.switch_to(id);
@@ -323,11 +370,63 @@ impl<'d> SystemManager<'d> {
                 primitives::battery_warning_frame(&mut self.display, pct);
             }
 
-            self.display.flush().await;
+            // Hash each row, compare to the previous frame, push only
+            // the contiguous vertical band that changed. If nothing
+            // changed we skip the QSPI push entirely.
+            let fb = self.display.framebuffer();
+            let mut min_y: Option<u16> = None;
+            let mut max_y: u16 = 0;
+            for y in 0..HEIGHT {
+                let off = y as usize * ROW_STRIDE;
+                let h = row_hash(&fb[off..off + ROW_STRIDE]);
+                if h != self.row_hashes[y as usize] {
+                    self.row_hashes[y as usize] = h;
+                    if min_y.is_none() { min_y = Some(y); }
+                    max_y = y;
+                }
+            }
+            if let Some(y0) = min_y {
+                // Wait for the next vblank (TE rising edge) before
+                // pushing pixels, so the flush lands between frames
+                // and doesn't tear across scanlines. Timeout at
+                // ~2 refresh periods in case TE is silent for any
+                // reason - we'd rather flush late than hang.
+                let _ = with_timeout(
+                    Duration::from_millis(30),
+                    self.lcd_te.wait_for_rising_edge(),
+                ).await;
+                self.display.flush_rows(y0, max_y + 1).await;
+            }
             self.needs_redraw = false;
         }
 
+        // Heap watermark log every ~10 s (200 ticks * 50 ms). Used to
+        // spot allocation churn in the hot path - `used` should be flat
+        // in steady state.
+        if self.tick_count % 200 == 0 {
+            log::info!(
+                "heap: used={} free={}",
+                esp_alloc::HEAP.used(),
+                esp_alloc::HEAP.free(),
+            );
+        }
+
         self.tick_count = self.tick_count.wrapping_add(1);
-        Timer::after(Duration::from_millis(50)).await;
+
+        // Adaptive sleep:
+        //   - While a finger is down, keep the 50 ms cadence so the
+        //     drag stream stays smooth.
+        //   - Idle: wait up to 150 ms on the touch INT line. The mic
+        //     I2S DMA ring holds ~256 ms at 16 kHz stereo; 150 ms
+        //     leaves a comfortable margin before overflow while still
+        //     waking instantly on the next touch.
+        if self.touch_pos.is_some() {
+            Timer::after(Duration::from_millis(50)).await;
+        } else {
+            let _ = with_timeout(
+                Duration::from_millis(150),
+                self.input.wait_for_touch_int(),
+            ).await;
+        }
     }
 }

@@ -27,7 +27,7 @@ use esp_hal::{
     time::Rate,
 };
 
-pub use drivers::display::{co5300::FB_BYTES, CO5300};
+pub use drivers::display::{co5300::{FB_BYTES, WIDTH, HEIGHT}, CO5300};
 
 /// DCS commands used inside `write_pixels`.
 const RAMWR:  u8 = 0x2C;

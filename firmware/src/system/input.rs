@@ -95,6 +95,14 @@ impl<'d> InputSystem<'d> {
         SystemEvent::Swipe { dir, region }
     }
 
+    /// Wait asynchronously until the touch controller asserts its INT
+    /// line (active low). Returns immediately if the line is already
+    /// low. Used by the main loop to sleep until the next touch event
+    /// instead of polling on a fixed interval.
+    pub async fn wait_for_touch_int(&mut self) {
+        self.touch_int.wait_for_low().await;
+    }
+
     /// Poll all input sources and push events into the buffer.
     pub fn poll(&mut self, i2c: &mut impl I2c, events: &mut heapless::Vec<SystemEvent, 8>) {
         // BOOT button - falling edge detection

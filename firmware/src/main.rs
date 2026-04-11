@@ -55,6 +55,7 @@ async fn main(spawner: embassy_executor::Spawner) {
         lcd_cs: p.GPIO12,
         dma_ch0: p.DMA_CH0,
         lcd_reset: p.GPIO8,
+        lcd_te: p.GPIO13,
         btn_boot: p.GPIO0,
         touch_rst: p.GPIO9,
         touch_int: p.GPIO38,

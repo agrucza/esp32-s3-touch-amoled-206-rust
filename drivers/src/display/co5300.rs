@@ -5,9 +5,10 @@
 //! The driver holds a mutable reference to a framebuffer slice provided by the
 //! caller. All drawing operations (fill, blit, DrawTarget) are synchronous RAM
 //! writes into the framebuffer - no bus I/O, no waiting. When the scene is
-//! ready, call `flush()` which sends the entire framebuffer to the display over
-//! the QSPI bus (using DMA or whatever transport the `QspiWrite` implementor
-//! provides).
+//! ready, call `flush_rows(y0, y1)` which pushes the given horizontal band
+//! over the QSPI bus (using DMA or whatever transport the `QspiWrite`
+//! implementor provides). The caller is responsible for deciding which
+//! rows are dirty; the driver just pushes what it's told.
 //!
 //! On ESP32-S3R8 the framebuffer should be placed in PSRAM:
 //!
@@ -148,7 +149,7 @@ impl<'fb, B: QspiWrite, RST: OutputPin> CO5300<'fb, B, RST> {
     /// Timing (datasheet section 5.6.1 / 7.5.12):
     ///   - Wait >= 5 ms after this command before any next command.
     ///   - Wait >= 120 ms after SLPIN before issuing SLPOUT.
-    ///   - Call `flush()` only after the 120 ms settle has elapsed.
+    ///   - Call `flush_rows` only after the 120 ms settle has elapsed.
     pub async fn wake(&mut self) {
         self.write_cmd(cmd::SLPOUT, &[]).await;
     }
@@ -180,17 +181,41 @@ impl<'fb, B: QspiWrite, RST: OutputPin> CO5300<'fb, B, RST> {
 
     // ---- Flush ----------------------------------------------------------
 
-    /// Send the entire framebuffer to the display.
+    /// Send a horizontal band of the framebuffer to the display.
     ///
-    /// This is the only async drawing operation. All drawing methods write
-    /// to the in-RAM framebuffer synchronously; call `flush()` when the
-    /// scene is complete to push it to the panel in one DMA transfer.
+    /// Rows `[y0, y1)` are pushed full-width. Because the framebuffer is
+    /// row-major and we always push whole rows, the slice stays contiguous
+    /// and no bounce buffer is needed.
     ///
-    /// The `QspiWrite` implementor is responsible for bouncing data through
-    /// internal SRAM if the framebuffer resides in PSRAM.
-    pub async fn flush(&mut self) {
-        self.set_addr_window(0, 0, WIDTH, HEIGHT).await;
-        self.bus.write_pixels(true, self.framebuffer).await.ok();
+    /// Used by the dirty-row flush path in the main loop, which hashes
+    /// each row to find the vertical band that actually changed since
+    /// the previous frame and only pushes that band.
+    ///
+    /// The CO5300 (like its QSPI AMOLED siblings SH8601 / GC9B71) packs
+    /// pixels in 2x1 units internally and requires the row window to be
+    /// aligned to 2-row pairs: the inclusive start row must be even and
+    /// the inclusive end row must be odd. If a misaligned window is sent
+    /// the panel rounds to the nearest pair on its side while our pixel
+    /// data stays at the original offset, shifting every row by one and
+    /// leaving stale pixels at the edges. To avoid that, `y0` is rounded
+    /// down to the nearest even row and `y1` is rounded up, so the band
+    /// we actually push always covers the caller's requested range.
+    pub async fn flush_rows(&mut self, y0: u16, y1: u16) {
+        if y1 <= y0 || y0 >= HEIGHT { return; }
+        let y0 = y0 & !1;
+        let y1 = ((y1 + 1) & !1).min(HEIGHT);
+        let h  = y1 - y0;
+        self.set_addr_window(0, y0, WIDTH, h).await;
+        let stride = WIDTH as usize * 2;
+        let start  = y0 as usize * stride;
+        let end    = y1 as usize * stride;
+        self.bus.write_pixels(true, &self.framebuffer[start..end]).await.ok();
+    }
+
+    /// Read-only access to the framebuffer. The main loop uses this to
+    /// hash rows for dirty-tracking; nothing else should need it.
+    pub fn framebuffer(&self) -> &[u8] {
+        self.framebuffer
     }
 
     // ---- Private helpers ------------------------------------------------
