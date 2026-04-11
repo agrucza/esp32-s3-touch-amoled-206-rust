@@ -215,18 +215,18 @@ impl<'d> SystemManager<'d> {
         self.power.poll(&mut self.i2c, &mut events);
         self.sensors.poll(&mut self.i2c, &mut events);
 
-        // Track touch state and battery from events
+        // Track touch state from events, and mark state-change events
+        // as redraw triggers. Everything else goes through the screen's
+        // Action return value so screens opt in to redraws explicitly
+        // (avoids a redraw on every TouchPressed tick during a drag).
         for event in events.iter() {
             match event {
                 SystemEvent::TouchPressed { x, y } => self.touch_pos = Some((*x, *y)),
                 SystemEvent::TouchReleased => self.touch_pos = None,
+                SystemEvent::MinuteChanged
+                | SystemEvent::BatteryChanged { .. } => self.needs_redraw = true,
                 _ => {}
             }
-        }
-
-        // Any event triggers a redraw
-        if !events.is_empty() {
-            self.needs_redraw = true;
         }
 
         // Build data snapshot for rendering

@@ -1,5 +1,4 @@
 pub mod clock;
-pub mod corner_test;
 pub mod panel;
 pub mod status;
 
@@ -36,7 +35,6 @@ pub fn cycle_home_app(current: ScreenId, forward: bool) -> ScreenId {
 pub enum ActiveScreen {
     Clock(clock::ClockScreen),
     Status(status::StatusScreen),
-    CornerTest(corner_test::CornerTestScreen),
     Panel(panel::PanelScreen),
 }
 
@@ -46,14 +44,16 @@ impl ActiveScreen {
     /// Note: `ScreenId::Panel` can't be constructed this way - the
     /// panel needs a `previous: ScreenId` context that plain id-based
     /// construction can't supply. Use `new_panel(previous)` instead.
-    /// If `ScreenId::Panel` is passed here we fall back to Clock
-    /// rather than panicking.
+    /// Passing `ScreenId::Panel` here is a programming error and will
+    /// trip a debug assertion; release builds fall back to Clock.
     pub fn new(id: ScreenId) -> Self {
         match id {
             ScreenId::Clock => Self::Clock(clock::ClockScreen::new()),
             ScreenId::Status => Self::Status(status::StatusScreen::new()),
-            ScreenId::CornerTest => Self::CornerTest(corner_test::CornerTestScreen::new()),
-            ScreenId::Panel => Self::Clock(clock::ClockScreen::new()),
+            ScreenId::Panel => {
+                debug_assert!(false, "use ActiveScreen::new_panel(previous) for Panel");
+                Self::Clock(clock::ClockScreen::new())
+            }
         }
     }
 
@@ -67,7 +67,6 @@ impl ActiveScreen {
         match self {
             Self::Clock(s) => s.render(display, data),
             Self::Status(s) => s.render(display, data),
-            Self::CornerTest(s) => s.render(display, data),
             Self::Panel(s) => s.render(display, data),
         }
     }
@@ -76,7 +75,6 @@ impl ActiveScreen {
         match self {
             Self::Clock(s) => s.on_event(event, data),
             Self::Status(s) => s.on_event(event, data),
-            Self::CornerTest(s) => s.on_event(event, data),
             Self::Panel(s) => s.on_event(event, data),
         }
     }
@@ -86,7 +84,6 @@ impl ActiveScreen {
         match self {
             Self::Clock(_) => ScreenId::Clock,
             Self::Status(_) => ScreenId::Status,
-            Self::CornerTest(_) => ScreenId::CornerTest,
             Self::Panel(_) => ScreenId::Panel,
         }
     }

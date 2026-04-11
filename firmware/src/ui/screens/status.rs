@@ -69,6 +69,10 @@ impl Screen for StatusScreen {
     fn on_event(&mut self, event: &SystemEvent, _data: &SystemData) -> Action {
         match event {
             SystemEvent::PowerButtonLong => Action::Shutdown,
+            // ENV page shows live touch coords - redraw while a finger
+            // is down so the TOUCH card tracks the drag.
+            SystemEvent::TouchPressed { .. } if self.page == 2 => Action::Redraw,
+            SystemEvent::TouchReleased if self.page == 2 => Action::Redraw,
             SystemEvent::Swipe { dir: SwipeDir::Up, region: SwipeRegion::Content } => {
                 self.page = (self.page + 1) % PAGE_COUNT;
                 Action::Redraw

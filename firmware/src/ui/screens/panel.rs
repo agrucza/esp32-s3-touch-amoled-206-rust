@@ -315,7 +315,6 @@ fn app_display_name(id: ScreenId) -> &'static str {
     match id {
         ScreenId::Clock => "Clock",
         ScreenId::Status => "Status",
-        ScreenId::CornerTest => "Corner",
         ScreenId::Panel => "Panel",
     }
 }
@@ -330,7 +329,6 @@ fn draw_app_icon<D: DrawTarget<Color = Rgb565>>(
     match id {
         ScreenId::Clock => draw_clock_glyph(display, cx, cy, radius, color),
         ScreenId::Status => draw_status_glyph(display, cx, cy, radius, color),
-        ScreenId::CornerTest => draw_corner_glyph(display, cx, cy, radius, color),
         // Showing the panel inside the panel would be unusual but we
         // give it a sensible glyph anyway (four dots / grid).
         ScreenId::Panel => draw_panel_glyph(display, cx, cy, radius, color),
@@ -378,23 +376,6 @@ fn draw_status_glyph<D: DrawTarget<Color = Rgb565>>(
         Rectangle::new(Point::new(x, y), Size::new(bar_w as u32, *h as u32))
             .into_styled(fill).draw(display).ok();
     }
-}
-
-fn draw_corner_glyph<D: DrawTarget<Color = Rgb565>>(
-    display: &mut D, cx: i32, cy: i32, radius: i32, color: Rgb565,
-) {
-    let stroke = PrimitiveStyle::with_stroke(color, 3);
-    let r = radius * 2 / 3;
-
-    Line::new(
-        Point::new(cx - r, cy - r),
-        Point::new(cx - r, cy + r),
-    ).into_styled(stroke).draw(display).ok();
-
-    Line::new(
-        Point::new(cx - r, cy + r),
-        Point::new(cx + r, cy + r),
-    ).into_styled(stroke).draw(display).ok();
 }
 
 fn draw_panel_glyph<D: DrawTarget<Color = Rgb565>>(

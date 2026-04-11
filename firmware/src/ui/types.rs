@@ -13,7 +13,6 @@ use drivers::rtc::DateTime;
 pub enum ScreenId {
     Clock,
     Status,
-    CornerTest,
     /// The pull-down app picker. Not part of the home-row rotation
     /// (it's reached only via swipe-down-from-header) and constructed
     /// via `ActiveScreen::new_panel(previous)` because it needs
