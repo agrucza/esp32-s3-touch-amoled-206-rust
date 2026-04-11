@@ -4,9 +4,8 @@ use crate::display_hal::{self, CO5300, EspQspi};
 use crate::events::{SwipeDir, SwipeRegion, SystemEvent};
 use crate::sdcard_hal::EspVolumeManager;
 use crate::system::{audio::AudioSystem, input::InputSystem, power::PowerSystem, sensors::SensorSystem};
-use crate::ui::panel;
 use crate::ui::primitives;
-use crate::ui::screens::ActiveScreen;
+use crate::ui::screens::{self, ActiveScreen};
 use crate::ui::types::{Action, ScreenId, SystemData};
 use embedded_graphics::draw_target::DrawTarget;
 use embassy_time::{Duration, Timer};
@@ -48,7 +47,6 @@ pub struct SystemManager<'d> {
 
     // UI
     screen: ActiveScreen,
-    panel_open: bool,
     tick_count: u32,
     touch_pos: Option<(u16, u16)>,
     needs_redraw: bool,
@@ -113,24 +111,6 @@ pub struct Peripherals<'d> {
 }
 
 impl<'d> SystemManager<'d> {
-    /// All available home-row screens, in carousel order. Clock is the
-    /// default home screen. CornerTest has been retired from the rotation
-    /// but its variant is still available for direct navigation from
-    /// debug/diagnostic code.
-    const SCREENS: [ScreenId; 2] = [ScreenId::Clock, ScreenId::Status];
-
-    /// Return the next (forward=true) or previous screen in SCREENS, wrapping.
-    fn cycle_screen(current: ScreenId, forward: bool) -> ScreenId {
-        let idx = Self::SCREENS.iter().position(|s| *s == current).unwrap_or(0);
-        let len = Self::SCREENS.len();
-        let next = if forward {
-            (idx + 1) % len
-        } else {
-            (idx + len - 1) % len
-        };
-        Self::SCREENS[next]
-    }
-
     /// Initialize all subsystems and assemble the system manager.
     ///
     /// This is the single entry point for the entire system. Call it from
@@ -212,7 +192,6 @@ impl<'d> SystemManager<'d> {
             tx_transfer,
             rx_transfer,
             screen: ActiveScreen::new(ScreenId::Clock),
-            panel_open: false,
             tick_count: 0,
             touch_pos: None,
             needs_redraw: true, // first frame always draws
@@ -270,55 +249,45 @@ impl<'d> SystemManager<'d> {
                 log::info!("Swipe: {:?} in {:?}", dir, region);
             }
 
-            // ---------- Panel is open: absorb events ----------
-            if self.panel_open {
-                match event {
-                    // Close on any upward swipe.
-                    SystemEvent::Swipe { dir: SwipeDir::Up, .. } => {
-                        self.panel_open = false;
-                        self.needs_redraw = true;
-                    }
-                    // Close on tap inside the close-button hit box.
-                    SystemEvent::TouchPressed { x, y } if panel::hit_close(*x, *y) => {
-                        self.panel_open = false;
-                        self.needs_redraw = true;
-                    }
-                    _ => {}
-                }
-                // While the panel owns the UI, nothing else sees this event.
-                continue;
-            }
-
-            // ---------- Panel is closed: normal routing ----------
-
-            // Swipe-down in the header opens the panel.
-            if let SystemEvent::Swipe { dir: SwipeDir::Down, region: SwipeRegion::Header } = event {
-                self.panel_open = true;
-                self.needs_redraw = true;
-                continue;
-            }
-
-            // Content left/right swipes cycle screens and are NOT forwarded
-            // to the active screen. Screens can use up/down swipes for their
-            // own scrolling/interaction.
-            if let SystemEvent::Swipe { dir, region: SwipeRegion::Content } = event {
-                match dir {
-                    SwipeDir::Right => {
-                        let next = Self::cycle_screen(self.screen.id(), true);
-                        self.screen.switch_to(next);
-                        self.needs_redraw = true;
-                        continue;
-                    }
-                    SwipeDir::Left => {
-                        let prev = Self::cycle_screen(self.screen.id(), false);
-                        self.screen.switch_to(prev);
-                        self.needs_redraw = true;
-                        continue;
-                    }
-                    _ => {}
+            // System-level gesture: swipe-down-from-top-edge opens
+            // the panel screen. Only triggers when we're NOT already
+            // in the panel (otherwise the panel screen handles its
+            // own swipes). Panel remembers the current screen so it
+            // can return to it on close.
+            if !matches!(self.screen.id(), ScreenId::Panel) {
+                if let SystemEvent::Swipe { dir: SwipeDir::Down, region: SwipeRegion::Top } = event {
+                    let previous = self.screen.id();
+                    self.screen = ActiveScreen::new_panel(previous);
+                    self.needs_redraw = true;
+                    continue;
                 }
             }
 
+            // Quick-nav: content left/right swipes cycle through the
+            // home-row apps directly (only when we're on a home-row
+            // app itself - panel has its own L/R handling and isn't
+            // in the carousel).
+            if !matches!(self.screen.id(), ScreenId::Panel) {
+                if let SystemEvent::Swipe { dir, region: SwipeRegion::Content } = event {
+                    match dir {
+                        SwipeDir::Right => {
+                            let next = screens::cycle_home_app(self.screen.id(), true);
+                            self.screen.switch_to(next);
+                            self.needs_redraw = true;
+                            continue;
+                        }
+                        SwipeDir::Left => {
+                            let prev = screens::cycle_home_app(self.screen.id(), false);
+                            self.screen.switch_to(prev);
+                            self.needs_redraw = true;
+                            continue;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+
+            // Everything else is forwarded to the active screen.
             match self.screen.on_event(event, &data) {
                 Action::None => {}
                 Action::Redraw => self.needs_redraw = true,
@@ -344,21 +313,14 @@ impl<'d> SystemManager<'d> {
         if self.needs_redraw {
             self.display.clear(crate::ui::theme::BG).ok();
 
-            // Full-screen app rendering - each screen owns the entire
-            // display. No persistent header or footer chrome.
+            // Panel is just another screen now - no special case.
             self.screen.render(&mut self.display, &data);
 
             // System-wide low-battery warning: a 1-px colored frame
-            // tracing the physical display edge. Drawn over the app so
-            // it remains visible no matter what is rendered.
+            // tracing the physical display edge. Drawn last so it
+            // remains visible over everything.
             if let Some(pct) = data.battery_percent {
                 primitives::battery_warning_frame(&mut self.display, pct);
-            }
-
-            // Pull-down panel is drawn last so it overlays everything
-            // including any system warnings.
-            if self.panel_open {
-                panel::draw(&mut self.display, &data);
             }
 
             self.display.flush().await;

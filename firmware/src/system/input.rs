@@ -1,5 +1,5 @@
 use crate::events::{SwipeDir, SwipeRegion, SystemEvent};
-use crate::ui::theme::{CONTENT_BOTTOM, CONTENT_TOP};
+use crate::ui::theme::{EDGE_GESTURE_ZONE, SCREEN_H};
 use drivers::touch::{FT3168, TouchEvent};
 use embedded_hal::i2c::I2c;
 use embassy_time::{Duration, Timer};
@@ -55,32 +55,44 @@ impl<'d> InputSystem<'d> {
         }
     }
 
-    /// Classify a touch release into an optional swipe event.
-    fn detect_swipe(start: (u16, u16), end: (u16, u16)) -> Option<SystemEvent> {
+    /// Classify a touch release into either a swipe or a tap event.
+    /// Returns `None` only if `start`/`end` were somehow missing.
+    fn classify_gesture(start: (u16, u16), end: (u16, u16)) -> SystemEvent {
         let dx = end.0 as i32 - start.0 as i32;
         let dy = end.1 as i32 - start.1 as i32;
         let adx = dx.abs();
         let ady = dy.abs();
 
         // Pick the dominant axis and require it to exceed the threshold.
+        // If neither axis passes, this wasn't a swipe - it's a tap at the
+        // starting position.
         let dir = if adx > ady {
-            if adx < SWIPE_THRESHOLD { return None; }
+            if adx < SWIPE_THRESHOLD {
+                return SystemEvent::Tap { x: start.0, y: start.1 };
+            }
             if dx > 0 { SwipeDir::Right } else { SwipeDir::Left }
         } else {
-            if ady < SWIPE_THRESHOLD { return None; }
+            if ady < SWIPE_THRESHOLD {
+                return SystemEvent::Tap { x: start.0, y: start.1 };
+            }
             if dy > 0 { SwipeDir::Down } else { SwipeDir::Up }
         };
 
-        // Region is determined by where the gesture started.
-        let region = if (start.1 as i32) < CONTENT_TOP {
-            SwipeRegion::Header
-        } else if (start.1 as i32) >= CONTENT_BOTTOM {
-            SwipeRegion::Footer
+        // Region is determined by where the gesture started. A swipe
+        // whose start y is within EDGE_GESTURE_ZONE of the top or
+        // bottom edge counts as an edge gesture; everything else is
+        // content.
+        let start_y = start.1 as i32;
+        let screen_h = SCREEN_H as i32;
+        let region = if start_y < EDGE_GESTURE_ZONE {
+            SwipeRegion::Top
+        } else if start_y >= screen_h - EDGE_GESTURE_ZONE {
+            SwipeRegion::Bottom
         } else {
             SwipeRegion::Content
         };
 
-        Some(SystemEvent::Swipe { dir, region })
+        SystemEvent::Swipe { dir, region }
     }
 
     /// Poll all input sources and push events into the buffer.
@@ -103,15 +115,14 @@ impl<'d> InputSystem<'d> {
                     let _ = events.push(SystemEvent::TouchPressed { x, y });
                 }
                 TouchEvent::Released => {
-                    // Classify the gesture before clearing state.
+                    // Emit the raw release first, then the synthesized
+                    // gesture interpretation (Tap or Swipe).
+                    let _ = events.push(SystemEvent::TouchReleased);
                     if let (Some(start), Some(end)) = (self.touch_start, self.touch_last) {
-                        if let Some(swipe) = Self::detect_swipe(start, end) {
-                            let _ = events.push(swipe);
-                        }
+                        let _ = events.push(Self::classify_gesture(start, end));
                     }
                     self.touch_start = None;
                     self.touch_last = None;
-                    let _ = events.push(SystemEvent::TouchReleased);
                 }
                 TouchEvent::None => {}
             }

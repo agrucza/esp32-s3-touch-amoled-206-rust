@@ -55,3 +55,13 @@ pub const CONTENT_H: i32 = CONTENT_BOTTOM - CONTENT_TOP;
 pub const MARGIN: i32 = 8;
 /// Default corner radius for rounded panels and cards.
 pub const CARD_RADIUS: u32 = 16;
+
+/// Depth (in pixels) of the system-gesture edge zone at the top and
+/// bottom of the display. A swipe whose *start* y lands within this
+/// many pixels of the top or bottom screen edge is classified as an
+/// edge gesture (system-level, e.g. pull-down-to-open-panel) rather
+/// than a content gesture. Kept deliberately tighter than the bezel
+/// corner radius so only gestures actually starting near the edge
+/// qualify - accidental brushes in the middle of the screen should
+/// be classified as content.
+pub const EDGE_GESTURE_ZONE: i32 = 48;
