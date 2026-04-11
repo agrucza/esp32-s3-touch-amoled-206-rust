@@ -7,6 +7,7 @@
 //! - `pill_solid` - filled pill (radius = h/2)
 //! - `circle_button` - filled circle with optional outline
 //! - `dot_carousel` - row of filled dots with one highlighted entry
+//! - `scrollbar_v` - vertical pill-shaped page indicator
 //! - `section_rule` - thin horizontal divider
 //! - `flat_bar` - solid progress bar (trough + fill)
 //! - `battery_color` / `battery_icon` / `battery_warning_frame` - battery
@@ -102,6 +103,41 @@ pub fn dot_carousel<D: DrawTarget<Color = Rgb565>>(
             .into_styled(PrimitiveStyle::with_fill(color))
             .draw(display).ok();
     }
+}
+
+// -- Vertical scrollbar ------------------------------------------------------
+
+/// Vertical page indicator styled as a pill-shaped scrollbar: a dim
+/// track with a brighter thumb whose position and height reflect the
+/// active page in a 0..count range. Use for vertically-paginated
+/// screens (counterpart to `dot_carousel` for horizontal rows).
+///
+/// The thumb occupies `1/count` of the track height and snaps to
+/// discrete per-page positions, so `count=3, active=0..2` places the
+/// thumb at the top, middle, and bottom thirds of the track.
+pub fn scrollbar_v<D: DrawTarget<Color = Rgb565>>(
+    display: &mut D,
+    x: i32, y: i32, w: i32, h: i32,
+    count: usize,
+    active_idx: usize,
+    active_color: Rgb565,
+    dim_color: Rgb565,
+) {
+    if count == 0 { return; }
+    let radius = (w as u32) / 2;
+
+    // Track
+    rounded_panel(display, x, y, w, h, radius, Some(dim_color), None);
+
+    // Thumb - height = 1/count of the track, clamped so it stays at
+    // least as tall as it is wide (keeps the pill shape readable even
+    // when there are many pages).
+    let thumb_h = (h / count as i32).max(w);
+    let max_off = (h - thumb_h).max(0);
+    let steps = (count as i32 - 1).max(1);
+    let active = (active_idx as i32).min(count as i32 - 1).max(0);
+    let thumb_y = y + (active * max_off) / steps;
+    rounded_panel(display, x, thumb_y, w, thumb_h, radius, Some(active_color), None);
 }
 
 // -- Section rule ------------------------------------------------------------

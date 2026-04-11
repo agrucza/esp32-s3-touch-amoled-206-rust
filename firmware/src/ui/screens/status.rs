@@ -55,10 +55,11 @@ impl Screen for StatusScreen {
             _ => {}
         }
 
-        // Page indicator dots at the bottom.
-        primitives::dot_carousel(
+        // Vertical scrollbar on the right, spanning the full
+        // bezel-safe content band.
+        primitives::scrollbar_v(
             display,
-            w / 2, 410,
+            SCROLLBAR_X, theme::CONTENT_TOP, SCROLLBAR_W, theme::CONTENT_H,
             PAGE_COUNT as usize,
             self.page as usize,
             theme::AMBER,
@@ -93,6 +94,12 @@ const CARD_W: i32 = 340;
 const CARD_H: i32 = 80;
 const CARD_GAP: i32 = 12;
 const FIRST_CARD_Y: i32 = 120;
+
+// Vertical page-indicator scrollbar, sitting to the right of the
+// card stack. Thin enough to stay clear of the bezel arc on the
+// right edge (screen is 410 wide, bezel corner radius is 98).
+const SCROLLBAR_W: i32 = 4;
+const SCROLLBAR_X: i32 = theme::SCREEN_W as i32 - 18;
 
 /// Filled rounded value card: small grey label centered on top, big
 /// bold white value centered below. Matches the reference's

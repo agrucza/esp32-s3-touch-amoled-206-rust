@@ -48,7 +48,6 @@ pub const CONTENT_TOP: i32 = CORNER_R;
 /// Full-width-safe content band ends here.
 pub const CONTENT_BOTTOM: i32 = (SCREEN_H as i32) - CORNER_R;
 /// Full-width-safe content band height (306 px).
-#[allow(dead_code)]
 pub const CONTENT_H: i32 = CONTENT_BOTTOM - CONTENT_TOP;
 
 /// Side margin for content area.
