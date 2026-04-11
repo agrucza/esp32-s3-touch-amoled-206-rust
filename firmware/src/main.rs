@@ -4,9 +4,17 @@
 extern crate alloc;
 
 mod board;
+mod config;
 mod display_hal;
 mod events;
 mod sdcard_hal;
+// Audio stack is fully implemented and stays in the tree but is not
+// wired into SystemManager by default - the I2S DMA, DAC, ADC, and
+// speaker amp draw significant current when running idle, and we
+// don't have an audio use case yet. When audio work begins, re-add
+// the audio peripheral tokens in Peripherals, call init_audio in
+// SystemManager::init, and drain the mic DMA in tick.
+#[allow(dead_code)]
 mod audio_hal;
 mod system;
 mod tasks;

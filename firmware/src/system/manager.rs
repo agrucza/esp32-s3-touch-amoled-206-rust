@@ -1,14 +1,19 @@
 extern crate alloc;
 
-use crate::display_hal::{self, CO5300, EspQspi, WIDTH, HEIGHT};
+use crate::config::Config;
+use crate::display_hal::{self, WIDTH, HEIGHT};
 use crate::events::{SwipeDir, SwipeRegion, SystemEvent};
 use crate::sdcard_hal::EspVolumeManager;
-use crate::system::{audio::AudioSystem, input::InputSystem, power::PowerSystem, sensors::SensorSystem};
+use crate::system::audio::AudioSystem;
+use crate::system::display::{Display, DisplayState};
+use crate::system::input::InputSystem;
+use crate::system::power::PowerSystem;
+use crate::system::sensors::SensorSystem;
 use crate::ui::primitives;
 use crate::ui::screens::{self, ActiveScreen};
 use crate::ui::types::{Action, ScreenId, SystemData};
 use embedded_graphics::draw_target::DrawTarget;
-use embassy_time::{Duration, Timer, with_timeout};
+use embassy_time::{Duration, Instant, Timer, with_timeout};
 use esp_hal::{
     Blocking,
     dma::DmaDescriptor,
@@ -18,14 +23,40 @@ use esp_hal::{
     time::Rate,
 };
 
-// Type aliases for complex generic types
-pub type Display<'d> = CO5300<'static, EspQspi<'d>, Output<'d>>;
+// Type aliases for complex generic types. `Display<'d>` lives in
+// `system::display` since it's fundamentally a display concern.
 pub type AudioTx<'d> = I2sWriteDmaTransferAsync<'d, &'static mut [u8]>;
 pub type AudioRx<'d> = I2sReadDmaTransferAsync<'d, &'static mut [u8]>;
 
 /// Size of the per-tick mic RX drain buffer. Matches the I2S RX DMA
 /// buffer in `main.rs` so one `pop()` can empty a full buffer.
 const MIC_DRAIN_BUF_SIZE: usize = 16_384;
+
+/// Peripheral tokens for the audio subsystem, stashed on
+/// `SystemManager` until `start_audio()` consumes them. Keeping the
+/// whole bundle in one struct lets us `.take()` it as a single move
+/// when audio is eventually brought online, without re-plumbing
+/// peripherals from outside the manager.
+///
+/// The audio subsystem is intentionally NOT started in `init()` so the
+/// ES8311 DAC, ES7210 ADC, I2S DMA, MCLK, and speaker amp all stay in
+/// their post-reset low-power state. When a feature needs audio, it
+/// calls `SystemManager::start_audio()` which wires everything up via
+/// `crate::system::audio::init_audio`.
+struct PendingAudio<'d> {
+    i2s0: esp_hal::peripherals::I2S0<'d>,
+    dma_ch1: esp_hal::peripherals::DMA_CH1<'d>,
+    audio_mclk: esp_hal::peripherals::GPIO16<'d>,
+    audio_bclk: esp_hal::peripherals::GPIO41<'d>,
+    audio_ws: esp_hal::peripherals::GPIO45<'d>,
+    audio_dout: esp_hal::peripherals::GPIO40<'d>,
+    audio_din: esp_hal::peripherals::GPIO42<'d>,
+    audio_pa: esp_hal::peripherals::GPIO46<'d>,
+    tx_buffer: &'static mut [u8],
+    rx_buffer: &'static mut [u8],
+    tx_descriptors: &'static mut [DmaDescriptor],
+    rx_descriptors: &'static mut [DmaDescriptor],
+}
 
 /// Framebuffer row stride in bytes. Used by the dirty-row flush path.
 const ROW_STRIDE: usize = WIDTH as usize * 2;
@@ -45,9 +76,10 @@ fn row_hash(row: &[u8]) -> u32 {
     h
 }
 
-// `audio`, `storage`, and `tx_transfer` are currently held-but-not-read:
-// they own hardware resources whose Drop impls would deinitialize the
-// peripherals. They stay as fields so the hardware keeps running.
+// `audio`, `storage`, and `tx_transfer` are held-but-not-read once
+// populated: they own hardware resources whose Drop impls would
+// deinitialize the peripherals. They stay as fields so the hardware
+// keeps running after `start_audio` brings them online.
 #[allow(dead_code)]
 pub struct SystemManager<'d> {
     // Bus
@@ -59,7 +91,7 @@ pub struct SystemManager<'d> {
 
     // Peripherals
     pub display: Display<'d>,
-    pub audio: AudioSystem<'d>,
+    pub audio: Option<AudioSystem<'d>>,
     pub sensors: SensorSystem,
     pub storage: Option<EspVolumeManager<'d>>,
 
@@ -68,9 +100,13 @@ pub struct SystemManager<'d> {
     // don't land mid-scanout.
     lcd_te: Input<'d>,
 
-    // DMA transfers
-    tx_transfer: AudioTx<'d>,
-    rx_transfer: AudioRx<'d>,
+    // DMA transfers - populated by `start_audio`, `None` until then.
+    tx_transfer: Option<AudioTx<'d>>,
+    rx_transfer: Option<AudioRx<'d>>,
+
+    // Raw audio peripheral tokens stashed at boot, consumed by
+    // `start_audio`. `None` after audio has been started once.
+    pending_audio: Option<PendingAudio<'d>>,
 
     // UI
     screen: ActiveScreen,
@@ -88,6 +124,20 @@ pub struct SystemManager<'d> {
     // Initialized to zero, which ensures the first frame sees every
     // row as dirty and performs a full flush.
     row_hashes: alloc::boxed::Box<[u32]>,
+
+    // Runtime configuration (display dim/off timeouts, brightness,
+    // ...). Read-only for the current pass, mutable by future settings
+    // code. See `crate::config` for the backing types.
+    config: Config,
+
+    // Display power-management state. Driven by idle time against
+    // `last_activity`; transitions are applied via
+    // `system::display::transition`.
+    display_state: DisplayState,
+
+    // Wall-clock timestamp of the last user-input event. Used by the
+    // display state machine to decide when to dim / blank the panel.
+    last_activity: Instant,
 }
 
 /// All peripheral tokens needed by the system manager.
@@ -163,7 +213,10 @@ impl<'d> SystemManager<'d> {
     /// 5. Input (touch + buttons)
     /// 6. SD card
     /// 7. Sensors (RTC + IMU with ~500ms gyro calibration)
-    /// 8. Audio (I2S DMA must start before codec init)
+    /// 8. Audio peripherals stashed into `pending_audio` but NOT
+    ///    started. A caller invokes `start_audio()` later to actually
+    ///    bring the codecs, I2S DMA, and speaker amp online. This
+    ///    keeps idle current low on battery by default.
     pub async fn init(p: Peripherals<'d>) -> Self {
         // 1. I2C bus
         let mut i2c = I2c::new(p.i2c0, I2cConfig::default().with_frequency(Rate::from_khz(400)))
@@ -213,36 +266,75 @@ impl<'d> SystemManager<'d> {
         // 7. Sensors (RTC + IMU with gyro calibration)
         let sensors = SensorSystem::init(&mut i2c).await;
 
-        // 8. Audio (I2S + codecs + DMA)
-        let (audio, tx_transfer, rx_transfer) = crate::system::audio::init_audio(
-            p.i2s0, p.dma_ch1,
-            p.audio_mclk, p.audio_bclk, p.audio_ws,
-            p.audio_dout, p.audio_din,
-            Output::new(p.audio_pa, Level::Low, OutputConfig::default()),
-            p.tx_buffer, p.rx_buffer, p.tx_descriptors, p.rx_descriptors,
-            &mut i2c,
-        ).await;
+        // 8. Stash audio peripherals for later `start_audio()`.
+        // Hardware stays in post-reset low-power state until then.
+        let pending_audio = Some(PendingAudio {
+            i2s0: p.i2s0,
+            dma_ch1: p.dma_ch1,
+            audio_mclk: p.audio_mclk,
+            audio_bclk: p.audio_bclk,
+            audio_ws: p.audio_ws,
+            audio_dout: p.audio_dout,
+            audio_din: p.audio_din,
+            audio_pa: p.audio_pa,
+            tx_buffer: p.tx_buffer,
+            rx_buffer: p.rx_buffer,
+            tx_descriptors: p.tx_descriptors,
+            rx_descriptors: p.rx_descriptors,
+        });
 
-        log::info!("System: all subsystems initialized");
+        log::info!("System: all subsystems initialized (audio stashed)");
 
         Self {
             i2c,
             power,
             input,
             display,
-            audio,
+            audio: None,
             sensors,
             storage,
             lcd_te,
-            tx_transfer,
-            rx_transfer,
+            tx_transfer: None,
+            rx_transfer: None,
+            pending_audio,
             screen: ActiveScreen::new(ScreenId::Clock),
             tick_count: 0,
             touch_pos: None,
             needs_redraw: true, // first frame always draws
             mic_drain_buf: alloc::vec![0u8; MIC_DRAIN_BUF_SIZE].into_boxed_slice(),
             row_hashes: alloc::vec![0u32; HEIGHT as usize].into_boxed_slice(),
+            config: Config::default(),
+            display_state: DisplayState::Active,
+            last_activity: Instant::now(),
         }
+    }
+
+    /// Bring the audio subsystem online. Consumes the peripheral
+    /// tokens stashed at boot and calls `init_audio`, which starts
+    /// I2S DMA (MCLK/BCLK/LRCK output), configures the ES8311 DAC and
+    /// ES7210 ADC over I2C, and enables the NS4150B speaker amp.
+    ///
+    /// Only succeeds once per boot - if audio has already been
+    /// started (or this is called a second time), it logs and
+    /// returns without touching the hardware.
+    #[allow(dead_code)]
+    pub async fn start_audio(&mut self) {
+        let Some(pa) = self.pending_audio.take() else {
+            log::warn!("Audio: start_audio called but already started");
+            return;
+        };
+        log::info!("Audio: bringing subsystem online...");
+        let (audio, tx_transfer, rx_transfer) = crate::system::audio::init_audio(
+            pa.i2s0, pa.dma_ch1,
+            pa.audio_mclk, pa.audio_bclk, pa.audio_ws,
+            pa.audio_dout, pa.audio_din,
+            Output::new(pa.audio_pa, Level::Low, OutputConfig::default()),
+            pa.tx_buffer, pa.rx_buffer, pa.tx_descriptors, pa.rx_descriptors,
+            &mut self.i2c,
+        ).await;
+        self.audio = Some(audio);
+        self.tx_transfer = Some(tx_transfer);
+        self.rx_transfer = Some(rx_transfer);
     }
 
     /// Run one iteration of the main loop.
@@ -250,9 +342,12 @@ impl<'d> SystemManager<'d> {
     /// Drains audio DMA, polls events, routes them through the
     /// active screen. Only redraws the display when something changed.
     pub async fn tick(&mut self) {
-        // Drain mic RX buffer to prevent overflow. The buffer is a
-        // field so this never allocates.
-        let _ = self.rx_transfer.pop(&mut self.mic_drain_buf).await;
+        // Drain mic RX buffer to prevent overflow, but only when
+        // audio has actually been started. The buffer is a field so
+        // this never allocates.
+        if let Some(rx) = self.rx_transfer.as_mut() {
+            let _ = rx.pop(&mut self.mic_drain_buf).await;
+        }
 
         // Poll all subsystems for events
         let mut events: heapless::Vec<SystemEvent, 8> = heapless::Vec::new();
@@ -292,6 +387,28 @@ impl<'d> SystemManager<'d> {
             // Log every swipe so we can verify detection across all regions.
             if let SystemEvent::Swipe { dir, region } = event {
                 log::info!("Swipe: {:?} in {:?}", dir, region);
+            }
+
+            // Any user-input event resets the display idle timer. If
+            // the display is currently Off, we also "consume" the
+            // event - the first touch wakes the panel but does NOT
+            // dispatch to the screen, so a brush against clothing
+            // while worn on a wrist doesn't accidentally swipe or tap.
+            // Dim state still passes events through normally.
+            let is_user_activity = matches!(
+                event,
+                SystemEvent::TouchPressed { .. }
+                    | SystemEvent::TouchReleased
+                    | SystemEvent::Tap { .. }
+                    | SystemEvent::Swipe { .. }
+                    | SystemEvent::BootButtonPressed
+                    | SystemEvent::PowerButtonShort
+            );
+            if is_user_activity {
+                self.last_activity = Instant::now();
+                if self.display_state == DisplayState::Off {
+                    continue;
+                }
             }
 
             // System-level gesture: swipe-down-from-top-edge opens
@@ -356,8 +473,39 @@ impl<'d> SystemManager<'d> {
             self.power.buzz_stop();
         }
 
-        // Only redraw when something changed
-        if self.needs_redraw {
+        // Apply the display state machine. Decide the target state
+        // based on idle time since last user activity and transition
+        // if it changed. Waking from Off forces a full redraw by
+        // zeroing row_hashes so every row looks dirty on the next
+        // pass.
+        let idle = Instant::now().duration_since(self.last_activity);
+        let target = if idle >= Duration::from_secs(self.config.display.off_timeout_s) {
+            DisplayState::Off
+        } else if idle >= Duration::from_secs(self.config.display.dim_timeout_s) {
+            DisplayState::Dim
+        } else {
+            DisplayState::Active
+        };
+        if target != self.display_state {
+            let waking_from_off = crate::system::display::transition(
+                &mut self.display,
+                self.display_state,
+                target,
+                &self.config.display,
+            ).await;
+            self.display_state = target;
+            if waking_from_off {
+                self.row_hashes.fill(0);
+                self.needs_redraw = true;
+            }
+        }
+
+        // Only redraw when something changed AND the display is not
+        // in the Off state. When Off, the render path is skipped
+        // entirely - the panel's GRAM retains the last frame we
+        // pushed so there's nothing to do until a user event wakes
+        // us and we come back around.
+        if self.display_state != DisplayState::Off && self.needs_redraw {
             self.display.clear(crate::ui::theme::BG).ok();
 
             // Panel is just another screen now - no special case.
