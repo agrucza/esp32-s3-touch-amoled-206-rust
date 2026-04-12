@@ -13,7 +13,7 @@ use crate::ui::primitives;
 use crate::ui::screens::{self, ActiveScreen};
 use crate::ui::types::{Action, ScreenId, SystemData};
 use embedded_graphics::draw_target::DrawTarget;
-use embassy_futures::select::select;
+use embassy_futures::select::{select, Either};
 use embassy_time::{Duration, Instant, Timer, with_timeout};
 use esp_hal::{
     Blocking,
@@ -302,6 +302,10 @@ impl<'d> SystemManager<'d> {
         });
 
         log::info!("System: all subsystems initialized (audio stashed)");
+
+        // Dump PMU status now that all ADC channels have had time to
+        // settle during display, touch, SD, and sensor init (~1 s).
+        power.dump_status(&mut i2c);
 
         Self {
             i2c,
@@ -614,13 +618,17 @@ impl<'d> SystemManager<'d> {
         //   interrupt polling (power button short/long press is
         //   readable via I2C even without a dedicated GPIO).
         if self.display_state == DisplayState::Off {
-            let _ = with_timeout(
+            match with_timeout(
                 Duration::from_secs(2),
                 select(
                     self.input.wait_for_touch_int(),
                     self.rtc_int.wait_for_falling_edge(),
                 ),
-            ).await;
+            ).await {
+                Ok(Either::First(_))  => log::info!("wake: touch"),
+                Ok(Either::Second(_)) => log::info!("wake: RTC minute"),
+                Err(_)                => log::info!("wake: timeout (PMU poll)"),
+            }
         } else {
             let sleep = if self.touch_pos.is_some() {
                 Duration::from_millis(50)

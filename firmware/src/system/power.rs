@@ -84,6 +84,82 @@ impl<'d> PowerSystem<'d> {
         self.pmu.battery_voltage_mv(i2c).ok()
     }
 
+    /// Log a diagnostic dump of all readable PMU state.
+    ///
+    /// Call once after init to verify register reads match the
+    /// physical hardware state (USB plugged in, battery level, etc.).
+    pub fn dump_status(&self, i2c: &mut impl I2c) {
+        // Status registers
+        if let Ok(s1) = self.pmu.read_status1(i2c) {
+            log::info!(
+                "PMU status1: vbus_good={} batfet={} bat_present={} bat_active={} thermal={} ilim={}",
+                s1.vbus_good, s1.batfet_active, s1.battery_present,
+                s1.battery_active, s1.thermal_active, s1.current_limit_active,
+            );
+        }
+        if let Ok(s2) = self.pmu.read_status2(i2c) {
+            log::info!(
+                "PMU status2: direction={:?} phase={:?} system_on={} vindpm={}",
+                s2.current_direction, s2.charger_phase, s2.system_on, s2.vindpm_active,
+            );
+        }
+
+        // Power-on/off sources
+        if let Ok(on) = self.pmu.power_on_status(i2c) {
+            log::info!(
+                "PMU poweron: button={} vbus={} bat_insert={} bat_charged={} irq={} en={}",
+                on.button, on.vbus, on.battery_insert, on.battery_charged, on.irq_pin, on.en_mode,
+            );
+        }
+        if let Ok(off) = self.pmu.power_off_status(i2c) {
+            log::info!(
+                "PMU pwroff: button={} sw={} die_ot={} dcdc_ov={} dcdc_uv={} vbus_ov={} vsys_uv={} en={}",
+                off.button_long_press, off.software, off.die_overtemp,
+                off.dcdc_overvolt, off.dcdc_undervolt, off.vbus_overvolt,
+                off.vsys_undervolt, off.en_mode,
+            );
+        }
+
+        // Battery and ADC
+        if let Ok(mv) = self.pmu.battery_voltage_mv(i2c) {
+            log::info!("PMU battery: {} mV", mv);
+        }
+        if let Ok(pct) = self.pmu.battery_percent(i2c) {
+            log::info!("PMU battery: {}%", pct);
+        }
+        if let Ok(mv) = self.pmu.vbus_voltage_mv(i2c) {
+            log::info!("PMU vbus: {} mV", mv);
+        }
+        if let Ok(mv) = self.pmu.system_voltage_mv(i2c) {
+            log::info!("PMU vsys: {} mV", mv);
+        }
+        if let Ok(raw) = self.pmu.die_temperature_raw(i2c) {
+            log::info!("PMU die temp: raw={}", raw);
+        }
+
+        // Charger config readback
+        if let Ok(cc) = self.pmu.charge_current(i2c) {
+            log::info!("PMU charge current: {} mA", cc.as_ma());
+        }
+        if let Ok(cv) = self.pmu.charge_voltage(i2c) {
+            log::info!("PMU charge voltage: {:?}", cv);
+        }
+        if let Ok(ilim) = self.pmu.input_current_limit(i2c) {
+            log::info!("PMU input current limit: {:?}", ilim);
+        }
+        if let Ok(vindpm) = self.pmu.input_voltage_limit(i2c) {
+            log::info!("PMU input voltage limit: {} mV", vindpm);
+        }
+
+        // Power key timing
+        if let Ok(pk) = self.pmu.power_key_config(i2c) {
+            log::info!(
+                "PMU power key: irq={:?} off={:?} on={:?}",
+                pk.irq_time, pk.off_time, pk.on_time,
+            );
+        }
+    }
+
     pub fn buzz(&mut self) {
         self.motor.set_high();
     }

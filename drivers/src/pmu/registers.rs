@@ -254,6 +254,12 @@ pub const REG_JEITA_CV_CFG: u8 = 0x59;
 pub const REG_JEITA_COOL:   u8 = 0x5A;
 pub const REG_JEITA_WARM:   u8 = 0x5B;
 
+/// TS config data high byte (REG 5Ch). Bits 5:0 = ts_cfg_data[13:8].
+/// MCU-configured TS voltage when ts_ch_en = 0.
+pub const REG_TS_CFG_H:    u8 = 0x5C;
+/// TS config data low byte (REG 5Dh). ts_cfg_data[7:0].
+pub const REG_TS_CFG_L:    u8 = 0x5D;
+
 // =============================================================================
 // Charger configuration (REG 61h–6Ah)
 // =============================================================================
@@ -278,7 +284,8 @@ pub const REG_CHGLED:       u8 = 0x69;
 pub const REG_BTN_BAT_VTERM: u8 = 0x6A;
 
 // =============================================================================
-// DCDC converters (REG 80h–86h)
+// DCDC converters (REG 80h-85h)
+// Note: REG 86h (DCDC5) is not present on this chip variant.
 // =============================================================================
 
 /// DCDC on/off and DVM control (REG 80h).
