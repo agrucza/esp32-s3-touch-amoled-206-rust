@@ -13,6 +13,7 @@ use crate::ui::primitives;
 use crate::ui::screens::{self, ActiveScreen};
 use crate::ui::types::{Action, ScreenId, SystemData};
 use embedded_graphics::draw_target::DrawTarget;
+use embassy_futures::select::select;
 use embassy_time::{Duration, Instant, Timer, with_timeout};
 use esp_hal::{
     Blocking,
@@ -100,6 +101,12 @@ pub struct SystemManager<'d> {
     // don't land mid-scanout.
     lcd_te: Input<'d>,
 
+    // RTC minute-interrupt line (GPIO39, active-low pulse). The
+    // PCF85063A pulses this at second=0 every minute. Used as an
+    // async wake source so the main loop can sleep longer when the
+    // display is off instead of polling the RTC over I2C.
+    rtc_int: Input<'d>,
+
     // DMA transfers - populated by `start_audio`, `None` until then.
     tx_transfer: Option<AudioTx<'d>>,
     rx_transfer: Option<AudioRx<'d>>,
@@ -174,6 +181,7 @@ pub struct Peripherals<'d> {
     pub btn_boot: esp_hal::peripherals::GPIO0<'d>,
     pub touch_rst: esp_hal::peripherals::GPIO9<'d>,
     pub touch_int: esp_hal::peripherals::GPIO38<'d>,
+    pub rtc_int: esp_hal::peripherals::GPIO39<'d>,
 
     // SD card
     pub spi3: esp_hal::peripherals::SPI3<'d>,
@@ -257,6 +265,11 @@ impl<'d> SystemManager<'d> {
             &mut i2c,
         ).await;
 
+        // RTC minute-interrupt line. The PCF85063A pulses INT# low at
+        // second=0 every minute. We use this as an async wake source
+        // so the display-off sleep can last seconds instead of 150 ms.
+        let rtc_int = Input::new(p.rtc_int, InputConfig::default().with_pull(Pull::Up));
+
         // 6. SD card
         let storage = crate::system::storage::init_sd(
             p.spi3, p.sd_sck, p.sd_mosi, p.sd_miso,
@@ -265,6 +278,11 @@ impl<'d> SystemManager<'d> {
 
         // 7. Sensors (RTC + IMU with gyro calibration)
         let sensors = SensorSystem::init(&mut i2c).await;
+
+        // 7b. Enable the RTC minute interrupt so GPIO39 pulses at second=0.
+        if let Err(_) = sensors.rtc.enable_minute_interrupt(&mut i2c) {
+            log::warn!("RTC: failed to enable minute interrupt");
+        }
 
         // 8. Stash audio peripherals for later `start_audio()`.
         // Hardware stays in post-reset low-power state until then.
@@ -294,6 +312,7 @@ impl<'d> SystemManager<'d> {
             sensors,
             storage,
             lcd_te,
+            rtc_int,
             tx_transfer: None,
             rx_transfer: None,
             pending_audio,
@@ -349,11 +368,17 @@ impl<'d> SystemManager<'d> {
             let _ = rx.pop(&mut self.mic_drain_buf).await;
         }
 
-        // Poll all subsystems for events
+        // Poll all subsystems for events. Input and power are always
+        // polled (touch wake, power button). Sensor polling (RTC
+        // minute-change) is skipped when the display is Off because
+        // the RTC minute-interrupt on GPIO39 wakes us instead, and
+        // last_minute will re-sync on the first Active tick.
         let mut events: heapless::Vec<SystemEvent, 8> = heapless::Vec::new();
         self.input.poll(&mut self.i2c, &mut events);
         self.power.poll(&mut self.i2c, &mut events);
-        self.sensors.poll(&mut self.i2c, &mut events);
+        if self.display_state != DisplayState::Off {
+            self.sensors.poll(&mut self.i2c, &mut events);
+        }
 
         // Track touch state from events, and mark state-change events
         // as redraw triggers. Everything else goes through the screen's
@@ -369,11 +394,20 @@ impl<'d> SystemManager<'d> {
             }
         }
 
-        // Build data snapshot for rendering
-        let time = self.sensors.read_time(&mut self.i2c);
-        let imu = self.sensors.imu.read(&mut self.i2c).ok();
-        let battery = self.power.battery_percent(&mut self.i2c);
-        let battery_mv = self.power.battery_voltage_mv(&mut self.i2c);
+        // Build data snapshot for rendering. When the display is Off
+        // nothing renders, so skip the IMU read and battery I2C
+        // transactions entirely - they would just burn bus cycles for
+        // data nobody looks at.
+        let (time, imu, battery, battery_mv) = if self.display_state != DisplayState::Off {
+            (
+                self.sensors.read_time(&mut self.i2c),
+                self.sensors.imu.read(&mut self.i2c).ok(),
+                self.power.battery_percent(&mut self.i2c),
+                self.power.battery_voltage_mv(&mut self.i2c),
+            )
+        } else {
+            (None, None, None, None)
+        };
         let data = SystemData::from_sensors(
             time.as_ref(),
             imu.as_ref(),
@@ -561,23 +595,39 @@ impl<'d> SystemManager<'d> {
 
         self.tick_count = self.tick_count.wrapping_add(1);
 
-        // Always sleep on the touch INT line with an adaptive timeout.
-        // The FT3168 asserts INT whenever a new sample is ready, so
-        // waking on the edge gives us the tightest drag sample rate
-        // the controller can provide (60-120 Hz typical) instead of
-        // the 20 Hz we'd get with a fixed tick timer.
+        // Adaptive sleep - how long and what we wait on depends on
+        // the display state:
         //
-        // Timeout role is just a safety net:
-        //   - 50 ms while a finger is down, to cover the case where
-        //     INT misses or the controller doesn't re-assert.
-        //   - 150 ms idle, to bound mic I2S drain and battery/clock
-        //     polling. The mic DMA ring holds ~256 ms at 16 kHz
-        //     stereo so 150 ms leaves comfortable overflow margin.
-        let sleep = if self.touch_pos.is_some() {
-            Duration::from_millis(50)
+        // Active / Dim with finger down (50 ms, touch INT only):
+        //   Tight drag tracking. The FT3168 asserts INT on every new
+        //   sample (60-120 Hz). Timeout covers missed edges.
+        //
+        // Active / Dim idle (150 ms, touch INT only):
+        //   Bounds mic DMA drain (ring holds ~256 ms at 16 kHz
+        //   stereo) and sensor/battery polling.
+        //
+        // Off (2 s, touch INT OR RTC minute INT):
+        //   Nothing renders, so the only reasons to wake are a touch
+        //   (user wants to interact) or the RTC minute pulse on
+        //   GPIO39 (keeps last_minute in sync for the next Active
+        //   transition). The 2 s timeout is a safety net for PMU
+        //   interrupt polling (power button short/long press is
+        //   readable via I2C even without a dedicated GPIO).
+        if self.display_state == DisplayState::Off {
+            let _ = with_timeout(
+                Duration::from_secs(2),
+                select(
+                    self.input.wait_for_touch_int(),
+                    self.rtc_int.wait_for_falling_edge(),
+                ),
+            ).await;
         } else {
-            Duration::from_millis(150)
-        };
-        let _ = with_timeout(sleep, self.input.wait_for_touch_int()).await;
+            let sleep = if self.touch_pos.is_some() {
+                Duration::from_millis(50)
+            } else {
+                Duration::from_millis(150)
+            };
+            let _ = with_timeout(sleep, self.input.wait_for_touch_int()).await;
+        }
     }
 }

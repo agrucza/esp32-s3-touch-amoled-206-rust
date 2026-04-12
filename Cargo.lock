@@ -933,6 +933,7 @@ dependencies = [
  "app-core",
  "drivers",
  "embassy-executor",
+ "embassy-futures",
  "embassy-time",
  "embedded-graphics",
  "embedded-graphics-core",

@@ -59,6 +59,8 @@ const REG_TIMER_MODE:   u8 = 0x11;
 
 const CTRL2_AIE: u8 = 1 << 7; // Alarm Interrupt Enable - drives INT# pin on alarm
 const CTRL2_AF:  u8 = 1 << 6; // Alarm Flag - set by chip on match, write 0 to clear
+const CTRL2_MI:  u8 = 1 << 5; // Minute Interrupt - pulses INT# at second=0 every minute
+const CTRL2_HMI: u8 = 1 << 4; // Half-Minute Interrupt - pulses INT# at second=0 and second=30
 const CTRL2_TF:  u8 = 1 << 3; // Timer Flag - set by chip on timer expiry, write 0 to clear
 const CTRL2_COF: u8 = 0x07;   // COF[2:0] mask - CLKOUT frequency bits
 
@@ -184,6 +186,49 @@ impl Rtc {
         self.write_register(i2c, REG_CTRL1, ctrl1 & !(1 << 5))
     }
 
+    // ---- Status -----------------------------------------------------------------
+
+    /// Check whether the oscillator-stop (OS) flag is set.
+    ///
+    /// The flag is set when the chip loses power or the oscillator stops
+    /// for any reason. A set flag means the time registers are unreliable
+    /// and should be re-written with a known time via [`set`].
+    ///
+    /// [`set`]: Rtc::set
+    pub fn oscillator_stopped<I2C, E>(&self, i2c: &mut I2C) -> Result<bool, Error<E>>
+    where
+        I2C: I2cTrait<Error = E>,
+    {
+        let seconds_raw = self.read_register(i2c, REG_SECONDS)?;
+        Ok((seconds_raw & 0x80) != 0)
+    }
+
+    /// Read Control_2 and return a snapshot of all interrupt/flag bits.
+    ///
+    /// This is a single I2C read that tells you everything the INT# pin
+    /// could be driven by:
+    ///
+    /// | Field         | Meaning                                     |
+    /// |---------------|---------------------------------------------|
+    /// | `alarm_flag`  | AF - alarm matched since last clear         |
+    /// | `alarm_ie`    | AIE - alarm interrupt enabled               |
+    /// | `timer_flag`  | TF - timer expired since last clear         |
+    /// | `minute_ie`   | MI - minute interrupt enabled                |
+    /// | `half_min_ie` | HMI - half-minute interrupt enabled         |
+    pub fn read_status<I2C, E>(&self, i2c: &mut I2C) -> Result<RtcStatus, Error<E>>
+    where
+        I2C: I2cTrait<Error = E>,
+    {
+        let ctrl2 = self.read_register(i2c, REG_CTRL2)?;
+        Ok(RtcStatus {
+            alarm_flag:  (ctrl2 & CTRL2_AF)  != 0,
+            alarm_ie:    (ctrl2 & CTRL2_AIE) != 0,
+            timer_flag:  (ctrl2 & CTRL2_TF)  != 0,
+            minute_ie:   (ctrl2 & CTRL2_MI)  != 0,
+            half_min_ie: (ctrl2 & CTRL2_HMI) != 0,
+        })
+    }
+
     // ---- Alarm ------------------------------------------------------------------
 
     /// Program the alarm and enable the INT# interrupt pin.
@@ -260,20 +305,159 @@ impl Rtc {
         self.write_register(i2c, REG_CTRL2, ctrl2 & !CTRL2_AF)
     }
 
+    /// Read back the currently programmed alarm.
+    ///
+    /// Fields whose AEN bit is set (disabled / not compared) are returned
+    /// as `None`, matching the representation used by [`set_alarm`].
+    ///
+    /// [`set_alarm`]: Rtc::set_alarm
+    pub fn get_alarm<I2C, E>(&self, i2c: &mut I2C) -> Result<Alarm, Error<E>>
+    where
+        I2C: I2cTrait<Error = E>,
+    {
+        let mut buf = [0u8; 5];
+        i2c.write_read(self.addr, &[REG_ALARM_SECOND], &mut buf)
+            .map_err(Error::I2c)?;
+
+        let decode = |raw: u8, mask: u8| -> Option<u8> {
+            if (raw & AEN) != 0 { None } else { Some(bcd2bin(raw & mask)) }
+        };
+
+        Ok(Alarm {
+            second:  decode(buf[0], 0x7F),
+            minute:  decode(buf[1], 0x7F),
+            hour:    decode(buf[2], 0x3F),
+            day:     decode(buf[3], 0x3F),
+            weekday: if (buf[4] & AEN) != 0 { None } else { Some(buf[4] & 0x07) },
+        })
+    }
+
+    // ---- Periodic minute / half-minute interrupts --------------------------------
+    //
+    // MI and HMI are pre-defined timers that generate interrupt pulses on
+    // INT#, running in sync with the seconds counter. They are independent
+    // of the alarm and countdown timer - neither resource is consumed.
+    //
+    // **Constraint**: MI and HMI must only be used when the frequency
+    // offset is set to normal mode (MODE bit = 0 in the Offset register).
+    // The enable methods check this and return `Err` if MODE = 1 (coarse).
+    // After a software reset (or fresh `init()`) MODE defaults to 0, so
+    // the check passes without extra setup.
+    //
+    // The two timers can be enabled independently. However, enabling MI
+    // on top of HMI is not distinguishable since HMI already fires at
+    // second=0.
+    //
+    // Timing: the first MI pulse arrives 1-59 s after enabling; the first
+    // HMI pulse arrives 1-29 s after enabling. Subsequent periods are
+    // exact (60 s for MI, 30 s for HMI). Pulses are 1/64 s wide.
+
+    /// Enable the minute interrupt.
+    ///
+    /// The PCF85063A pulses INT# (GPIO39) low once per minute when the
+    /// seconds counter rolls over to 0. The pulse is 1/64 s wide.
+    ///
+    /// The first pulse after enabling arrives within 1-59 seconds;
+    /// subsequent pulses are exactly 60 seconds apart.
+    ///
+    /// Returns `Err` if the offset register is in coarse mode (MODE=1),
+    /// which is incompatible with MI/HMI per the datasheet.
+    pub fn enable_minute_interrupt<I2C, E>(&self, i2c: &mut I2C) -> Result<(), Error<E>>
+    where
+        I2C: I2cTrait<Error = E>,
+    {
+        self.check_offset_normal_mode(i2c)?;
+        let ctrl2 = self.read_register(i2c, REG_CTRL2)?;
+        self.write_register(i2c, REG_CTRL2, ctrl2 | CTRL2_MI)
+    }
+
+    /// Enable the half-minute interrupt.
+    ///
+    /// The PCF85063A pulses INT# (GPIO39) low twice per minute - at
+    /// second=0 and second=30. The pulse is 1/64 s wide.
+    ///
+    /// The first pulse after enabling arrives within 1-29 seconds;
+    /// subsequent pulses are exactly 30 seconds apart.
+    ///
+    /// Note: enabling MI on top of HMI is allowed but not
+    /// distinguishable, since HMI already fires at second=0.
+    ///
+    /// Returns `Err` if the offset register is in coarse mode (MODE=1),
+    /// which is incompatible with MI/HMI per the datasheet.
+    pub fn enable_half_minute_interrupt<I2C, E>(&self, i2c: &mut I2C) -> Result<(), Error<E>>
+    where
+        I2C: I2cTrait<Error = E>,
+    {
+        self.check_offset_normal_mode(i2c)?;
+        let ctrl2 = self.read_register(i2c, REG_CTRL2)?;
+        self.write_register(i2c, REG_CTRL2, ctrl2 | CTRL2_HMI)
+    }
+
+    /// Disable the minute interrupt (MI). Does not touch HMI.
+    pub fn disable_minute_interrupt<I2C, E>(&self, i2c: &mut I2C) -> Result<(), Error<E>>
+    where
+        I2C: I2cTrait<Error = E>,
+    {
+        let ctrl2 = self.read_register(i2c, REG_CTRL2)?;
+        self.write_register(i2c, REG_CTRL2, ctrl2 & !CTRL2_MI)
+    }
+
+    /// Disable the half-minute interrupt (HMI). Does not touch MI.
+    pub fn disable_half_minute_interrupt<I2C, E>(&self, i2c: &mut I2C) -> Result<(), Error<E>>
+    where
+        I2C: I2cTrait<Error = E>,
+    {
+        let ctrl2 = self.read_register(i2c, REG_CTRL2)?;
+        self.write_register(i2c, REG_CTRL2, ctrl2 & !CTRL2_HMI)
+    }
+
+    /// Disable both the minute and half-minute interrupts.
+    ///
+    /// After this call the INT# pin will no longer pulse on the
+    /// minute or half-minute boundary (alarm and timer sources are
+    /// unaffected).
+    pub fn disable_minute_interrupts<I2C, E>(&self, i2c: &mut I2C) -> Result<(), Error<E>>
+    where
+        I2C: I2cTrait<Error = E>,
+    {
+        let ctrl2 = self.read_register(i2c, REG_CTRL2)?;
+        self.write_register(i2c, REG_CTRL2, ctrl2 & !(CTRL2_MI | CTRL2_HMI))
+    }
+
     // ---- Countdown timer --------------------------------------------------------
 
     /// Start the countdown timer.
     ///
-    /// The timer counts down from `value` (1-255) at the rate set by `clock`.
-    /// When it reaches zero it sets the TF flag in Control_2 and, if `output`
-    /// is [`TimerOutput::Interrupt`], drives the INT# pin (GPIO39) low until
-    /// [`clear_timer_flag`] is called. With [`TimerOutput::Pulse`] the pin
-    /// pulses briefly instead.
+    /// The timer counts down from `value` (1-255) at the rate set by
+    /// `clock`. When the counter decrements from 1, the TF flag in
+    /// Control_2 is set and the counter auto-reloads for the next
+    /// period.
     ///
-    /// The timer reloads automatically and repeats indefinitely until
-    /// [`disable_timer`] is called.
+    /// If `output` is [`TimerOutput::Interrupt`], INT# (GPIO39) is
+    /// held low as long as TF is set - call [`clear_timer_flag`] to
+    /// release it. With [`TimerOutput::Pulse`], INT# pulses briefly
+    /// on each expiry instead.
     ///
-    /// Any previously pending timer flag is cleared before starting.
+    /// The timer repeats indefinitely until [`disable_timer`] is called.
+    ///
+    /// `value` must be 1-255. Passing 0 returns `Err(InvalidValue)`
+    /// because loading 0 into the counter stops the hardware timer.
+    ///
+    /// Timer durations (value * period):
+    ///
+    /// | Clock     | Min (value=1)  | Max (value=255)   |
+    /// |-----------|----------------|-------------------|
+    /// | 4096 Hz   | 244 us         | 62.256 ms         |
+    /// | 64 Hz     | 15.625 ms      | 3.984 s           |
+    /// | 1 Hz      | 1 s            | 255 s             |
+    /// | 1/60 Hz   | 60 s           | 4 h 15 min        |
+    ///
+    /// For periods longer than 4 h 15 min, use the alarm function
+    /// instead.
+    ///
+    /// Note: time periods derived from the 32.768 kHz oscillator
+    /// assume 0 ppm deviation and can be affected by correction
+    /// pulses when offset calibration is active.
     ///
     /// [`clear_timer_flag`]: Rtc::clear_timer_flag
     /// [`disable_timer`]: Rtc::disable_timer
@@ -287,6 +471,11 @@ impl Rtc {
     where
         I2C: I2cTrait<Error = E>,
     {
+        // Value 0 stops the hardware timer - reject it.
+        if value == 0 {
+            return Err(Error::InvalidValue);
+        }
+
         // Write the countdown value first.
         self.write_register(i2c, REG_TIMER_VALUE, value)?;
 
@@ -304,13 +493,21 @@ impl Rtc {
     }
 
     /// Stop the countdown timer and clear the timer flag.
+    ///
+    /// Writes 0 to Timer_value (the hardware stop mechanism), clears
+    /// TE and TIE, and sets TCF to 1/60 Hz as recommended by the
+    /// datasheet for power saving when the timer is not in use.
     pub fn disable_timer<I2C, E>(&self, i2c: &mut I2C) -> Result<(), Error<E>>
     where
         I2C: I2cTrait<Error = E>,
     {
-        // Clear TE and TIE in Timer_mode (preserves TCF and TI_TP).
-        let mode = self.read_register(i2c, REG_TIMER_MODE)?;
-        self.write_register(i2c, REG_TIMER_MODE, mode & !(TIMER_TE | TIMER_TIE))?;
+        // Load 0 into the countdown register - stops the timer in hardware.
+        self.write_register(i2c, REG_TIMER_VALUE, 0)?;
+
+        // Set TCF to 1/60 Hz for power saving, clear TE and TIE.
+        // TI_TP is irrelevant when disabled, so we write a clean byte.
+        let mode = (TimerClock::Per60 as u8) << 3;
+        self.write_register(i2c, REG_TIMER_MODE, mode)?;
 
         // Clear TF in Control_2.
         let ctrl2 = self.read_register(i2c, REG_CTRL2)?;
@@ -339,6 +536,23 @@ impl Rtc {
     {
         let ctrl2 = self.read_register(i2c, REG_CTRL2)?;
         self.write_register(i2c, REG_CTRL2, ctrl2 & !CTRL2_TF)
+    }
+
+    /// Read the current countdown value of the timer.
+    ///
+    /// While the timer is running this value decrements at the rate
+    /// selected in [`set_timer`]. When it reaches zero the timer
+    /// reloads from the original value and TF is set.
+    ///
+    /// If the timer is stopped (TE = 0), this returns the last loaded
+    /// value.
+    ///
+    /// [`set_timer`]: Rtc::set_timer
+    pub fn read_timer_value<I2C, E>(&self, i2c: &mut I2C) -> Result<u8, Error<E>>
+    where
+        I2C: I2cTrait<Error = E>,
+    {
+        self.read_register(i2c, REG_TIMER_VALUE)
     }
 
     // ---- CLKOUT -----------------------------------------------------------------
@@ -370,6 +584,11 @@ impl Rtc {
     ///
     /// Measure drift over several days before computing an offset - one step
     /// is small, so repeated adjustment is rarely needed.
+    ///
+    /// **Note**: coarse mode (MODE=1) is incompatible with the minute
+    /// and half-minute interrupts (MI/HMI). If either is currently
+    /// enabled and coarse mode is requested, this returns
+    /// `Err(InvalidMode)`. Disable MI/HMI first, or use normal mode.
     pub fn set_offset<I2C, E>(
         &self,
         i2c: &mut I2C,
@@ -379,6 +598,14 @@ impl Rtc {
     where
         I2C: I2cTrait<Error = E>,
     {
+        // Coarse mode is incompatible with MI/HMI.
+        if matches!(mode, OffsetMode::Coarse) {
+            let ctrl2 = self.read_register(i2c, REG_CTRL2)?;
+            if (ctrl2 & (CTRL2_MI | CTRL2_HMI)) != 0 {
+                return Err(Error::InvalidMode);
+            }
+        }
+
         let mode_bit: u8 = match mode {
             OffsetMode::Normal => 0,
             OffsetMode::Coarse => 1 << 7,
@@ -410,6 +637,21 @@ impl Rtc {
     }
 
     // ---- Private helpers --------------------------------------------------------
+
+    /// Verify that the offset register is in normal mode (MODE=0).
+    ///
+    /// MI and HMI require normal mode. Returns `Err(InvalidMode)` if
+    /// MODE=1 (coarse) is currently active.
+    fn check_offset_normal_mode<I2C, E>(&self, i2c: &mut I2C) -> Result<(), Error<E>>
+    where
+        I2C: I2cTrait<Error = E>,
+    {
+        let offset = self.read_register(i2c, REG_OFFSET)?;
+        if (offset & (1 << 7)) != 0 {
+            return Err(Error::InvalidMode);
+        }
+        Ok(())
+    }
 
     fn read_register<I2C, E>(&self, i2c: &mut I2C, reg: u8) -> Result<u8, Error<E>>
     where

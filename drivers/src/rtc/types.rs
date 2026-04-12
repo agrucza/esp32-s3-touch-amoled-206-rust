@@ -13,6 +13,14 @@
 pub enum Error<E> {
     /// An I2C transaction failed; the inner value is the HAL's own error.
     I2c(E),
+    /// The operation requires a different offset calibration mode. MI and
+    /// HMI need normal mode (MODE=0); attempting to enable them while
+    /// coarse mode is active returns this error. Conversely, setting
+    /// coarse mode while MI or HMI is enabled returns this error.
+    InvalidMode,
+    /// A parameter value is outside the valid range (e.g. timer value
+    /// of 0, which stops the hardware timer instead of starting it).
+    InvalidValue,
 }
 
 // ---- Date / time ----------------------------------------------------------------
@@ -95,17 +103,26 @@ impl Alarm {
 
 /// Countdown timer clock source (TCF[1:0] in Timer_mode register).
 ///
-/// Determines the tick rate for the timer countdown value (0-255 ticks).
-/// Total timeout = `value / frequency`.
+/// Determines the tick rate for the timer countdown value (1-255).
+/// Total timeout = `value / frequency`. All timings assume 0 ppm
+/// oscillator deviation and can be affected by correction pulses.
+///
+/// When the timer is not in use, TCF should be set to [`Per60`]
+/// (1/60 Hz) for power saving. [`Rtc::disable_timer`] does this
+/// automatically.
+///
+/// [`Per60`]: TimerClock::Per60
+/// [`Rtc::disable_timer`]: super::Rtc::disable_timer
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TimerClock {
-    /// 4096 Hz - minimum period ~244 us, max ~62 ms.
+    /// 4096 Hz - min 244 us (value=1), max 62.256 ms (value=255).
     Hz4096 = 0b00,
-    /// 64 Hz - minimum period ~15.6 ms, max ~4 s.
+    /// 64 Hz - min 15.625 ms (value=1), max 3.984 s (value=255).
     Hz64   = 0b01,
-    /// 1 Hz - minimum period 1 s, max 255 s.
+    /// 1 Hz - min 1 s (value=1), max 255 s (value=255).
     Hz1    = 0b10,
-    /// 1/60 Hz - minimum period 60 s, max 255 min.
+    /// 1/60 Hz - min 60 s (value=1), max 4 h 15 min (value=255).
+    /// Also the recommended idle clock for power saving.
     Per60  = 0b11,
 }
 
@@ -132,6 +149,27 @@ pub enum ClkoutFreq {
     Hz1     = 0b110,
     /// CLKOUT pin disabled (high-impedance).
     Off     = 0b111,
+}
+
+// ---- Status snapshot ------------------------------------------------------------
+
+/// Snapshot of Control_2 interrupt and flag bits.
+///
+/// Returned by [`Rtc::read_status`] - a single I2C read that captures
+/// all flag/enable state at once.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct RtcStatus {
+    /// Alarm flag (AF) - the alarm matched since last clear.
+    pub alarm_flag: bool,
+    /// Alarm interrupt enable (AIE) - alarm drives INT# when set.
+    pub alarm_ie: bool,
+    /// Timer flag (TF) - the timer expired since last clear.
+    pub timer_flag: bool,
+    /// Minute interrupt enable (MI) - INT# pulses at second=0.
+    pub minute_ie: bool,
+    /// Half-minute interrupt enable (HMI) - INT# pulses at second=0
+    /// and second=30.
+    pub half_min_ie: bool,
 }
 
 // ---- Offset calibration ---------------------------------------------------------
