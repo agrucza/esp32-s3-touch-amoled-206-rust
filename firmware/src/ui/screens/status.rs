@@ -49,8 +49,8 @@ impl Screen for StatusScreen {
 
         // Page-specific cards.
         match self.page {
-            0 => render_axes_cards(display, data.accel_x, data.accel_y, data.accel_z),
-            1 => render_axes_cards(display, data.gyro_x, data.gyro_y, data.gyro_z),
+            0 => render_axes_cards(display, data.motion.accel_x, data.motion.accel_y, data.motion.accel_z),
+            1 => render_axes_cards(display, data.motion.gyro_x, data.motion.gyro_y, data.motion.gyro_z),
             2 => render_env_cards(display, data),
             _ => {}
         }
@@ -157,14 +157,14 @@ fn render_env_cards<D: DrawTarget<Color = Rgb565>>(
 ) {
     let mut y = FIRST_CARD_Y;
 
-    let temp_c = data.temp_raw / 256;
+    let temp_c = data.motion.temp_raw / 256;
     let mut temp_buf: heapless::String<12> = heapless::String::new();
     let _ = write!(temp_buf, "{} C", temp_c);
     draw_value_card(display, CARD_X, y, CARD_W, CARD_H, "TEMP", &temp_buf);
     y += CARD_H + CARD_GAP;
 
     let mut touch_buf: heapless::String<24> = heapless::String::new();
-    let touch_value: &str = match (data.touch_x, data.touch_y) {
+    let touch_value: &str = match (data.touch.x, data.touch.y) {
         (Some(tx), Some(ty)) => {
             let _ = write!(touch_buf, "{}, {}", tx, ty);
             touch_buf.as_str()

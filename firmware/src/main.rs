@@ -20,7 +20,15 @@ mod system;
 mod tasks;
 mod ui;
 
+use system::bus::I2C_BUS;
 use system::manager::{SystemManager, Peripherals};
+use system::tasks::{
+    boot_button::boot_button_task,
+    imu::imu_task,
+    power::power_task,
+    rtc::rtc_task,
+    touch::touch_task,
+};
 use esp_backtrace as _;
 use esp_hal::timer::timg::TimerGroup;
 
@@ -68,6 +76,7 @@ async fn main(spawner: embassy_executor::Spawner) {
         touch_rst: p.GPIO9,
         touch_int: p.GPIO38,
         rtc_int: p.GPIO39,
+        imu_int1: p.GPIO21,
         spi3: p.SPI3,
         sd_sck: p.GPIO2,
         sd_mosi: p.GPIO1,

@@ -182,6 +182,131 @@ impl LpfMode {
     }
 }
 
+// ---- AccelLpOdr (low-power accelerometer ODR) -----------------------------------
+
+/// Accelerometer low-power output data rates (CTRL2 bits 3:0, codes 0x0C-0x0F).
+///
+/// These are only valid for the accelerometer; the gyroscope does not
+/// support low-power rates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AccelLpOdr {
+    /// 128 Hz, 100% duty cycle.
+    Hz128 = 0x0C,
+    /// 21 Hz, 58% duty cycle.
+    Hz21 = 0x0D,
+    /// 11 Hz, 31% duty cycle.
+    Hz11 = 0x0E,
+    /// 3 Hz, 8.5% duty cycle.
+    Hz3 = 0x0F,
+}
+
+// ---- FIFO types -----------------------------------------------------------------
+
+/// FIFO operating mode (FIFO_CTRL bits 1:0).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FifoMode {
+    /// FIFO disabled. Sensor data goes directly to output registers.
+    Bypass = 0,
+    /// FIFO mode. Stops collecting when full.
+    Fifo = 1,
+    /// Streaming mode. Circular buffer, oldest data discarded when full.
+    Streaming = 2,
+}
+
+/// FIFO size in samples per enabled sensor (FIFO_CTRL bits 3:2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FifoSize {
+    /// 16 samples per enabled sensor.
+    Samples16 = 0,
+    /// 32 samples per enabled sensor.
+    Samples32 = 1,
+    /// 64 samples per enabled sensor.
+    Samples64 = 2,
+    /// 128 samples per enabled sensor (max 2 sensors).
+    Samples128 = 3,
+}
+
+/// FIFO status flags from FIFO_STATUS register (0x16).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct FifoStatus {
+    /// FIFO is full.
+    pub full: bool,
+    /// Watermark level reached.
+    pub watermark: bool,
+    /// Overflow occurred (write attempted while full).
+    pub overflow: bool,
+    /// FIFO contains data.
+    pub not_empty: bool,
+    /// Total FIFO sample count in bytes (10-bit value).
+    pub sample_count: u16,
+}
+
+// ---- AttitudeEngine types -------------------------------------------------------
+
+/// AttitudeEngine output data rate (CTRL6 bits 2:0).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AeOdr {
+    Hz1  = 0,
+    Hz2  = 1,
+    Hz4  = 2,
+    Hz8  = 3,
+    Hz16 = 4,
+    Hz32 = 5,
+    Hz64 = 6,
+}
+
+/// AttitudeEngine quaternion increment output.
+///
+/// The quaternion represents the incremental rotation since the last
+/// sample. Divide each component by 2^14 to get the actual value.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Quaternion {
+    pub dqw: i16,
+    pub dqx: i16,
+    pub dqy: i16,
+    pub dqz: i16,
+}
+
+/// AttitudeEngine velocity increment output.
+///
+/// Represents the incremental velocity change since the last sample.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct VelocityIncrement {
+    pub dvx: i16,
+    pub dvy: i16,
+    pub dvz: i16,
+}
+
+// ---- Wake-on-Motion types -------------------------------------------------------
+
+/// Wake-on-Motion interrupt pin selection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WomInterrupt {
+    /// INT1, initial value low.
+    Int1Low = 0b00,
+    /// INT1, initial value high.
+    Int1High = 0b10,
+    /// INT2, initial value low.
+    Int2Low = 0b01,
+    /// INT2, initial value high.
+    Int2High = 0b11,
+}
+
+/// Wake-on-Motion configuration.
+///
+/// Written to CAL1_L and CAL1_H, then CTRL9 command 0x08 is issued.
+#[derive(Debug, Clone, Copy)]
+pub struct WomConfig {
+    /// Threshold in mg (1 mg/LSB). 0 disables WoM.
+    pub threshold_mg: u8,
+    /// Which interrupt pin to use and its initial value.
+    pub interrupt: WomInterrupt,
+    /// Blanking time in number of accelerometer samples (0-63).
+    /// Ignores this many samples after WoM is enabled to avoid
+    /// spurious wakeups from startup transients.
+    pub blanking_samples: u8,
+}
+
 // ---- Sensor data snapshot -------------------------------------------------------
 
 /// A single snapshot of all IMU sensor data.

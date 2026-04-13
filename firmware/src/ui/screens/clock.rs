@@ -31,10 +31,10 @@ impl Screen for ClockScreen {
 
         // -- Date headline at the top, small grey ---------------------------
         let mut date_buf: heapless::String<24> = heapless::String::new();
-        let dow = day_of_week(data.year as i32, data.month as i32, data.day as i32);
+        let dow = day_of_week(data.time.year as i32, data.time.month as i32, data.time.day as i32);
         let dow_str = ["MO", "DI", "MI", "DO", "FR", "SA", "SO"][dow as usize];
-        let month_str = month_de(data.month);
-        let _ = write!(date_buf, "{} {:02} {} {}", dow_str, data.day, month_str, data.year);
+        let month_str = month_de(data.time.month);
+        let _ = write!(date_buf, "{} {:02} {} {}", dow_str, data.time.day, month_str, data.time.year);
 
         fonts::draw_centered(
             display, &fonts::headline(),
@@ -52,7 +52,7 @@ impl Screen for ClockScreen {
             Size::new(theme::SCREEN_W as u32, 150),
         );
         let mut time_buf: heapless::String<8> = heapless::String::new();
-        let _ = write!(time_buf, "{:02}:{:02}", data.hour, data.minute);
+        let _ = write!(time_buf, "{:02}:{:02}", data.time.hour, data.time.minute);
         fonts::draw_centered_in_rect(
             display, &fonts::hero(),
             &time_buf, time_rect,
@@ -86,13 +86,13 @@ impl Screen for ClockScreen {
         );
 
         // -- Battery value inside the left circle ---------------------------
-        let bat_pct = data.battery_percent.unwrap_or(0);
+        let bat_pct = data.power.battery_percent.unwrap_or(0);
         let mut bat_buf: heapless::String<8> = heapless::String::new();
-        let _ = match data.battery_percent {
+        let _ = match data.power.battery_percent {
             Some(p) => write!(bat_buf, "{}%", p),
             None => write!(bat_buf, "-%"),
         };
-        let bat_color = match data.battery_percent {
+        let bat_color = match data.power.battery_percent {
             Some(_) => primitives::battery_color(bat_pct),
             None => theme::TEXT_MUTED,
         };
@@ -103,7 +103,7 @@ impl Screen for ClockScreen {
         );
 
         // -- Temperature value inside the right circle ----------------------
-        let temp_c = data.temp_raw / 256;
+        let temp_c = data.motion.temp_raw / 256;
         let mut temp_buf: heapless::String<8> = heapless::String::new();
         let _ = write!(temp_buf, "{}C", temp_c);
         fonts::draw_centered_in_rect(

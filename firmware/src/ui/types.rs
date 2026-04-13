@@ -3,8 +3,6 @@
 use embedded_graphics::{draw_target::DrawTarget, pixelcolor::Rgb565};
 
 use crate::events::SystemEvent;
-use drivers::imu::ImuData;
-use drivers::rtc::DateTime;
 
 // -- Screen IDs --------------------------------------------------------------
 
@@ -44,71 +42,29 @@ pub enum Action {
 
 // -- System data snapshot ----------------------------------------------------
 
+// The per-peripheral data structs live alongside the task that
+// produces them, so each task module is a self-contained unit
+// (hardware state + emitted data type). We just re-export them
+// here so screens can `use crate::ui::types::{TimeData, PowerData,
+// MotionData, TouchData, SystemData}` from one place.
+pub use crate::system::tasks::imu::MotionData;
+pub use crate::system::tasks::power::PowerData;
+pub use crate::system::tasks::rtc::TimeData;
+pub use crate::system::tasks::touch::TouchData;
+
 /// Read-only snapshot of system state, passed to screens each frame.
 ///
-/// Screens pick what they need from this. Adding new fields here
-/// makes them available to all screens without changing the trait.
-#[allow(dead_code)] // `second` is read by future screens (e.g. a seconds face)
+/// Organised by source peripheral so each task owns exactly one
+/// sub-struct. Adding a new field means extending one group and
+/// teaching one event handler to keep it up to date - no changes
+/// to the screen trait, no unrelated refactors.
+#[derive(Debug, Clone, Copy, Default)]
 pub struct SystemData {
-    // Time
-    pub hour: u8,
-    pub minute: u8,
-    pub second: u8,
-    pub year: u16,
-    pub month: u8,
-    pub day: u8,
-
-    // IMU
-    pub accel_x: i16,
-    pub accel_y: i16,
-    pub accel_z: i16,
-    pub gyro_x: i16,
-    pub gyro_y: i16,
-    pub gyro_z: i16,
-    pub temp_raw: i16,
-
-    // Touch
-    pub touch_x: Option<u16>,
-    pub touch_y: Option<u16>,
-
-    // Power
-    pub battery_percent: Option<u8>,
-    pub battery_voltage_mv: Option<u16>,
-
-    // System
+    pub time: TimeData,
+    pub power: PowerData,
+    pub motion: MotionData,
+    pub touch: TouchData,
     pub tick_count: u32,
-}
-
-impl SystemData {
-    pub fn from_sensors(
-        time: Option<&DateTime>,
-        imu: Option<&ImuData>,
-        touch: Option<(u16, u16)>,
-        battery_percent: Option<u8>,
-        battery_voltage_mv: Option<u16>,
-        tick_count: u32,
-    ) -> Self {
-        Self {
-            hour:   time.map_or(0, |t| t.hour),
-            minute: time.map_or(0, |t| t.minute),
-            second: time.map_or(0, |t| t.second),
-            year:   time.map_or(2026, |t| t.year),
-            month:  time.map_or(1, |t| t.month),
-            day:    time.map_or(1, |t| t.day),
-            accel_x: imu.map_or(0, |d| d.accel_x),
-            accel_y: imu.map_or(0, |d| d.accel_y),
-            accel_z: imu.map_or(0, |d| d.accel_z),
-            gyro_x:  imu.map_or(0, |d| d.gyro_x),
-            gyro_y:  imu.map_or(0, |d| d.gyro_y),
-            gyro_z:  imu.map_or(0, |d| d.gyro_z),
-            temp_raw: imu.map_or(0, |d| d.temp_raw),
-            touch_x: touch.map(|(x, _)| x),
-            touch_y: touch.map(|(_, y)| y),
-            battery_percent,
-            battery_voltage_mv,
-            tick_count,
-        }
-    }
 }
 
 // -- Screen trait -------------------------------------------------------------

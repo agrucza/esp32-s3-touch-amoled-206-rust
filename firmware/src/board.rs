@@ -57,8 +57,10 @@ pub const RTC_INT: u8 = 39;     // Alarm / timer interrupt
 
 // =============================================================================
 // Power management - AXP2101 (I2C, shared bus)
-// IRQ pin goes to IO expander EXIO5 (not a direct ESP32 GPIO).
-// Deep sleep wakeup via power button uses CHIP_PU (ESP32 enable pin), not IRQ.
+// IRQ output is tied to the EXIO5 net which the schematic uses as
+// the RTC-VCC power rail - NOT routed to any readable signal. PMU
+// events must be polled via I2C; no hardware wake is possible.
+// Deep sleep wakeup via power button uses CHIP_PU (ESP32 enable pin).
 // =============================================================================
 
 // =============================================================================

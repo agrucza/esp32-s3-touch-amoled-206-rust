@@ -5,10 +5,14 @@ use crate::display_hal::{self, WIDTH, HEIGHT};
 use crate::events::{SwipeDir, SwipeRegion, SystemEvent};
 use crate::sdcard_hal::EspVolumeManager;
 use crate::system::audio::AudioSystem;
+use crate::system::bus::{EVENTS, SLEEP_SIGNAL, SleepState};
 use crate::system::display::{Display, DisplayState};
-use crate::system::input::InputSystem;
-use crate::system::power::PowerSystem;
-use crate::system::sensors::SensorSystem;
+use crate::system::power::PowerControls;
+use crate::system::tasks::boot_button::BootButtonTaskState;
+use crate::system::tasks::imu::ImuTaskState;
+use crate::system::tasks::power::PowerTaskState;
+use crate::system::tasks::rtc::RtcTaskState;
+use crate::system::tasks::touch::{TouchData, TouchTaskState};
 use crate::ui::primitives;
 use crate::ui::screens::{self, ActiveScreen};
 use crate::ui::types::{Action, ScreenId, SystemData};
@@ -16,7 +20,6 @@ use embedded_graphics::draw_target::DrawTarget;
 use embassy_futures::select::{select, Either};
 use embassy_time::{Duration, Instant, Timer, with_timeout};
 use esp_hal::{
-    Blocking,
     dma::DmaDescriptor,
     gpio::{Input, InputConfig, Level, Output, OutputConfig, Pull},
     i2c::master::{Config as I2cConfig, I2c},
@@ -77,35 +80,45 @@ fn row_hash(row: &[u8]) -> u32 {
     h
 }
 
+/// Bundle of per-device task state structs produced by
+/// [`SystemManager::init`] and handed to `main` so it can spawn
+/// one embassy task per peripheral.
+///
+/// Each field owns everything a task needs to run independently
+/// (driver handle, GPIO lines, buffers). The shared I2C bus is
+/// accessed via `&'static SharedI2c` from `system::bus::I2C_BUS`.
+pub struct TaskBundle {
+    pub touch: TouchTaskState<'static>,
+    pub boot_button: BootButtonTaskState<'static>,
+    pub rtc: RtcTaskState<'static>,
+    pub imu: ImuTaskState<'static>,
+    pub power: PowerTaskState,
+}
+
 // `audio`, `storage`, and `tx_transfer` are held-but-not-read once
 // populated: they own hardware resources whose Drop impls would
 // deinitialize the peripherals. They stay as fields so the hardware
 // keeps running after `start_audio` brings them online.
 #[allow(dead_code)]
 pub struct SystemManager<'d> {
-    // Bus
-    i2c: I2c<'d, Blocking>,
+    // Shared I2C bus behind an async mutex. Lives in the global
+    // `I2C_BUS` StaticCell; tasks and the main loop lock it before
+    // each access. See `system::bus` for details.
+    i2c_bus: &'static crate::system::bus::SharedI2c,
 
-    // Event sources
-    pub power: PowerSystem<'d>,
-    pub input: InputSystem<'d>,
+    // Non-I2C power hardware (SYS_OUT latch, haptic motor). The
+    // I2C side of the PMU lives in the power task.
+    pub power: PowerControls<'d>,
 
     // Peripherals
     pub display: Display<'d>,
     pub audio: Option<AudioSystem<'d>>,
-    pub sensors: SensorSystem,
     pub storage: Option<EspVolumeManager<'d>>,
 
     // Tearing-effect line from the display. We wait for its rising
     // edge (vblank start) before pushing pixels so partial flushes
     // don't land mid-scanout.
     lcd_te: Input<'d>,
-
-    // RTC minute-interrupt line (GPIO39, active-low pulse). The
-    // PCF85063A pulses this at second=0 every minute. Used as an
-    // async wake source so the main loop can sleep longer when the
-    // display is off instead of polling the RTC over I2C.
-    rtc_int: Input<'d>,
 
     // DMA transfers - populated by `start_audio`, `None` until then.
     tx_transfer: Option<AudioTx<'d>>,
@@ -118,18 +131,14 @@ pub struct SystemManager<'d> {
     // UI
     screen: ActiveScreen,
     tick_count: u32,
-    touch_pos: Option<(u16, u16)>,
     needs_redraw: bool,
 
-    // Pre-allocated drain buffer for the mic RX DMA ring. Lives as a
-    // field so tick() never hits the heap.
+    // Pre-allocated drain buffer for the mic RX DMA ring.
     mic_drain_buf: alloc::boxed::Box<[u8]>,
 
     // Per-row FNV-1a hashes from the previous frame. Compared against
     // the current frame to determine which rows actually changed, so
     // only the dirty horizontal band is pushed over QSPI.
-    // Initialized to zero, which ensures the first frame sees every
-    // row as dirty and performs a full flush.
     row_hashes: alloc::boxed::Box<[u32]>,
 
     // Runtime configuration (display dim/off timeouts, brightness,
@@ -145,6 +154,19 @@ pub struct SystemManager<'d> {
     // Wall-clock timestamp of the last user-input event. Used by the
     // display state machine to decide when to dim / blank the panel.
     last_activity: Instant,
+
+    // System-wide sleep flag. When `true`, the display is forced
+    // Off and the IMU is in WoM mode regardless of idle time.
+    // Set by user request (BOOT button while Active/Dim), cleared
+    // by any user-input wake event. Will grow later to also drive
+    // CPU frequency scaling and other peripheral power-down.
+    sleeping: bool,
+
+    // Cached snapshot of all system data (time, battery, IMU,
+    // touch, ...). Event handlers update individual fields as
+    // events arrive; the render path just reads this cache.
+    // Fully refreshed at boot and on wake-from-sleep.
+    cached_data: SystemData,
 }
 
 /// All peripheral tokens needed by the system manager.
@@ -182,6 +204,7 @@ pub struct Peripherals<'d> {
     pub touch_rst: esp_hal::peripherals::GPIO9<'d>,
     pub touch_int: esp_hal::peripherals::GPIO38<'d>,
     pub rtc_int: esp_hal::peripherals::GPIO39<'d>,
+    pub imu_int1: esp_hal::peripherals::GPIO21<'d>,
 
     // SD card
     pub spi3: esp_hal::peripherals::SPI3<'d>,
@@ -207,11 +230,15 @@ pub struct Peripherals<'d> {
     pub rx_descriptors: &'static mut [DmaDescriptor],
 }
 
-impl<'d> SystemManager<'d> {
+impl SystemManager<'static> {
     /// Initialize all subsystems and assemble the system manager.
     ///
     /// This is the single entry point for the entire system. Call it from
     /// main() after HAL init, timer start, and logger setup.
+    ///
+    /// Requires `'static` peripherals (from `esp_hal::init`) so the
+    /// I2C bus can be stored in the global `I2C_BUS` static mutex
+    /// for sharing with peripheral tasks.
     ///
     /// Init order is critical:
     /// 1. I2C bus (shared by PMU, touch, IMU, RTC, codecs)
@@ -225,19 +252,26 @@ impl<'d> SystemManager<'d> {
     ///    started. A caller invokes `start_audio()` later to actually
     ///    bring the codecs, I2S DMA, and speaker amp online. This
     ///    keeps idle current low on battery by default.
-    pub async fn init(p: Peripherals<'d>) -> Self {
+    ///
+    /// Returns `(SystemManager, TaskBundle)` - the bundle holds the
+    /// per-device task state structs that `main` then passes to
+    /// `spawner.must_spawn()` to start the peripheral tasks.
+    pub async fn init(p: Peripherals<'static>) -> (Self, TaskBundle) {
         // 1. I2C bus
         let mut i2c = I2c::new(p.i2c0, I2cConfig::default().with_frequency(Rate::from_khz(400)))
             .unwrap()
             .with_sda(p.i2c_sda)
             .with_scl(p.i2c_scl);
 
-        // 2. Power - must init first (enables all power rails)
-        let power = PowerSystem::init(
+        // 2. Power - must init first (enables all power rails).
+        // PowerControls owns the GPIO sides (sys_out latch, motor);
+        // PowerTaskState owns the I2C-driver Pmu handle for polling.
+        let (power, pmu) = PowerControls::init(
             Output::new(p.sys_out_pin, Level::Low, OutputConfig::default()),
             Output::new(p.motor_pin, Level::Low, OutputConfig::default()),
             &mut i2c,
         ).expect("PMU init failed - halting");
+        let power_state = PowerTaskState::new(pmu);
         Timer::after(Duration::from_millis(20)).await;
 
         // 3. PSRAM allocator + framebuffer
@@ -257,18 +291,19 @@ impl<'d> SystemManager<'d> {
         // watch the rising edge before each flush.
         let lcd_te = Input::new(p.lcd_te, InputConfig::default().with_pull(Pull::None));
 
-        // 5. Input (buttons + touch)
-        let input = InputSystem::init(
-            Input::new(p.btn_boot, InputConfig::default().with_pull(Pull::Up)),
+        // 5. Touch + BOOT button task states.
+        //
+        // `TouchTaskState::init` does the FT3168 reset sequence,
+        // reads the chip ID, and captures the INT# input. The BOOT
+        // button is just an async GPIO wait.
+        let touch_state = TouchTaskState::init(
             Output::new(p.touch_rst, Level::High, OutputConfig::default()),
             Input::new(p.touch_int, InputConfig::default().with_pull(Pull::Up)),
             &mut i2c,
         ).await;
-
-        // RTC minute-interrupt line. The PCF85063A pulses INT# low at
-        // second=0 every minute. We use this as an async wake source
-        // so the display-off sleep can last seconds instead of 150 ms.
-        let rtc_int = Input::new(p.rtc_int, InputConfig::default().with_pull(Pull::Up));
+        let boot_button_state = BootButtonTaskState::new(
+            Input::new(p.btn_boot, InputConfig::default().with_pull(Pull::Up)),
+        );
 
         // 6. SD card
         let storage = crate::system::storage::init_sd(
@@ -276,13 +311,24 @@ impl<'d> SystemManager<'d> {
             Output::new(p.sd_cs, Level::High, OutputConfig::default()),
         );
 
-        // 7. Sensors (RTC + IMU with gyro calibration)
-        let sensors = SensorSystem::init(&mut i2c).await;
+        // 7. Sensors (RTC + IMU). Each owns its INT line and driver.
+        // `RtcTaskState::init` brings the PCF85063A up, sets a default
+        // time if the oscillator stopped, and arms the half-minute
+        // interrupt. `ImuTaskState::init` resets the QMI8658C and
+        // collects ~512 ms of gyro-bias samples.
+        let rtc_state = RtcTaskState::init(
+            Input::new(p.rtc_int, InputConfig::default().with_pull(Pull::Up)),
+            &mut i2c,
+        );
+        let imu_state = ImuTaskState::init(
+            Input::new(p.imu_int1, InputConfig::default().with_pull(Pull::None)),
+            &mut i2c,
+        ).await;
 
-        // 7b. Enable the RTC minute interrupt so GPIO39 pulses at second=0.
-        if let Err(_) = sensors.rtc.enable_minute_interrupt(&mut i2c) {
-            log::warn!("RTC: failed to enable minute interrupt");
-        }
+        // Seed the cached data so the first frame has something
+        // reasonable to render before task events arrive.
+        let initial_time = rtc_state.snapshot(&mut i2c);
+        let initial_power = power_state.snapshot(&mut i2c);
 
         // 8. Stash audio peripherals for later `start_audio()`.
         // Hardware stays in post-reset low-power state until then.
@@ -305,31 +351,53 @@ impl<'d> SystemManager<'d> {
 
         // Dump PMU status now that all ADC channels have had time to
         // settle during display, touch, SD, and sensor init (~1 s).
-        power.dump_status(&mut i2c);
+        power_state.dump_status(&mut i2c);
 
-        Self {
-            i2c,
+        // Move the I2C bus into the global StaticCell-backed mutex.
+        // From here on, every access goes through `i2c_bus.lock()`.
+        // The `i2c` local is consumed and no longer accessible.
+        let i2c_bus: &'static crate::system::bus::SharedI2c = crate::system::bus::I2C_BUS
+            .init(embassy_sync::mutex::Mutex::new(i2c));
+
+        let cached_data = SystemData {
+            time: initial_time,
+            power: initial_power,
+            motion: Default::default(),
+            touch: TouchData::default(),
+            tick_count: 0,
+        };
+
+        let manager = Self {
+            i2c_bus,
             power,
-            input,
             display,
             audio: None,
-            sensors,
             storage,
             lcd_te,
-            rtc_int,
             tx_transfer: None,
             rx_transfer: None,
             pending_audio,
             screen: ActiveScreen::new(ScreenId::Clock),
             tick_count: 0,
-            touch_pos: None,
             needs_redraw: true, // first frame always draws
             mic_drain_buf: alloc::vec![0u8; MIC_DRAIN_BUF_SIZE].into_boxed_slice(),
             row_hashes: alloc::vec![0u32; HEIGHT as usize].into_boxed_slice(),
             config: Config::default(),
             display_state: DisplayState::Active,
             last_activity: Instant::now(),
-        }
+            sleeping: false,
+            cached_data,
+        };
+
+        let bundle = TaskBundle {
+            touch: touch_state,
+            boot_button: boot_button_state,
+            rtc: rtc_state,
+            imu: imu_state,
+            power: power_state,
+        };
+
+        (manager, bundle)
     }
 
     /// Bring the audio subsystem online. Consumes the peripheral
@@ -347,295 +415,331 @@ impl<'d> SystemManager<'d> {
             return;
         };
         log::info!("Audio: bringing subsystem online...");
+        let mut i2c = self.i2c_bus.lock().await;
         let (audio, tx_transfer, rx_transfer) = crate::system::audio::init_audio(
             pa.i2s0, pa.dma_ch1,
             pa.audio_mclk, pa.audio_bclk, pa.audio_ws,
             pa.audio_dout, pa.audio_din,
             Output::new(pa.audio_pa, Level::Low, OutputConfig::default()),
             pa.tx_buffer, pa.rx_buffer, pa.tx_descriptors, pa.rx_descriptors,
-            &mut self.i2c,
+            &mut *i2c,
         ).await;
+        drop(i2c);
         self.audio = Some(audio);
         self.tx_transfer = Some(tx_transfer);
         self.rx_transfer = Some(rx_transfer);
     }
 
-    /// Run one iteration of the main loop.
+    // ================= Sleep / wake API ==========================================
+
+    /// Returns `true` if the event should count as user activity
+    /// (resets idle timer; wakes from sleep).
+    fn is_user_activity(event: &SystemEvent) -> bool {
+        matches!(
+            event,
+            SystemEvent::TouchPressed { .. }
+                | SystemEvent::TouchReleased
+                | SystemEvent::Tap { .. }
+                | SystemEvent::Swipe { .. }
+                | SystemEvent::BootButtonPressed
+                | SystemEvent::PowerButtonShort
+        )
+    }
+
+    /// Enter low-power sleep. Idempotent.
     ///
-    /// Drains audio DMA, polls events, routes them through the
-    /// active screen. Only redraws the display when something changed.
-    pub async fn tick(&mut self) {
-        // Drain mic RX buffer to prevent overflow, but only when
-        // audio has actually been started. The buffer is a field so
-        // this never allocates.
-        if let Some(rx) = self.rx_transfer.as_mut() {
-            let _ = rx.pop(&mut self.mic_drain_buf).await;
+    /// Signals the IMU task (via `SLEEP_SIGNAL`) to switch into
+    /// Wake-on-Motion mode, blanks the display, and sets the
+    /// `sleeping` flag. Peripheral power-down for other
+    /// subsystems (audio, CPU freq, etc.) will hang off this
+    /// method in the future.
+    async fn sleep(&mut self) {
+        if self.sleeping {
+            return;
         }
+        log::info!("system: sleep");
+        self.sleeping = true;
+        SLEEP_SIGNAL.signal(SleepState::Sleeping);
+        let _ = crate::system::display::transition(
+            &mut self.display,
+            self.display_state,
+            DisplayState::Off,
+            &self.config.display,
+        ).await;
+        self.display_state = DisplayState::Off;
+    }
 
-        // Poll all subsystems for events. Input and power are always
-        // polled (touch wake, power button). Sensor polling (RTC
-        // minute-change) is skipped when the display is Off because
-        // the RTC minute-interrupt on GPIO39 wakes us instead, and
-        // last_minute will re-sync on the first Active tick.
-        let mut events: heapless::Vec<SystemEvent, 8> = heapless::Vec::new();
-        self.input.poll(&mut self.i2c, &mut events);
-        self.power.poll(&mut self.i2c, &mut events);
-        if self.display_state != DisplayState::Off {
-            self.sensors.poll(&mut self.i2c, &mut events);
+    /// Exit low-power sleep. Idempotent.
+    ///
+    /// Signals the IMU task to restore normal mode, turns the
+    /// display back on at full brightness, resets the idle timer,
+    /// and forces a full redraw so the first frame after wake is
+    /// current.
+    async fn wake(&mut self) {
+        if !self.sleeping {
+            return;
         }
+        log::info!("system: wake");
+        self.sleeping = false;
+        self.last_activity = Instant::now();
+        SLEEP_SIGNAL.signal(SleepState::Awake);
+        let _ = crate::system::display::transition(
+            &mut self.display,
+            self.display_state,
+            DisplayState::Active,
+            &self.config.display,
+        ).await;
+        self.display_state = DisplayState::Active;
+        self.row_hashes.fill(0);
+        self.needs_redraw = true;
+    }
 
-        // Track touch state from events, and mark state-change events
-        // as redraw triggers. Everything else goes through the screen's
-        // Action return value so screens opt in to redraws explicitly
-        // (avoids a redraw on every TouchPressed tick during a drag).
-        for event in events.iter() {
-            match event {
-                SystemEvent::TouchPressed { x, y } => self.touch_pos = Some((*x, *y)),
-                SystemEvent::TouchReleased => self.touch_pos = None,
-                SystemEvent::MinuteChanged
-                | SystemEvent::BatteryChanged { .. } => self.needs_redraw = true,
-                _ => {}
-            }
+    /// Apply the Active <-> Dim transition when awake. No-op when
+    /// sleeping (the display is Off and `sleep`/`wake` handle that).
+    async fn apply_dim_state(&mut self) {
+        if self.sleeping {
+            return;
         }
-
-        // Build data snapshot for rendering. When the display is Off
-        // nothing renders, so skip the IMU read and battery I2C
-        // transactions entirely - they would just burn bus cycles for
-        // data nobody looks at.
-        let (time, imu, battery, battery_mv) = if self.display_state != DisplayState::Off {
-            (
-                self.sensors.read_time(&mut self.i2c),
-                self.sensors.imu.read(&mut self.i2c).ok(),
-                self.power.battery_percent(&mut self.i2c),
-                self.power.battery_voltage_mv(&mut self.i2c),
-            )
-        } else {
-            (None, None, None, None)
-        };
-        let data = SystemData::from_sensors(
-            time.as_ref(),
-            imu.as_ref(),
-            self.touch_pos,
-            battery,
-            battery_mv,
-            self.tick_count,
-        );
-
-        for event in events.iter() {
-            // Log every swipe so we can verify detection across all regions.
-            if let SystemEvent::Swipe { dir, region } = event {
-                log::info!("Swipe: {:?} in {:?}", dir, region);
-            }
-
-            // Any user-input event resets the display idle timer. If
-            // the display is currently Off, we also "consume" the
-            // event - the first touch wakes the panel but does NOT
-            // dispatch to the screen, so a brush against clothing
-            // while worn on a wrist doesn't accidentally swipe or tap.
-            // Dim state still passes events through normally.
-            let is_user_activity = matches!(
-                event,
-                SystemEvent::TouchPressed { .. }
-                    | SystemEvent::TouchReleased
-                    | SystemEvent::Tap { .. }
-                    | SystemEvent::Swipe { .. }
-                    | SystemEvent::BootButtonPressed
-                    | SystemEvent::PowerButtonShort
-            );
-            if is_user_activity {
-                self.last_activity = Instant::now();
-                if self.display_state == DisplayState::Off {
-                    continue;
-                }
-            }
-
-            // System-level gesture: swipe-down-from-top-edge opens
-            // the panel screen. Only triggers when we're NOT already
-            // in the panel (otherwise the panel screen handles its
-            // own swipes). Panel remembers the current screen so it
-            // can return to it on close.
-            if !matches!(self.screen.id(), ScreenId::Panel) {
-                if let SystemEvent::Swipe { dir: SwipeDir::Down, region: SwipeRegion::Top } = event {
-                    let previous = self.screen.id();
-                    self.screen = ActiveScreen::new_panel(previous);
-                    self.needs_redraw = true;
-                    continue;
-                }
-            }
-
-            // Forward to the active screen first. If the screen returns
-            // Action::None and the event is a content L/R swipe, fall
-            // through to the home-row nav fallback below. This lets a
-            // screen (e.g. a horizontal slider) own its L/R gestures by
-            // returning anything other than None.
-            match self.screen.on_event(event, &data) {
-                Action::None => {
-                    // Home-row nav fallback: content L/R swipes cycle
-                    // through the home-row apps. Panel is modal and
-                    // never participates in the carousel, so we skip
-                    // the fallback when it's active.
-                    if !matches!(self.screen.id(), ScreenId::Panel) {
-                        if let SystemEvent::Swipe { dir, region: SwipeRegion::Content } = event {
-                            match dir {
-                                SwipeDir::Right => {
-                                    let next = screens::cycle_home_app(self.screen.id(), true);
-                                    self.screen.switch_to(next);
-                                    self.needs_redraw = true;
-                                }
-                                SwipeDir::Left => {
-                                    let prev = screens::cycle_home_app(self.screen.id(), false);
-                                    self.screen.switch_to(prev);
-                                    self.needs_redraw = true;
-                                }
-                                _ => {}
-                            }
-                        }
-                    }
-                }
-                Action::Redraw => self.needs_redraw = true,
-                Action::SwitchScreen(id) => {
-                    self.screen.switch_to(id);
-                    self.needs_redraw = true;
-                }
-                Action::Shutdown => {
-                    log::info!("System: shutdown requested");
-                    self.power.shutdown();
-                }
-            }
-        }
-
-        // Haptic feedback on boot button (system-level, not screen-specific)
-        if events.iter().any(|e| matches!(e, SystemEvent::BootButtonPressed)) {
-            self.power.buzz();
-            Timer::after(Duration::from_millis(100)).await;
-            self.power.buzz_stop();
-        }
-
-        // Apply the display state machine. Decide the target state
-        // based on idle time since last user activity and transition
-        // if it changed. Waking from Off forces a full redraw by
-        // zeroing row_hashes so every row looks dirty on the next
-        // pass.
         let idle = Instant::now().duration_since(self.last_activity);
-        let target = if idle >= Duration::from_secs(self.config.display.off_timeout_s) {
-            DisplayState::Off
-        } else if idle >= Duration::from_secs(self.config.display.dim_timeout_s) {
+        let target = if idle >= Duration::from_secs(self.config.display.dim_timeout_s) {
             DisplayState::Dim
         } else {
             DisplayState::Active
         };
         if target != self.display_state {
-            let waking_from_off = crate::system::display::transition(
+            let _ = crate::system::display::transition(
                 &mut self.display,
                 self.display_state,
                 target,
                 &self.config.display,
             ).await;
             self.display_state = target;
-            if waking_from_off {
-                self.row_hashes.fill(0);
+        }
+    }
+
+    /// Trigger sleep if the idle timer has expired. No-op if
+    /// already sleeping.
+    async fn check_idle_sleep(&mut self) {
+        if self.sleeping {
+            return;
+        }
+        let idle = Instant::now().duration_since(self.last_activity);
+        if idle >= Duration::from_secs(self.config.display.off_timeout_s) {
+            self.sleep().await;
+        }
+    }
+
+    // ================= Event loop ================================================
+
+    /// Handle a single event received from the global event channel.
+    ///
+    /// Responsibilities:
+    ///   * Update `cached_data` from snapshot events
+    ///     (`TimeUpdated` / `PowerUpdated` / `MotionUpdated`, touch
+    ///     position from `TouchPressed` / `TouchReleased`).
+    ///   * Drive sleep/wake transitions on user activity and WoM.
+    ///   * Flag `needs_redraw` for events that visually matter.
+    ///   * Forward screen-level events to the active screen and
+    ///     act on the returned `Action`.
+    async fn handle_event(&mut self, event: SystemEvent) {
+        // Snapshot events: just refresh the cache and mark redraw.
+        match &event {
+            SystemEvent::TimeUpdated { data } => {
+                self.cached_data.time = *data;
+                self.needs_redraw = true;
+                return;
+            }
+            SystemEvent::PowerUpdated { data } => {
+                self.cached_data.power = *data;
+                // Power snapshots arrive every 500 ms. Only flag
+                // redraw when a visible field actually moved - we
+                // don't want a full frame every half second just
+                // because VBUS mV wobbled. For now the battery % is
+                // the main visible field, and `BatteryChanged` is
+                // emitted separately when it moves, so skip the
+                // redraw here.
+                return;
+            }
+            SystemEvent::MotionUpdated { data } => {
+                self.cached_data.motion = *data;
+                // Live motion screens (Status page 0/1) need a
+                // redraw on every motion tick. Cheap to over-draw
+                // here - dirty-row hashing skips unchanged rows.
+                self.needs_redraw = true;
+                return;
+            }
+            SystemEvent::TouchPressed { x, y } => {
+                self.cached_data.touch = TouchData { x: Some(*x), y: Some(*y) };
+            }
+            SystemEvent::TouchReleased => {
+                self.cached_data.touch = TouchData::default();
+            }
+            SystemEvent::HalfMinuteChanged
+            | SystemEvent::BatteryChanged { .. } => {
                 self.needs_redraw = true;
             }
+            _ => {}
         }
 
-        // Only redraw when something changed AND the display is not
-        // in the Off state. When Off, the render path is skipped
-        // entirely - the panel's GRAM retains the last frame we
-        // pushed so there's nothing to do until a user event wakes
-        // us and we come back around.
-        if self.display_state != DisplayState::Off && self.needs_redraw {
-            self.display.clear(crate::ui::theme::BG).ok();
+        // WoM wake: clear sleep flag and skip screen dispatch.
+        if matches!(event, SystemEvent::WakeOnMotion) {
+            log::info!("wake: IMU motion");
+            self.wake().await;
+            return;
+        }
 
-            // Panel is just another screen now - no special case.
-            self.screen.render(&mut self.display, &data);
-
-            // System-wide low-battery warning: a 1-px colored frame
-            // tracing the physical display edge. Drawn last so it
-            // remains visible over everything.
-            if let Some(pct) = data.battery_percent {
-                primitives::battery_warning_frame(&mut self.display, pct);
+        // Sleep/wake transitions on user activity.
+        if Self::is_user_activity(&event) {
+            self.last_activity = Instant::now();
+            if self.sleeping {
+                // Waking from sleep: consume this event so it
+                // doesn't dispatch to the screen (avoids accidental
+                // taps/swipes on wake).
+                self.wake().await;
+                return;
             }
+            if matches!(event, SystemEvent::BootButtonPressed) {
+                // BOOT while awake = "sleep now" shortcut.
+                self.power.buzz();
+                Timer::after(Duration::from_millis(100)).await;
+                self.power.buzz_stop();
+                self.sleep().await;
+                return;
+            }
+        }
 
-            // Hash each row, compare to the previous frame, push only
-            // the contiguous vertical band that changed. If nothing
-            // changed we skip the QSPI push entirely.
-            let fb = self.display.framebuffer();
-            let mut min_y: Option<u16> = None;
-            let mut max_y: u16 = 0;
-            for y in 0..HEIGHT {
-                let off = y as usize * ROW_STRIDE;
-                let h = row_hash(&fb[off..off + ROW_STRIDE]);
-                if h != self.row_hashes[y as usize] {
-                    self.row_hashes[y as usize] = h;
-                    if min_y.is_none() { min_y = Some(y); }
-                    max_y = y;
+        // From here on we only dispatch to the screen when awake.
+        if self.sleeping {
+            return;
+        }
+
+        // Log swipes for debugging.
+        if let SystemEvent::Swipe { dir, region } = &event {
+            log::info!("Swipe: {:?} in {:?}", dir, region);
+        }
+
+        // System-level gesture: swipe-down-from-top opens panel.
+        if !matches!(self.screen.id(), ScreenId::Panel) {
+            if let SystemEvent::Swipe { dir: SwipeDir::Down, region: SwipeRegion::Top } = &event {
+                let previous = self.screen.id();
+                self.screen = ActiveScreen::new_panel(previous);
+                self.needs_redraw = true;
+                return;
+            }
+        }
+
+        // Forward to the active screen.
+        match self.screen.on_event(&event, &self.cached_data) {
+            Action::None => {
+                // Home-row nav fallback: content L/R swipes cycle
+                // through home-row apps.
+                if !matches!(self.screen.id(), ScreenId::Panel) {
+                    if let SystemEvent::Swipe { dir, region: SwipeRegion::Content } = &event {
+                        match dir {
+                            SwipeDir::Right => {
+                                let next = screens::cycle_home_app(self.screen.id(), true);
+                                self.screen.switch_to(next);
+                                self.needs_redraw = true;
+                            }
+                            SwipeDir::Left => {
+                                let prev = screens::cycle_home_app(self.screen.id(), false);
+                                self.screen.switch_to(prev);
+                                self.needs_redraw = true;
+                            }
+                            _ => {}
+                        }
+                    }
                 }
             }
-            if let Some(y0) = min_y {
-                // Wait for the next vblank (TE rising edge) before
-                // pushing pixels, so the flush lands between frames
-                // and doesn't tear across scanlines. Timeout at
-                // ~2 refresh periods in case TE is silent for any
-                // reason - we'd rather flush late than hang.
-                let _ = with_timeout(
-                    Duration::from_millis(30),
-                    self.lcd_te.wait_for_rising_edge(),
-                ).await;
-                self.display.flush_rows(y0, max_y + 1).await;
+            Action::Redraw => self.needs_redraw = true,
+            Action::SwitchScreen(id) => {
+                self.screen.switch_to(id);
+                self.needs_redraw = true;
             }
-            self.needs_redraw = false;
+            Action::Shutdown => {
+                log::info!("System: shutdown requested");
+                self.power.shutdown();
+            }
+        }
+    }
+
+    /// Main event loop. Runs forever.
+    ///
+    /// Waits on the global event channel with a timeout; on each
+    /// wakeup it applies dim/idle-sleep transitions, then renders
+    /// if anything flagged a redraw. The timeout gives the idle
+    /// timer a heartbeat even when no events are arriving.
+    pub async fn run(&mut self) -> ! {
+        // How often to re-check idle/dim state when no events are
+        // flowing. 1 s is plenty - the idle thresholds are in
+        // multi-second territory.
+        const IDLE_TICK: Duration = Duration::from_secs(1);
+
+        loop {
+            match select(EVENTS.receive(), Timer::after(IDLE_TICK)).await {
+                Either::First(event) => self.handle_event(event).await,
+                Either::Second(_) => {} // idle heartbeat
+            }
+
+            self.apply_dim_state().await;
+            self.check_idle_sleep().await;
+
+            if !self.sleeping && self.needs_redraw {
+                self.render().await;
+            }
+
+            self.log_diagnostics();
+            self.tick_count = self.tick_count.wrapping_add(1);
+            self.cached_data.tick_count = self.tick_count;
+        }
+    }
+
+    /// Render the active screen with dirty-row flushing. Only runs
+    /// when awake and `needs_redraw` is set.
+    async fn render(&mut self) {
+        // Copy the cache so we can freely borrow `&mut self.display`
+        // below. `SystemData` is `Copy`, so this is cheap.
+        let data = self.cached_data;
+        self.display.clear(crate::ui::theme::BG).ok();
+        self.screen.render(&mut self.display, &data);
+        if let Some(pct) = data.power.battery_percent {
+            primitives::battery_warning_frame(&mut self.display, pct);
         }
 
-        // Heap watermark log every ~10 s (200 ticks * 50 ms). Used to
-        // spot allocation churn in the hot path - `used` should be flat
-        // in steady state.
-        if self.tick_count % 200 == 0 {
+        // Hash rows, find dirty band, push only the changed range.
+        let fb = self.display.framebuffer();
+        let mut min_y: Option<u16> = None;
+        let mut max_y: u16 = 0;
+        for y in 0..HEIGHT {
+            let off = y as usize * ROW_STRIDE;
+            let h = row_hash(&fb[off..off + ROW_STRIDE]);
+            if h != self.row_hashes[y as usize] {
+                self.row_hashes[y as usize] = h;
+                if min_y.is_none() { min_y = Some(y); }
+                max_y = y;
+            }
+        }
+        if let Some(y0) = min_y {
+            // Wait for TE rising edge (vblank) before pushing pixels.
+            // Timeout at ~2 refresh periods in case TE is silent.
+            let _ = with_timeout(
+                Duration::from_millis(30),
+                self.lcd_te.wait_for_rising_edge(),
+            ).await;
+            self.display.flush_rows(y0, max_y + 1).await;
+        }
+        self.needs_redraw = false;
+    }
+
+    /// Log heap watermark every ~2000 loop iterations. Useful
+    /// for spotting allocation churn in the hot path.
+    fn log_diagnostics(&self) {
+        if self.tick_count % 2000 == 0 {
             log::info!(
                 "heap: used={} free={}",
                 esp_alloc::HEAP.used(),
                 esp_alloc::HEAP.free(),
             );
-        }
-
-        self.tick_count = self.tick_count.wrapping_add(1);
-
-        // Adaptive sleep - how long and what we wait on depends on
-        // the display state:
-        //
-        // Active / Dim with finger down (50 ms, touch INT only):
-        //   Tight drag tracking. The FT3168 asserts INT on every new
-        //   sample (60-120 Hz). Timeout covers missed edges.
-        //
-        // Active / Dim idle (150 ms, touch INT only):
-        //   Bounds mic DMA drain (ring holds ~256 ms at 16 kHz
-        //   stereo) and sensor/battery polling.
-        //
-        // Off (2 s, touch INT OR RTC minute INT):
-        //   Nothing renders, so the only reasons to wake are a touch
-        //   (user wants to interact) or the RTC minute pulse on
-        //   GPIO39 (keeps last_minute in sync for the next Active
-        //   transition). The 2 s timeout is a safety net for PMU
-        //   interrupt polling (power button short/long press is
-        //   readable via I2C even without a dedicated GPIO).
-        if self.display_state == DisplayState::Off {
-            match with_timeout(
-                Duration::from_secs(2),
-                select(
-                    self.input.wait_for_touch_int(),
-                    self.rtc_int.wait_for_falling_edge(),
-                ),
-            ).await {
-                Ok(Either::First(_))  => log::info!("wake: touch"),
-                Ok(Either::Second(_)) => log::info!("wake: RTC minute"),
-                Err(_)                => log::info!("wake: timeout (PMU poll)"),
-            }
-        } else {
-            let sleep = if self.touch_pos.is_some() {
-                Duration::from_millis(50)
-            } else {
-                Duration::from_millis(150)
-            };
-            let _ = with_timeout(sleep, self.input.wait_for_touch_int()).await;
         }
     }
 }

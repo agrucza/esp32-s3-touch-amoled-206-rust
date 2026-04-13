@@ -36,7 +36,11 @@ esp-println = { version = "0.16.1", features = [
 # --- Embassy async runtime ---
 embassy-executor = { version = "0.9" }
 embassy-futures  = { version = "0.1" }
-embassy-time = { version = "0.5.1" }
+embassy-sync     = { version = "0.7" }
+embassy-time     = { version = "0.5.1" }
+
+# --- One-time static initialization for mutex/channel/bus ---
+static_cell = "2.1"
 
 # --- Logging ---
 log = { version = "0.4.29", default-features = false }
