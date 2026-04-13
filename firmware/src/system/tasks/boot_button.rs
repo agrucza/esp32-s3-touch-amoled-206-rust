@@ -20,7 +20,17 @@
 //! ```
 
 use crate::events::SystemEvent;
+use crate::system::bus::EVENTS;
 use esp_hal::gpio::Input;
+
+/// BOOT button task: wait on falling edge, push event, repeat.
+#[embassy_executor::task]
+pub async fn boot_button_task(mut state: BootButtonTaskState<'static>) {
+    loop {
+        state.wait_for_press().await;
+        EVENTS.send(SystemEvent::BootButtonPressed).await;
+    }
+}
 
 pub struct BootButtonTaskState<'d> {
     pin: Input<'d>,

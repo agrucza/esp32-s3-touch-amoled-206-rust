@@ -54,6 +54,14 @@ pub enum SleepState {
 /// Main publishes the new state via `SLEEP_SIGNAL.signal(state)`
 /// when entering/exiting sleep. Tasks that care can
 /// `SLEEP_SIGNAL.wait().await` to react.
+///
+/// **Single-consumer limit**: `Signal::wait()` consumes the value,
+/// so only one task can subscribe. Today that's the IMU task.
+/// Before adding a second subscriber (touch monitor mode, RTC
+/// HMI gating, stretched power poll, ...), swap this for an
+/// `embassy_sync::pubsub::PubSubChannel` or split into one signal
+/// per task, otherwise the IMU will silently stop getting wake
+/// transitions.
 pub static SLEEP_SIGNAL: Signal<CriticalSectionRawMutex, SleepState> = Signal::new();
 
 /// Type alias for the shared I2C bus, protected by an async mutex.

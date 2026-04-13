@@ -72,6 +72,22 @@ pub enum SystemEvent {
     MotionUpdated {
         data: crate::system::tasks::imu::MotionData,
     },
+
+    // -- Snapshot refreshes --
+    /// Fresh RTC snapshot (calendar date + time of day). Emitted
+    /// by the RTC task after every INT# fall, so `cached_data.time`
+    /// is updated alongside the triggering event
+    /// (HalfMinuteChanged / AlarmFired / TimerExpired).
+    TimeUpdated {
+        data: crate::system::tasks::rtc::TimeData,
+    },
+    /// Fresh PMU snapshot (battery, charger, ADC channels, ...).
+    /// Emitted by the power task every poll interval so
+    /// `cached_data.power` stays current without the main loop
+    /// ever touching the bus.
+    PowerUpdated {
+        data: crate::system::tasks::power::PowerData,
+    },
 }
 
 /// Direction of a swipe gesture.

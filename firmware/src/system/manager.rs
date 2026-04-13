@@ -5,14 +5,14 @@ use crate::display_hal::{self, WIDTH, HEIGHT};
 use crate::events::{SwipeDir, SwipeRegion, SystemEvent};
 use crate::sdcard_hal::EspVolumeManager;
 use crate::system::audio::AudioSystem;
+use crate::system::bus::{EVENTS, SLEEP_SIGNAL, SleepState};
 use crate::system::display::{Display, DisplayState};
-use crate::system::input::InputSystem;
 use crate::system::power::PowerControls;
-use crate::system::sensors::SensorSystem;
-use crate::system::tasks::imu::MotionData;
+use crate::system::tasks::boot_button::BootButtonTaskState;
+use crate::system::tasks::imu::ImuTaskState;
 use crate::system::tasks::power::PowerTaskState;
-use crate::system::tasks::rtc::TimeData;
-use crate::system::tasks::touch::TouchData;
+use crate::system::tasks::rtc::RtcTaskState;
+use crate::system::tasks::touch::{TouchData, TouchTaskState};
 use crate::ui::primitives;
 use crate::ui::screens::{self, ActiveScreen};
 use crate::ui::types::{Action, ScreenId, SystemData};
@@ -80,6 +80,21 @@ fn row_hash(row: &[u8]) -> u32 {
     h
 }
 
+/// Bundle of per-device task state structs produced by
+/// [`SystemManager::init`] and handed to `main` so it can spawn
+/// one embassy task per peripheral.
+///
+/// Each field owns everything a task needs to run independently
+/// (driver handle, GPIO lines, buffers). The shared I2C bus is
+/// accessed via `&'static SharedI2c` from `system::bus::I2C_BUS`.
+pub struct TaskBundle {
+    pub touch: TouchTaskState<'static>,
+    pub boot_button: BootButtonTaskState<'static>,
+    pub rtc: RtcTaskState<'static>,
+    pub imu: ImuTaskState<'static>,
+    pub power: PowerTaskState,
+}
+
 // `audio`, `storage`, and `tx_transfer` are held-but-not-read once
 // populated: they own hardware resources whose Drop impls would
 // deinitialize the peripherals. They stay as fields so the hardware
@@ -91,33 +106,19 @@ pub struct SystemManager<'d> {
     // each access. See `system::bus` for details.
     i2c_bus: &'static crate::system::bus::SharedI2c,
 
-    // Event sources
+    // Non-I2C power hardware (SYS_OUT latch, haptic motor). The
+    // I2C side of the PMU lives in the power task.
     pub power: PowerControls<'d>,
-    pub power_state: PowerTaskState,
-    pub input: InputSystem<'d>,
 
     // Peripherals
     pub display: Display<'d>,
     pub audio: Option<AudioSystem<'d>>,
-    pub sensors: SensorSystem,
     pub storage: Option<EspVolumeManager<'d>>,
 
     // Tearing-effect line from the display. We wait for its rising
     // edge (vblank start) before pushing pixels so partial flushes
     // don't land mid-scanout.
     lcd_te: Input<'d>,
-
-    // RTC interrupt line (GPIO39, active-low). Shared by the
-    // half-minute tick, alarm match, and countdown timer expiry
-    // on the PCF85063A. Used as an async wake source so the main
-    // loop can sleep longer when the display is off instead of
-    // polling the RTC over I2C.
-    rtc_int: Input<'d>,
-
-    // IMU INT1 line (GPIO21). Used for Wake-on-Motion when the
-    // display is Off. Configured with initial value low; toggles
-    // high on WoM event. Reset to low by reading STATUS1.
-    imu_int1: Input<'d>,
 
     // DMA transfers - populated by `start_audio`, `None` until then.
     tx_transfer: Option<AudioTx<'d>>,
@@ -130,18 +131,14 @@ pub struct SystemManager<'d> {
     // UI
     screen: ActiveScreen,
     tick_count: u32,
-    touch_pos: Option<(u16, u16)>,
     needs_redraw: bool,
 
-    // Pre-allocated drain buffer for the mic RX DMA ring. Lives as a
-    // field so tick() never hits the heap.
+    // Pre-allocated drain buffer for the mic RX DMA ring.
     mic_drain_buf: alloc::boxed::Box<[u8]>,
 
     // Per-row FNV-1a hashes from the previous frame. Compared against
     // the current frame to determine which rows actually changed, so
     // only the dirty horizontal band is pushed over QSPI.
-    // Initialized to zero, which ensures the first frame sees every
-    // row as dirty and performs a full flush.
     row_hashes: alloc::boxed::Box<[u32]>,
 
     // Runtime configuration (display dim/off timeouts, brightness,
@@ -164,11 +161,6 @@ pub struct SystemManager<'d> {
     // by any user-input wake event. Will grow later to also drive
     // CPU frequency scaling and other peripheral power-down.
     sleeping: bool,
-
-    // Event carried over from the async sleep handler (end of tick)
-    // to the next tick's event loop. Used to inject WakeOnMotion
-    // events so WoM flows through the normal event dispatch path.
-    pending_event: Option<SystemEvent>,
 
     // Cached snapshot of all system data (time, battery, IMU,
     // touch, ...). Event handlers update individual fields as
@@ -260,7 +252,11 @@ impl SystemManager<'static> {
     ///    started. A caller invokes `start_audio()` later to actually
     ///    bring the codecs, I2S DMA, and speaker amp online. This
     ///    keeps idle current low on battery by default.
-    pub async fn init(p: Peripherals<'static>) -> Self {
+    ///
+    /// Returns `(SystemManager, TaskBundle)` - the bundle holds the
+    /// per-device task state structs that `main` then passes to
+    /// `spawner.must_spawn()` to start the peripheral tasks.
+    pub async fn init(p: Peripherals<'static>) -> (Self, TaskBundle) {
         // 1. I2C bus
         let mut i2c = I2c::new(p.i2c0, I2cConfig::default().with_frequency(Rate::from_khz(400)))
             .unwrap()
@@ -295,25 +291,19 @@ impl SystemManager<'static> {
         // watch the rising edge before each flush.
         let lcd_te = Input::new(p.lcd_te, InputConfig::default().with_pull(Pull::None));
 
-        // 5. Input (buttons + touch)
-        let input = InputSystem::init(
-            Input::new(p.btn_boot, InputConfig::default().with_pull(Pull::Up)),
+        // 5. Touch + BOOT button task states.
+        //
+        // `TouchTaskState::init` does the FT3168 reset sequence,
+        // reads the chip ID, and captures the INT# input. The BOOT
+        // button is just an async GPIO wait.
+        let touch_state = TouchTaskState::init(
             Output::new(p.touch_rst, Level::High, OutputConfig::default()),
             Input::new(p.touch_int, InputConfig::default().with_pull(Pull::Up)),
             &mut i2c,
         ).await;
-
-        // RTC interrupt line (GPIO39). The PCF85063A pulses this
-        // low on any of: half-minute tick (second=0 / second=30),
-        // alarm match, or countdown timer expiry. Used as an async
-        // wake source so the display-off sleep can last seconds
-        // instead of 150 ms.
-        let rtc_int = Input::new(p.rtc_int, InputConfig::default().with_pull(Pull::Up));
-
-        // IMU INT1 line. Used for Wake-on-Motion when display is Off.
-        // No pull - the QMI8658C drives the line from configured
-        // initial value to its opposite on each WoM event.
-        let imu_int1 = Input::new(p.imu_int1, InputConfig::default().with_pull(Pull::None));
+        let boot_button_state = BootButtonTaskState::new(
+            Input::new(p.btn_boot, InputConfig::default().with_pull(Pull::Up)),
+        );
 
         // 6. SD card
         let storage = crate::system::storage::init_sd(
@@ -321,14 +311,24 @@ impl SystemManager<'static> {
             Output::new(p.sd_cs, Level::High, OutputConfig::default()),
         );
 
-        // 7. Sensors (RTC + IMU with gyro calibration)
-        let sensors = SensorSystem::init(&mut i2c).await;
+        // 7. Sensors (RTC + IMU). Each owns its INT line and driver.
+        // `RtcTaskState::init` brings the PCF85063A up, sets a default
+        // time if the oscillator stopped, and arms the half-minute
+        // interrupt. `ImuTaskState::init` resets the QMI8658C and
+        // collects ~512 ms of gyro-bias samples.
+        let rtc_state = RtcTaskState::init(
+            Input::new(p.rtc_int, InputConfig::default().with_pull(Pull::Up)),
+            &mut i2c,
+        );
+        let imu_state = ImuTaskState::init(
+            Input::new(p.imu_int1, InputConfig::default().with_pull(Pull::None)),
+            &mut i2c,
+        ).await;
 
-        // 7b. Enable the RTC half-minute interrupt so GPIO39 pulses
-        // low at second=0 and second=30 of every minute.
-        if let Err(_) = sensors.rtc.enable_half_minute_interrupt(&mut i2c) {
-            log::warn!("RTC: failed to enable half-minute interrupt");
-        }
+        // Seed the cached data so the first frame has something
+        // reasonable to render before task events arrive.
+        let initial_time = rtc_state.snapshot(&mut i2c);
+        let initial_power = power_state.snapshot(&mut i2c);
 
         // 8. Stash audio peripherals for later `start_audio()`.
         // Hardware stays in post-reset low-power state until then.
@@ -359,24 +359,26 @@ impl SystemManager<'static> {
         let i2c_bus: &'static crate::system::bus::SharedI2c = crate::system::bus::I2C_BUS
             .init(embassy_sync::mutex::Mutex::new(i2c));
 
-        Self {
+        let cached_data = SystemData {
+            time: initial_time,
+            power: initial_power,
+            motion: Default::default(),
+            touch: TouchData::default(),
+            tick_count: 0,
+        };
+
+        let manager = Self {
             i2c_bus,
             power,
-            power_state,
-            input,
             display,
             audio: None,
-            sensors,
             storage,
             lcd_te,
-            rtc_int,
-            imu_int1,
             tx_transfer: None,
             rx_transfer: None,
             pending_audio,
             screen: ActiveScreen::new(ScreenId::Clock),
             tick_count: 0,
-            touch_pos: None,
             needs_redraw: true, // first frame always draws
             mic_drain_buf: alloc::vec![0u8; MIC_DRAIN_BUF_SIZE].into_boxed_slice(),
             row_hashes: alloc::vec![0u32; HEIGHT as usize].into_boxed_slice(),
@@ -384,9 +386,28 @@ impl SystemManager<'static> {
             display_state: DisplayState::Active,
             last_activity: Instant::now(),
             sleeping: false,
-            pending_event: None,
-            cached_data: SystemData::default(),
-        }
+            cached_data,
+        };
+
+        let bundle = TaskBundle {
+            touch: touch_state,
+            boot_button: boot_button_state,
+            rtc: rtc_state,
+            imu: imu_state,
+            power: power_state,
+        };
+
+        (manager, bundle)
+    }
+
+    /// Accessor for the shared I2C bus reference.
+    ///
+    /// `main` needs this so it can hand the same `&'static SharedI2c`
+    /// to each spawned peripheral task after `init` returns. The
+    /// underlying field stays private; every runtime I2C user in
+    /// manager goes through `self.i2c_bus.lock().await` directly.
+    pub fn i2c_bus(&self) -> &'static crate::system::bus::SharedI2c {
+        self.i2c_bus
     }
 
     /// Bring the audio subsystem online. Consumes the peripheral
@@ -437,20 +458,18 @@ impl SystemManager<'static> {
 
     /// Enter low-power sleep. Idempotent.
     ///
-    /// Puts the IMU into Wake-on-Motion mode, blanks the display,
-    /// and sets the `sleeping` flag. Peripheral power-down for
-    /// other subsystems (audio, CPU freq, etc.) will hang off
-    /// this method in the future.
+    /// Signals the IMU task (via `SLEEP_SIGNAL`) to switch into
+    /// Wake-on-Motion mode, blanks the display, and sets the
+    /// `sleeping` flag. Peripheral power-down for other
+    /// subsystems (audio, CPU freq, etc.) will hang off this
+    /// method in the future.
     async fn sleep(&mut self) {
         if self.sleeping {
             return;
         }
         log::info!("system: sleep");
         self.sleeping = true;
-        {
-            let mut i2c = self.i2c_bus.lock().await;
-            self.sensors.enter_wom_mode(&mut *i2c);
-        }
+        SLEEP_SIGNAL.signal(SleepState::Sleeping);
         let _ = crate::system::display::transition(
             &mut self.display,
             self.display_state,
@@ -462,9 +481,10 @@ impl SystemManager<'static> {
 
     /// Exit low-power sleep. Idempotent.
     ///
-    /// Restores the IMU to normal mode, turns the display back on
-    /// at full brightness, resets the idle timer, and forces a
-    /// full redraw so the first frame after wake is current.
+    /// Signals the IMU task to restore normal mode, turns the
+    /// display back on at full brightness, resets the idle timer,
+    /// and forces a full redraw so the first frame after wake is
+    /// current.
     async fn wake(&mut self) {
         if !self.sleeping {
             return;
@@ -472,6 +492,7 @@ impl SystemManager<'static> {
         log::info!("system: wake");
         self.sleeping = false;
         self.last_activity = Instant::now();
+        SLEEP_SIGNAL.signal(SleepState::Awake);
         let _ = crate::system::display::transition(
             &mut self.display,
             self.display_state,
@@ -479,10 +500,6 @@ impl SystemManager<'static> {
             &self.config.display,
         ).await;
         self.display_state = DisplayState::Active;
-        {
-            let mut i2c = self.i2c_bus.lock().await;
-            self.sensors.exit_wom_mode(&mut *i2c);
-        }
         self.row_hashes.fill(0);
         self.needs_redraw = true;
     }
@@ -522,183 +539,177 @@ impl SystemManager<'static> {
         }
     }
 
-    // ================= Tick helpers ==============================================
+    // ================= Event loop ================================================
 
-    /// Drain the mic DMA buffer (no-op until audio is started).
-    async fn drain_audio(&mut self) {
-        if let Some(rx) = self.rx_transfer.as_mut() {
-            let _ = rx.pop(&mut self.mic_drain_buf).await;
-        }
-    }
-
-    /// Poll raw events from all subsystems, plus any pending event
-    /// injected by the previous tick's sleep handler (e.g. WoM).
-    async fn poll_events(&mut self) -> heapless::Vec<SystemEvent, 8> {
-        let mut events: heapless::Vec<SystemEvent, 8> = heapless::Vec::new();
-        {
-            let mut i2c = self.i2c_bus.lock().await;
-            self.input.poll(&mut *i2c, &mut events);
-            self.power_state.poll(&mut *i2c, &mut events);
-            if !self.sleeping {
-                self.sensors.poll(&mut *i2c, &mut events);
+    /// Handle a single event received from the global event channel.
+    ///
+    /// Responsibilities:
+    ///   * Update `cached_data` from snapshot events
+    ///     (`TimeUpdated` / `PowerUpdated` / `MotionUpdated`, touch
+    ///     position from `TouchPressed` / `TouchReleased`).
+    ///   * Drive sleep/wake transitions on user activity and WoM.
+    ///   * Flag `needs_redraw` for events that visually matter.
+    ///   * Forward screen-level events to the active screen and
+    ///     act on the returned `Action`.
+    async fn handle_event(&mut self, event: SystemEvent) {
+        // Snapshot events: just refresh the cache and mark redraw.
+        match &event {
+            SystemEvent::TimeUpdated { data } => {
+                self.cached_data.time = *data;
+                self.needs_redraw = true;
+                return;
             }
-        }
-        if let Some(e) = self.pending_event.take() {
-            let _ = events.push(e);
-        }
-        events
-    }
-
-    /// Collect a fresh `SystemData` snapshot from all subsystems.
-    async fn read_snapshot(&mut self) -> SystemData {
-        let mut i2c = self.i2c_bus.lock().await;
-        let sensors = self.sensors.snapshot(&mut *i2c);
-        let power = self.power_state.snapshot(&mut *i2c);
-        drop(i2c);
-
-        // Convert driver-level types into the UI-facing grouped
-        // data structs. `From` impls live next to each task's
-        // data type in `system::tasks::*`.
-        let time = sensors.time.as_ref().map(TimeData::from).unwrap_or_default();
-        let motion = sensors.imu.as_ref().map(MotionData::from).unwrap_or_default();
-        let touch = TouchData {
-            x: self.touch_pos.map(|(x, _)| x),
-            y: self.touch_pos.map(|(_, y)| y),
-        };
-
-        SystemData {
-            time,
-            power,
-            motion,
-            touch,
-            tick_count: self.tick_count,
-        }
-    }
-
-    /// Build an empty `SystemData` for ticks where we skip sensor
-    /// reads (sleeping with no wake pending). Touch position is
-    /// preserved from the cache since it's local state.
-    fn empty_snapshot(&self) -> SystemData {
-        SystemData {
-            time: TimeData::default(),
-            power: crate::system::tasks::power::PowerData::default(),
-            motion: MotionData::default(),
-            touch: TouchData {
-                x: self.touch_pos.map(|(x, _)| x),
-                y: self.touch_pos.map(|(_, y)| y),
-            },
-            tick_count: self.tick_count,
-        }
-    }
-
-    /// Process events: sleep/wake transitions, touch tracking,
-    /// redraw triggers, haptic feedback, and screen dispatch.
-    async fn handle_events(&mut self, events: &[SystemEvent], data: &SystemData) {
-        for event in events {
-            // Track touch drag position and redraw triggers regardless
-            // of sleep state (cheap and safe).
-            match event {
-                SystemEvent::TouchPressed { x, y } => self.touch_pos = Some((*x, *y)),
-                SystemEvent::TouchReleased => self.touch_pos = None,
-                SystemEvent::HalfMinuteChanged
-                | SystemEvent::BatteryChanged { .. } => self.needs_redraw = true,
-                _ => {}
+            SystemEvent::PowerUpdated { data } => {
+                self.cached_data.power = *data;
+                // Power snapshots arrive every 500 ms. Only flag
+                // redraw when a visible field actually moved - we
+                // don't want a full frame every half second just
+                // because VBUS mV wobbled. For now the battery % is
+                // the main visible field, and `BatteryChanged` is
+                // emitted separately when it moves, so skip the
+                // redraw here.
+                return;
             }
-
-            // WoM wake: clear sleep flag and skip screen dispatch.
-            if matches!(event, SystemEvent::WakeOnMotion) {
-                log::info!("wake: IMU motion");
-                self.wake().await;
-                continue;
+            SystemEvent::MotionUpdated { data } => {
+                self.cached_data.motion = *data;
+                // Live motion screens (Status page 0/1) need a
+                // redraw on every motion tick. Cheap to over-draw
+                // here - dirty-row hashing skips unchanged rows.
+                self.needs_redraw = true;
+                return;
             }
-
-            // Sleep/wake transitions on user activity.
-            if Self::is_user_activity(event) {
-                self.last_activity = Instant::now();
-                if self.sleeping {
-                    // Waking from sleep: consume this event so it
-                    // doesn't dispatch to the screen (avoids
-                    // accidental taps/swipes on wake).
-                    self.wake().await;
-                    continue;
-                }
-                if matches!(event, SystemEvent::BootButtonPressed) {
-                    // BOOT while awake = "sleep now" shortcut.
-                    // Haptic feedback fires below before we go to sleep.
-                    self.power.buzz();
-                    Timer::after(Duration::from_millis(100)).await;
-                    self.power.buzz_stop();
-                    self.sleep().await;
-                    continue;
-                }
+            SystemEvent::TouchPressed { x, y } => {
+                self.cached_data.touch = TouchData { x: Some(*x), y: Some(*y) };
             }
+            SystemEvent::TouchReleased => {
+                self.cached_data.touch = TouchData::default();
+            }
+            SystemEvent::HalfMinuteChanged
+            | SystemEvent::BatteryChanged { .. } => {
+                self.needs_redraw = true;
+            }
+            _ => {}
+        }
 
-            // From here on we only dispatch to the screen when awake.
+        // WoM wake: clear sleep flag and skip screen dispatch.
+        if matches!(event, SystemEvent::WakeOnMotion) {
+            log::info!("wake: IMU motion");
+            self.wake().await;
+            return;
+        }
+
+        // Sleep/wake transitions on user activity.
+        if Self::is_user_activity(&event) {
+            self.last_activity = Instant::now();
             if self.sleeping {
-                continue;
+                // Waking from sleep: consume this event so it
+                // doesn't dispatch to the screen (avoids accidental
+                // taps/swipes on wake).
+                self.wake().await;
+                return;
             }
-
-            // Log swipes for debugging.
-            if let SystemEvent::Swipe { dir, region } = event {
-                log::info!("Swipe: {:?} in {:?}", dir, region);
+            if matches!(event, SystemEvent::BootButtonPressed) {
+                // BOOT while awake = "sleep now" shortcut.
+                self.power.buzz();
+                Timer::after(Duration::from_millis(100)).await;
+                self.power.buzz_stop();
+                self.sleep().await;
+                return;
             }
+        }
 
-            // System-level gesture: swipe-down-from-top opens panel.
-            if !matches!(self.screen.id(), ScreenId::Panel) {
-                if let SystemEvent::Swipe { dir: SwipeDir::Down, region: SwipeRegion::Top } = event {
-                    let previous = self.screen.id();
-                    self.screen = ActiveScreen::new_panel(previous);
-                    self.needs_redraw = true;
-                    continue;
-                }
+        // From here on we only dispatch to the screen when awake.
+        if self.sleeping {
+            return;
+        }
+
+        // Log swipes for debugging.
+        if let SystemEvent::Swipe { dir, region } = &event {
+            log::info!("Swipe: {:?} in {:?}", dir, region);
+        }
+
+        // System-level gesture: swipe-down-from-top opens panel.
+        if !matches!(self.screen.id(), ScreenId::Panel) {
+            if let SystemEvent::Swipe { dir: SwipeDir::Down, region: SwipeRegion::Top } = &event {
+                let previous = self.screen.id();
+                self.screen = ActiveScreen::new_panel(previous);
+                self.needs_redraw = true;
+                return;
             }
+        }
 
-            // Haptic feedback for BOOT presses that reached this
-            // branch (currently unreachable since BOOT short-circuits
-            // above, but kept for future screens that want to handle
-            // BOOT explicitly).
-
-            // Forward to the active screen.
-            match self.screen.on_event(event, data) {
-                Action::None => {
-                    // Home-row nav fallback: content L/R swipes cycle
-                    // through home-row apps.
-                    if !matches!(self.screen.id(), ScreenId::Panel) {
-                        if let SystemEvent::Swipe { dir, region: SwipeRegion::Content } = event {
-                            match dir {
-                                SwipeDir::Right => {
-                                    let next = screens::cycle_home_app(self.screen.id(), true);
-                                    self.screen.switch_to(next);
-                                    self.needs_redraw = true;
-                                }
-                                SwipeDir::Left => {
-                                    let prev = screens::cycle_home_app(self.screen.id(), false);
-                                    self.screen.switch_to(prev);
-                                    self.needs_redraw = true;
-                                }
-                                _ => {}
+        // Forward to the active screen.
+        match self.screen.on_event(&event, &self.cached_data) {
+            Action::None => {
+                // Home-row nav fallback: content L/R swipes cycle
+                // through home-row apps.
+                if !matches!(self.screen.id(), ScreenId::Panel) {
+                    if let SystemEvent::Swipe { dir, region: SwipeRegion::Content } = &event {
+                        match dir {
+                            SwipeDir::Right => {
+                                let next = screens::cycle_home_app(self.screen.id(), true);
+                                self.screen.switch_to(next);
+                                self.needs_redraw = true;
                             }
+                            SwipeDir::Left => {
+                                let prev = screens::cycle_home_app(self.screen.id(), false);
+                                self.screen.switch_to(prev);
+                                self.needs_redraw = true;
+                            }
+                            _ => {}
                         }
                     }
                 }
-                Action::Redraw => self.needs_redraw = true,
-                Action::SwitchScreen(id) => {
-                    self.screen.switch_to(id);
-                    self.needs_redraw = true;
-                }
-                Action::Shutdown => {
-                    log::info!("System: shutdown requested");
-                    self.power.shutdown();
-                }
+            }
+            Action::Redraw => self.needs_redraw = true,
+            Action::SwitchScreen(id) => {
+                self.screen.switch_to(id);
+                self.needs_redraw = true;
+            }
+            Action::Shutdown => {
+                log::info!("System: shutdown requested");
+                self.power.shutdown();
             }
         }
+    }
+
+    /// Run one iteration of the main event loop.
+    ///
+    /// Waits on the global event channel with an idle-timeout, then
+    /// applies dim/idle-sleep transitions and renders if anything
+    /// flagged a redraw. The timeout gives the idle timer a heartbeat
+    /// even when no events are arriving. `main` calls this in a loop.
+    pub async fn tick(&mut self) {
+        // How often to re-check idle/dim state when no events are
+        // flowing. 1 s is plenty - the idle thresholds are in
+        // multi-second territory.
+        const IDLE_TICK: Duration = Duration::from_secs(1);
+
+        match select(EVENTS.receive(), Timer::after(IDLE_TICK)).await {
+            Either::First(event) => self.handle_event(event).await,
+            Either::Second(_) => {} // idle heartbeat
+        }
+
+        self.apply_dim_state().await;
+        self.check_idle_sleep().await;
+
+        if !self.sleeping && self.needs_redraw {
+            self.render().await;
+        }
+
+        self.log_diagnostics();
+        self.tick_count = self.tick_count.wrapping_add(1);
+        self.cached_data.tick_count = self.tick_count;
     }
 
     /// Render the active screen with dirty-row flushing. Only runs
     /// when awake and `needs_redraw` is set.
-    async fn render(&mut self, data: &SystemData) {
+    async fn render(&mut self) {
+        // Copy the cache so we can freely borrow `&mut self.display`
+        // below. `SystemData` is `Copy`, so this is cheap.
+        let data = self.cached_data;
         self.display.clear(crate::ui::theme::BG).ok();
-        self.screen.render(&mut self.display, data);
+        self.screen.render(&mut self.display, &data);
         if let Some(pct) = data.power.battery_percent {
             primitives::battery_warning_frame(&mut self.display, pct);
         }
@@ -728,98 +739,15 @@ impl SystemManager<'static> {
         self.needs_redraw = false;
     }
 
-    /// Async wait for the next event. Adaptive sleep behavior:
-    ///
-    /// - **Sleeping**: 2 s timeout, waiting on touch/BOOT INT, RTC
-    ///   INT (half-minute tick / alarm / timer), or IMU WoM INT.
-    ///   WoM wakes inject a `WakeOnMotion` event for the next
-    ///   tick's event loop.
-    /// - **Awake, finger down**: 50 ms timeout for tight drag tracking.
-    /// - **Awake, idle**: 150 ms timeout for sensor polling.
-    async fn wait_for_next_event(&mut self) {
-        if self.sleeping {
-            let result = with_timeout(
-                Duration::from_secs(2),
-                select3(
-                    self.input.wait_for_user_input(),
-                    self.rtc_int.wait_for_falling_edge(),
-                    self.imu_int1.wait_for_rising_edge(),
-                ),
-            ).await;
-            match result {
-                Ok(Either3::First(_)) => {}  // touch/BOOT - handled via event poll
-                Ok(Either3::Second(_)) => {} // RTC minute - sensors.poll would pick it up but we skip when sleeping
-                Ok(Either3::Third(_)) => {
-                    // WoM: clear STATUS1 flag and inject event.
-                    let mut i2c = self.i2c_bus.lock().await;
-                    let _ = self.sensors.imu.wom_event(&mut *i2c);
-                    drop(i2c);
-                    let _ = self.pending_event.insert(SystemEvent::WakeOnMotion);
-                }
-                Err(_) => {
-                    // Timeout: check if WoM fired but we missed the edge.
-                    let mut i2c = self.i2c_bus.lock().await;
-                    let fired = self.sensors.imu.wom_event(&mut *i2c).unwrap_or(false);
-                    drop(i2c);
-                    if fired {
-                        let _ = self.pending_event.insert(SystemEvent::WakeOnMotion);
-                    }
-                }
-            }
-        } else {
-            let timeout = if self.touch_pos.is_some() {
-                Duration::from_millis(50)
-            } else {
-                Duration::from_millis(150)
-            };
-            let _ = with_timeout(timeout, self.input.wait_for_user_input()).await;
-        }
-    }
-
-    /// Log heap watermark every ~10 s (200 ticks * 50 ms). Useful
+    /// Log heap watermark every ~2000 loop iterations. Useful
     /// for spotting allocation churn in the hot path.
     fn log_diagnostics(&self) {
-        if self.tick_count % 200 == 0 {
+        if self.tick_count % 2000 == 0 {
             log::info!(
                 "heap: used={} free={}",
                 esp_alloc::HEAP.used(),
                 esp_alloc::HEAP.free(),
             );
         }
-    }
-
-    // ================= Tick (orchestration) ======================================
-
-    /// Run one iteration of the main loop.
-    pub async fn tick(&mut self) {
-        self.drain_audio().await;
-
-        let events = self.poll_events().await;
-
-        // Predict whether we're about to wake so we read fresh
-        // sensor data now (before handle_events calls wake()) -
-        // otherwise the first frame after wake would render stale
-        // or empty data.
-        let will_wake = self.sleeping && events.iter().any(|e| {
-            Self::is_user_activity(e) || matches!(e, SystemEvent::WakeOnMotion)
-        });
-        let data = if !self.sleeping || will_wake {
-            self.read_snapshot().await
-        } else {
-            self.empty_snapshot()
-        };
-
-        self.handle_events(&events, &data).await;
-        self.check_idle_sleep().await;
-        self.apply_dim_state().await;
-
-        if !self.sleeping && self.needs_redraw {
-            self.render(&data).await;
-        }
-
-        self.log_diagnostics();
-        self.tick_count = self.tick_count.wrapping_add(1);
-
-        self.wait_for_next_event().await;
     }
 }

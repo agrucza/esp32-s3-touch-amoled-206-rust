@@ -25,7 +25,7 @@
 //!             let mut events = heapless::Vec::<SystemEvent, 4>::new();
 //!             state.read_events(&mut *i2c, &mut events);
 //!             drop(i2c);
-//!             for ev in events { EVENTS.send(ev).await; }
+//!             for event in events { EVENTS.send(event).await; }
 //!             if !state.is_touching() { break; }   // back to INT wait
 //!             Timer::after(Duration::from_millis(8)).await;  // ~120 Hz drag
 //!         }
@@ -34,11 +34,35 @@
 //! ```
 
 use crate::events::{SwipeDir, SwipeRegion, SystemEvent};
+use crate::system::bus::{EVENTS, SharedI2c};
 use crate::ui::theme::{EDGE_GESTURE_ZONE, SCREEN_H, SCREEN_W};
 use drivers::touch::{FT3168, TouchEvent};
 use embassy_time::{Duration, Timer};
 use embedded_hal::i2c::I2c as I2cTrait;
 use esp_hal::gpio::{Input, Output};
+
+/// Touch task: interrupt-driven outer loop with an inner drag
+/// poll at ~120 Hz while a finger is down.
+#[embassy_executor::task]
+pub async fn touch_task(bus: &'static SharedI2c, mut state: TouchTaskState<'static>) {
+    loop {
+        state.wait_for_int().await;
+        loop {
+            let mut events: heapless::Vec<SystemEvent, 8> = heapless::Vec::new();
+            {
+                let mut i2c = bus.lock().await;
+                state.read_events(&mut *i2c, &mut events);
+            }
+            for event in events {
+                EVENTS.send(event).await;
+            }
+            if !state.is_touching() {
+                break;
+            }
+            Timer::after(Duration::from_millis(8)).await;
+        }
+    }
+}
 
 /// Minimum travel distance on the dominant axis to count as a swipe (pixels).
 const SWIPE_THRESHOLD: i32 = 60;

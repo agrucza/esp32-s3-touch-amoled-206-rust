@@ -59,10 +59,69 @@
 //! }
 //! ```
 
+use crate::events::SystemEvent;
+use crate::system::bus::{EVENTS, SleepState, SharedI2c, SLEEP_SIGNAL};
 use drivers::imu::{ImuData, Qmi8658, Config as ImuConfig, Odr, WomConfig, WomInterrupt};
+use embassy_futures::select::{select, Either};
 use embassy_time::{Duration, Timer};
 use embedded_hal::i2c::I2c as I2cTrait;
 use esp_hal::gpio::Input;
+
+/// Periodic IMU snapshot cadence while awake. 50 ms = 20 Hz,
+/// plenty for live sensor-display screens without hammering the
+/// I2C bus.
+const AWAKE_POLL_MS: u64 = 50;
+
+/// IMU task: two modes driven by [`SLEEP_SIGNAL`]. Awake it
+/// emits `MotionUpdated` events at 20 Hz; sleeping it arms WoM
+/// and blocks on INT1, emitting `WakeOnMotion` on trigger.
+#[embassy_executor::task]
+pub async fn imu_task(bus: &'static SharedI2c, mut state: ImuTaskState<'static>) {
+    let mut sleep_state = SleepState::Awake;
+    loop {
+        match sleep_state {
+            SleepState::Awake => {
+                match select(
+                    Timer::after(Duration::from_millis(AWAKE_POLL_MS)),
+                    SLEEP_SIGNAL.wait(),
+                ).await {
+                    Either::First(_) => {
+                        let data = {
+                            let mut i2c = bus.lock().await;
+                            state.snapshot(&mut *i2c)
+                        };
+                        EVENTS.send(SystemEvent::MotionUpdated { data }).await;
+                    }
+                    Either::Second(new) => {
+                        sleep_state = new;
+                        if new == SleepState::Sleeping {
+                            let mut i2c = bus.lock().await;
+                            state.enter_wom_mode(&mut *i2c);
+                        }
+                    }
+                }
+            }
+            SleepState::Sleeping => {
+                match select(state.wait_for_int(), SLEEP_SIGNAL.wait()).await {
+                    Either::First(_) => {
+                        {
+                            let mut i2c = bus.lock().await;
+                            let _ = state.wom_event(&mut *i2c);
+                        }
+                        EVENTS.send(SystemEvent::WakeOnMotion).await;
+                    }
+                    Either::Second(new) => {
+                        sleep_state = new;
+                        if new == SleepState::Awake {
+                            let mut i2c = bus.lock().await;
+                            state.exit_wom_mode(&mut *i2c);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
 
 // ---- Wake-on-Motion tunables ----------------------------------------------------
 

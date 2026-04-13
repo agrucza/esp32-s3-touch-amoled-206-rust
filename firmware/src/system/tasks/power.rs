@@ -36,7 +36,7 @@
 //!         drop(i2c);
 //!
 //!         // Forward button events first.
-//!         for ev in events { EVENTS.send(ev).await; }
+//!         for event in events { EVENTS.send(event).await; }
 //!
 //!         // Diff fresh vs prev and emit transition events.
 //!         if fresh.vbus_good && !prev.vbus_good {
@@ -60,10 +60,66 @@
 //! ```
 
 use crate::events::SystemEvent;
+use crate::system::bus::{EVENTS, SharedI2c};
 use drivers::pmu::{
     ChargeVoltage, ChargerPhase, CurrentDirection, InputCurrentLimit, InterruptSource, Pmu,
 };
+use embassy_time::{Duration, Timer};
 use embedded_hal::i2c::I2c as I2cTrait;
+
+/// Power task: poll the AXP2101 every [`POLL_INTERVAL_MS`], diff
+/// against the previous snapshot, and emit specific change events
+/// (button press, VBUS plug/unplug, charger phase, battery %).
+#[embassy_executor::task]
+pub async fn power_task(bus: &'static SharedI2c, mut state: PowerTaskState) {
+    let mut prev = PowerData::default();
+    let mut first = true;
+    loop {
+        Timer::after(Duration::from_millis(POLL_INTERVAL_MS)).await;
+
+        let (fresh, events) = {
+            let mut i2c = bus.lock().await;
+            let mut events: heapless::Vec<SystemEvent, 8> = heapless::Vec::new();
+            state.poll(&mut *i2c, &mut events);
+            let fresh = state.snapshot(&mut *i2c);
+            (fresh, events)
+        };
+
+        // Forward button / battery% events surfaced by poll().
+        for event in events {
+            EVENTS.send(event).await;
+        }
+
+        // Push the full snapshot so the main loop's cache can
+        // keep fields like VBUS voltage, system voltage, charger
+        // config etc. current without ever touching the bus.
+        EVENTS.send(SystemEvent::PowerUpdated { data: fresh }).await;
+
+        // Diff the full snapshot against the last one and emit
+        // transition events. Skip the first iteration so we don't
+        // spam phantom transitions from the default-initialised
+        // `prev` against a real reading.
+        if !first {
+            if fresh.vbus_good && !prev.vbus_good {
+                EVENTS.send(SystemEvent::VbusInserted).await;
+            } else if !fresh.vbus_good && prev.vbus_good {
+                EVENTS.send(SystemEvent::VbusRemoved).await;
+            }
+            if fresh.charger_phase != prev.charger_phase {
+                EVENTS.send(SystemEvent::ChargerPhaseChanged {
+                    phase: fresh.charger_phase,
+                }).await;
+            }
+            if fresh.current_direction != prev.current_direction {
+                EVENTS.send(SystemEvent::CurrentDirectionChanged {
+                    direction: fresh.current_direction,
+                }).await;
+            }
+        }
+        prev = fresh;
+        first = false;
+    }
+}
 
 /// Polling interval for the PMU task in milliseconds.
 pub const POLL_INTERVAL_MS: u64 = 500;

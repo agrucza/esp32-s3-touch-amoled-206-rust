@@ -32,9 +32,30 @@
 //! ```
 
 use crate::events::SystemEvent;
+use crate::system::bus::{EVENTS, SharedI2c};
 use drivers::rtc::{Rtc, Config as RtcConfig, DateTime as RtcDateTime};
 use embedded_hal::i2c::I2c as I2cTrait;
 use esp_hal::gpio::Input;
+
+/// RTC task: wait on INT#, classify the source (HMI / alarm /
+/// timer), emit the matching event and a fresh `TimeUpdated`
+/// snapshot so the main loop's cached time stays current.
+#[embassy_executor::task]
+pub async fn rtc_task(bus: &'static SharedI2c, mut state: RtcTaskState<'static>) {
+    loop {
+        state.wait_for_int().await;
+        let (event, time) = {
+            let mut i2c = bus.lock().await;
+            let event = state.classify_interrupt(&mut *i2c);
+            let time = state.snapshot(&mut *i2c);
+            (event, time)
+        };
+        EVENTS.send(SystemEvent::TimeUpdated { data: time }).await;
+        if let Some(ev) = event {
+            EVENTS.send(ev).await;
+        }
+    }
+}
 
 /// Calendar time of day, consumed by clock-style screens.
 /// Defaults to an arbitrary recent date so screens have
