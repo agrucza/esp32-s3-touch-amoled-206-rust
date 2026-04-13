@@ -400,6 +400,16 @@ impl SystemManager<'static> {
         (manager, bundle)
     }
 
+    /// Accessor for the shared I2C bus reference.
+    ///
+    /// `main` needs this so it can hand the same `&'static SharedI2c`
+    /// to each spawned peripheral task after `init` returns. The
+    /// underlying field stays private; every runtime I2C user in
+    /// manager goes through `self.i2c_bus.lock().await` directly.
+    pub fn i2c_bus(&self) -> &'static crate::system::bus::SharedI2c {
+        self.i2c_bus
+    }
+
     /// Bring the audio subsystem online. Consumes the peripheral
     /// tokens stashed at boot and calls `init_audio`, which starts
     /// I2S DMA (MCLK/BCLK/LRCK output), configures the ES8311 DAC and
@@ -663,35 +673,33 @@ impl SystemManager<'static> {
         }
     }
 
-    /// Main event loop. Runs forever.
+    /// Run one iteration of the main event loop.
     ///
-    /// Waits on the global event channel with a timeout; on each
-    /// wakeup it applies dim/idle-sleep transitions, then renders
-    /// if anything flagged a redraw. The timeout gives the idle
-    /// timer a heartbeat even when no events are arriving.
-    pub async fn run(&mut self) -> ! {
+    /// Waits on the global event channel with an idle-timeout, then
+    /// applies dim/idle-sleep transitions and renders if anything
+    /// flagged a redraw. The timeout gives the idle timer a heartbeat
+    /// even when no events are arriving. `main` calls this in a loop.
+    pub async fn tick(&mut self) {
         // How often to re-check idle/dim state when no events are
         // flowing. 1 s is plenty - the idle thresholds are in
         // multi-second territory.
         const IDLE_TICK: Duration = Duration::from_secs(1);
 
-        loop {
-            match select(EVENTS.receive(), Timer::after(IDLE_TICK)).await {
-                Either::First(event) => self.handle_event(event).await,
-                Either::Second(_) => {} // idle heartbeat
-            }
-
-            self.apply_dim_state().await;
-            self.check_idle_sleep().await;
-
-            if !self.sleeping && self.needs_redraw {
-                self.render().await;
-            }
-
-            self.log_diagnostics();
-            self.tick_count = self.tick_count.wrapping_add(1);
-            self.cached_data.tick_count = self.tick_count;
+        match select(EVENTS.receive(), Timer::after(IDLE_TICK)).await {
+            Either::First(event) => self.handle_event(event).await,
+            Either::Second(_) => {} // idle heartbeat
         }
+
+        self.apply_dim_state().await;
+        self.check_idle_sleep().await;
+
+        if !self.sleeping && self.needs_redraw {
+            self.render().await;
+        }
+
+        self.log_diagnostics();
+        self.tick_count = self.tick_count.wrapping_add(1);
+        self.cached_data.tick_count = self.tick_count;
     }
 
     /// Render the active screen with dirty-row flushing. Only runs

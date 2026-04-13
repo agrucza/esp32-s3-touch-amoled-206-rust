@@ -20,7 +20,6 @@ mod system;
 mod tasks;
 mod ui;
 
-use system::bus::I2C_BUS;
 use system::manager::{SystemManager, Peripherals};
 use system::tasks::{
     boot_button::boot_button_task,
@@ -55,7 +54,7 @@ async fn main(spawner: embassy_executor::Spawner) {
     let (rx_buffer, rx_descriptors, tx_buffer, tx_descriptors) =
         esp_hal::dma_circular_buffers!(16384, 16384);
 
-    let mut manager = SystemManager::init(Peripherals {
+    let (mut manager, bundle) = SystemManager::init(Peripherals {
         i2c0: p.I2C0,
         i2c_sda: p.GPIO15,
         i2c_scl: p.GPIO14,
@@ -97,6 +96,18 @@ async fn main(spawner: embassy_executor::Spawner) {
     }).await;
 
     spawner.must_spawn(tasks::heartbeat::heartbeat());
+
+    // Spawn one embassy task per peripheral. Each receives a
+    // `&'static` reference to the shared I2C bus (four of the five
+    // need it; boot_button is pure GPIO) plus its own task state
+    // struct out of the bundle. After this point the main loop only
+    // drains events - it never touches a peripheral driver directly.
+    let i2c_bus = manager.i2c_bus();
+    spawner.must_spawn(touch_task(i2c_bus, bundle.touch));
+    spawner.must_spawn(boot_button_task(bundle.boot_button));
+    spawner.must_spawn(rtc_task(i2c_bus, bundle.rtc));
+    spawner.must_spawn(imu_task(i2c_bus, bundle.imu));
+    spawner.must_spawn(power_task(i2c_bus, bundle.power));
 
     loop {
         manager.tick().await;
