@@ -3,8 +3,6 @@
 use embedded_graphics::{draw_target::DrawTarget, pixelcolor::Rgb565};
 
 use crate::events::SystemEvent;
-use drivers::imu::ImuData;
-use drivers::rtc::DateTime;
 
 // -- Screen IDs --------------------------------------------------------------
 
@@ -80,14 +78,17 @@ pub struct SystemData {
 }
 
 impl SystemData {
-    pub fn from_sensors(
-        time: Option<&DateTime>,
-        imu: Option<&ImuData>,
+    /// Build a SystemData from subsystem snapshots plus touch/tick
+    /// context. The snapshots come from the individual subsystem
+    /// `snapshot()` methods.
+    pub fn from_snapshots(
+        sensors: &crate::system::sensors::SensorSnapshot,
+        power: &crate::system::power::PowerSnapshot,
         touch: Option<(u16, u16)>,
-        battery_percent: Option<u8>,
-        battery_voltage_mv: Option<u16>,
         tick_count: u32,
     ) -> Self {
+        let time = sensors.time.as_ref();
+        let imu = sensors.imu.as_ref();
         Self {
             hour:   time.map_or(0, |t| t.hour),
             minute: time.map_or(0, |t| t.minute),
@@ -104,8 +105,8 @@ impl SystemData {
             temp_raw: imu.map_or(0, |d| d.temp_raw),
             touch_x: touch.map(|(x, _)| x),
             touch_y: touch.map(|(_, y)| y),
-            battery_percent,
-            battery_voltage_mv,
+            battery_percent: power.battery_percent,
+            battery_voltage_mv: power.battery_voltage_mv,
             tick_count,
         }
     }

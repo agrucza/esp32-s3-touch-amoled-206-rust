@@ -418,6 +418,7 @@ pub enum DieOtpLevel {
 }
 
 impl DieOtpLevel {
+    #[allow(dead_code)] // reserved for future read_die_temp_protection() getter
     pub(crate) fn from_bits(bits: u8) -> Self {
         match bits {
             0 => Self::C115,
@@ -918,6 +919,7 @@ pub enum FastPwronSeq {
 }
 
 impl FastPwronSeq {
+    #[allow(dead_code)] // reserved for future fast power-on sequence decoder
     pub(crate) fn from_bits(bits: u8) -> Self {
         match bits & 0x03 {
             0 => Self::Step0,

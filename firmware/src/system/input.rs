@@ -1,6 +1,7 @@
 use crate::events::{SwipeDir, SwipeRegion, SystemEvent};
 use crate::ui::theme::{EDGE_GESTURE_ZONE, SCREEN_H};
 use drivers::touch::{FT3168, TouchEvent};
+use embassy_futures::select::select;
 use embedded_hal::i2c::I2c;
 use embassy_time::{Duration, Timer};
 use esp_hal::gpio::{Input, Output};
@@ -95,13 +96,24 @@ impl<'d> InputSystem<'d> {
         SystemEvent::Swipe { dir, region }
     }
 
-    /// Wait asynchronously until the touch controller asserts its INT
-    /// line (active low). Returns immediately if the line is already
-    /// low. Used by the main loop to sleep until the next touch event
-    /// instead of polling on a fixed interval.
-    pub async fn wait_for_touch_int(&mut self) {
-        self.touch_int.wait_for_low().await;
+    /// Wait asynchronously for any user input wake source:
+    ///   - Touch controller INT line (GPIO38, active low)
+    ///   - BOOT button (GPIO0, active low)
+    ///
+    /// Uses falling-edge detection so that a line still held down
+    /// from a previous event doesn't immediately satisfy the wait.
+    /// Returns which source fired: `true` = touch, `false` = button.
+    pub async fn wait_for_user_input(&mut self) -> bool {
+        use embassy_futures::select::Either;
+        match select(
+            self.touch_int.wait_for_falling_edge(),
+            self.btn_boot.wait_for_falling_edge(),
+        ).await {
+            Either::First(_) => true,
+            Either::Second(_) => false,
+        }
     }
+
 
     /// Poll all input sources and push events into the buffer.
     pub fn poll(&mut self, i2c: &mut impl I2c, events: &mut heapless::Vec<SystemEvent, 8>) {

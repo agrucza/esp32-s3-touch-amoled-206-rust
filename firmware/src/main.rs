@@ -68,6 +68,7 @@ async fn main(spawner: embassy_executor::Spawner) {
         touch_rst: p.GPIO9,
         touch_int: p.GPIO38,
         rtc_int: p.GPIO39,
+        imu_int1: p.GPIO21,
         spi3: p.SPI3,
         sd_sck: p.GPIO2,
         sd_mosi: p.GPIO1,

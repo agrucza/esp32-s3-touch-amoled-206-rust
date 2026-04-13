@@ -52,7 +52,7 @@ pub const CTRL6: u8 = 0x07;
 /// bit 1 = gEN (gyroscope), bit 0 = aEN (accelerometer).
 pub const CTRL7: u8 = 0x08;
 
-/// CTRL8 (0x09, RW, default 0x00): reserved / special settings - do not write.
+/// CTRL8 (0x09, RW, default 0x00): Reserved / Special Settings - Not Used.
 pub const CTRL8: u8 = 0x09;
 
 /// CTRL9 (0x0A, RW, default 0x00): host command register.
@@ -181,6 +181,15 @@ pub const AE_REG1: u8 = 0x57;
 /// AE_REG2 (0x58, RO): AttitudeEngine velocity overflow status.
 pub const AE_REG2: u8 = 0x58;
 
+// ---- Reset register ------------------------------------------------------------
+
+/// RESET (0x60, WO): Soft Reset Register. Writing 0xB0 triggers a
+/// sensor reset immediately.
+pub const RESET: u8 = 0x60;
+
+/// Value to write to the RESET register to trigger a soft reset.
+pub const RESET_VALUE: u8 = 0xB0;
+
 // ---- CTRL1 bit masks ------------------------------------------------------------
 
 pub mod ctrl1 {
@@ -274,15 +283,35 @@ pub mod status0 {
 // ---- STATUS1 bit masks ----------------------------------------------------------
 
 pub mod status1 {
-    /// CTRL9 command execution complete.
+    /// CTRL9 command execution complete (bit 0 per Rev 0.6 C datasheet;
+    /// actual silicon uses STATUSINT.bit7 instead).
     pub const CMD_DONE: u8 = 1 << 0;
+    /// Wake-on-Motion event detected (bit 2). From WoM section 9 of
+    /// the C datasheet. Reading STATUS1 clears this bit.
+    pub const WOM: u8 = 1 << 2;
+}
+
+// ---- CTRL6 bit masks ------------------------------------------------------------
+
+pub mod ctrl6 {
+    /// Enable Motion on Demand (requires sEN=1 in CTRL7).
+    pub const SMOD: u8 = 1 << 7;
+    /// Mask for sODR[2:0] (AttitudeEngine ODR) in bits 2:0.
+    pub const SODR_MASK: u8 = 0x07;
 }
 
 // ---- FIFO_CTRL bit masks --------------------------------------------------------
 
 pub mod fifo_ctrl {
     /// Put FIFO into read mode (set before reading, clear after).
+    /// Automatically set by CTRL9 command REQ_FIFO.
     pub const RD_MODE: u8 = 1 << 7;
+    /// Shift for FIFO size field (bits 3:2).
+    pub const SIZE_SHIFT: u8 = 2;
+    /// Mask for FIFO size field (bits 3:2, pre-shift).
+    pub const SIZE_MASK: u8 = 0x03;
+    /// Mask for FIFO mode field (bits 1:0).
+    pub const MODE_MASK: u8 = 0x03;
 }
 
 // ---- FIFO_STATUS bit masks ------------------------------------------------------
@@ -297,24 +326,26 @@ pub mod fifo_status {
 // ---- CTRL9 command codes --------------------------------------------------------
 
 pub mod cmd {
-    /// No operation.
-    pub const NOP:                   u8 = 0x00;
+    /// No operation / acknowledgement (end of CTRL9 protocol).
+    pub const NOP:                     u8 = 0x00;
     /// Apply gyroscope bias from CAL1-CAL3 registers.
-    pub const GYRO_BIAS:             u8 = 0x01;
+    pub const GYRO_BIAS:               u8 = 0x01;
     /// Request Motion on Demand SDI data (requires AE + sMoD enabled).
-    pub const REQ_SDI:               u8 = 0x03;
+    pub const REQ_SDI:                 u8 = 0x03;
     /// Reset FIFO.
-    pub const RST_FIFO:              u8 = 0x04;
+    pub const RST_FIFO:                u8 = 0x04;
     /// Request FIFO data read.
-    pub const REQ_FIFO:              u8 = 0x05;
+    pub const REQ_FIFO:                u8 = 0x05;
     /// I2C master write/read (for external magnetometer).
-    pub const I2CM_WRITE:            u8 = 0x06;
+    pub const I2CM_WRITE:              u8 = 0x06;
     /// Write Wake-on-Motion threshold and interrupt configuration.
-    pub const WRITE_WOM_SETTING:     u8 = 0x08;
+    pub const WRITE_WOM_SETTING:       u8 = 0x08;
     /// Apply accelerometer delta-offset from CAL1-CAL3 registers.
     pub const ACCEL_HOST_DELTA_OFFSET: u8 = 0x09;
     /// Apply gyroscope delta-offset from CAL1-CAL3 registers.
     pub const GYRO_HOST_DELTA_OFFSET:  u8 = 0x0A;
     /// Copy USID and firmware version to output registers.
-    pub const COPY_USID:             u8 = 0x10;
+    pub const COPY_USID:               u8 = 0x10;
+    /// Configure IO pull-up resistors.
+    pub const SET_RPU:                 u8 = 0x11;
 }

@@ -32,6 +32,11 @@ pub enum SystemEvent {
     MinuteChanged,
     /// Battery percentage changed
     BatteryChanged { percent: u8 },
+    /// IMU Wake-on-Motion fired while the system was sleeping.
+    /// Injected by the sleep handler on the tick after the INT1
+    /// rising edge so the main event loop can react to it like
+    /// any other wake source.
+    WakeOnMotion,
 }
 
 /// Direction of a swipe gesture.

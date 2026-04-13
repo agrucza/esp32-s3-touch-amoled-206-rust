@@ -3,6 +3,15 @@ use drivers::pmu::{Pmu, Config as PmuConfig, InterruptSource};
 use embedded_hal::i2c::I2c;
 use esp_hal::gpio::Output;
 
+/// Snapshot of power-related readings at one point in time.
+#[derive(Default)]
+pub struct PowerSnapshot {
+    /// Battery state of charge (0-100%) from the fuel gauge.
+    pub battery_percent: Option<u8>,
+    /// Battery terminal voltage in millivolts.
+    pub battery_voltage_mv: Option<u16>,
+}
+
 pub struct PowerSystem<'d> {
     pmu: Pmu,
     sys_out: Output<'d>,
@@ -82,6 +91,14 @@ impl<'d> PowerSystem<'d> {
     /// Read battery voltage in millivolts.
     pub fn battery_voltage_mv(&self, i2c: &mut impl I2c) -> Option<u16> {
         self.pmu.battery_voltage_mv(i2c).ok()
+    }
+
+    /// Collect all power-related readings into a single snapshot.
+    pub fn snapshot(&self, i2c: &mut impl I2c) -> PowerSnapshot {
+        PowerSnapshot {
+            battery_percent: self.pmu.battery_percent(i2c).ok(),
+            battery_voltage_mv: self.pmu.battery_voltage_mv(i2c).ok(),
+        }
     }
 
     /// Log a diagnostic dump of all readable PMU state.

@@ -326,13 +326,484 @@ impl Qmi8658 {
         // Issue CTRL_CMD_GYRO_HOST_DELTA_OFFSET - applies offsets to the raw
         // GX/GY/GZ output registers (unlike GYRO_BIAS 0x01 which only affects
         // the AttitudeEngine output).
-        self.write_register(i2c, registers::CTRL9, registers::cmd::GYRO_HOST_DELTA_OFFSET)?;
+        self.exec_ctrl9(i2c, registers::cmd::GYRO_HOST_DELTA_OFFSET)
+    }
 
-        // Poll STATUSINT (0x2D) bit 7 (CmdDone).
-        // The Rev 0.6 datasheet marks this bit as Reserved, but actual silicon
-        // (rev 0x7C+) uses bit 7 of STATUSINT - confirmed by reading 0x81 after
-        // the command while STATUS1 stayed 0x00.
-        // At 400 kHz I2C each read takes ~100 µs; 1000 retries = ~100 ms max.
+    /// Returns the accelerometer scale this driver was configured with.
+    pub fn accel_scale(&self) -> AccelScale { self.accel_scale }
+
+    /// Returns the gyroscope scale this driver was configured with.
+    pub fn gyro_scale(&self)  -> GyroScale  { self.gyro_scale  }
+
+    // ---- Soft reset ---------------------------------------------------------------
+
+    /// Perform a soft reset by writing 0xB0 to REG 0x60.
+    ///
+    /// All registers return to their default values. The caller
+    /// should wait at least 15 ms after this call for the reset
+    /// to complete, then call `init()` again to reconfigure the
+    /// device.
+    pub fn soft_reset<I2C, E>(&self, i2c: &mut I2C) -> Result<(), Error<E>>
+    where
+        I2C: I2cTrait<Error = E>,
+    {
+        self.write_register(i2c, registers::RESET, registers::RESET_VALUE)
+    }
+
+    // ---- Self-test ----------------------------------------------------------------
+
+    /// Enable or disable accelerometer self-test (CTRL2 bit 7).
+    ///
+    /// When enabled, the accelerometer applies an internal test force
+    /// that produces a known output change. Compare the self-test
+    /// output to normal output to verify sensor functionality.
+    pub fn set_accel_self_test<I2C, E>(&self, i2c: &mut I2C, enable: bool) -> Result<(), Error<E>>
+    where
+        I2C: I2cTrait<Error = E>,
+    {
+        let reg = self.read_register(i2c, registers::CTRL2)?;
+        let val = if enable { reg | registers::ctrl2::SELF_TEST } else { reg & !registers::ctrl2::SELF_TEST };
+        self.write_register(i2c, registers::CTRL2, val)
+    }
+
+    /// Enable or disable gyroscope self-test (CTRL3 bit 7).
+    pub fn set_gyro_self_test<I2C, E>(&self, i2c: &mut I2C, enable: bool) -> Result<(), Error<E>>
+    where
+        I2C: I2cTrait<Error = E>,
+    {
+        let reg = self.read_register(i2c, registers::CTRL3)?;
+        let val = if enable { reg | registers::ctrl3::SELF_TEST } else { reg & !registers::ctrl3::SELF_TEST };
+        self.write_register(i2c, registers::CTRL3, val)
+    }
+
+    // ---- Sensor enable/disable ----------------------------------------------------
+
+    /// Enable or disable individual sensors and features via CTRL7.
+    ///
+    /// Use the constants in `registers::ctrl7` to build the mask:
+    /// `ACCEL_EN`, `GYRO_EN`, `MAG_EN`, `AE_EN`, `GYRO_SNZ`,
+    /// `SYS_HS`, `SYNC_SMPL`.
+    pub fn set_ctrl7<I2C, E>(&self, i2c: &mut I2C, value: u8) -> Result<(), Error<E>>
+    where
+        I2C: I2cTrait<Error = E>,
+    {
+        self.write_register(i2c, registers::CTRL7, value)
+    }
+
+    /// Read the current CTRL7 register value.
+    pub fn ctrl7<I2C, E>(&self, i2c: &mut I2C) -> Result<u8, Error<E>>
+    where
+        I2C: I2cTrait<Error = E>,
+    {
+        self.read_register(i2c, registers::CTRL7)
+    }
+
+    /// Enable or disable the accelerometer (CTRL7 bit 0).
+    pub fn set_accel_enable<I2C, E>(&self, i2c: &mut I2C, enable: bool) -> Result<(), Error<E>>
+    where
+        I2C: I2cTrait<Error = E>,
+    {
+        let reg = self.read_register(i2c, registers::CTRL7)?;
+        let val = if enable { reg | registers::ctrl7::ACCEL_EN } else { reg & !registers::ctrl7::ACCEL_EN };
+        self.write_register(i2c, registers::CTRL7, val)
+    }
+
+    /// Enable or disable the gyroscope (CTRL7 bit 1).
+    pub fn set_gyro_enable<I2C, E>(&self, i2c: &mut I2C, enable: bool) -> Result<(), Error<E>>
+    where
+        I2C: I2cTrait<Error = E>,
+    {
+        let reg = self.read_register(i2c, registers::CTRL7)?;
+        let val = if enable { reg | registers::ctrl7::GYRO_EN } else { reg & !registers::ctrl7::GYRO_EN };
+        self.write_register(i2c, registers::CTRL7, val)
+    }
+
+    /// Disable all sensors by writing 0x00 to CTRL7.
+    pub fn disable_all<I2C, E>(&self, i2c: &mut I2C) -> Result<(), Error<E>>
+    where
+        I2C: I2cTrait<Error = E>,
+    {
+        self.write_register(i2c, registers::CTRL7, 0x00)
+    }
+
+    // ---- FIFO ---------------------------------------------------------------------
+
+    /// Configure the FIFO (FIFO_CTRL register 0x14).
+    ///
+    /// When `mode` is `Bypass`, the FIFO is disabled. For `Fifo` or
+    /// `Streaming`, all enabled sensors must share the same ODR.
+    pub fn configure_fifo<I2C, E>(
+        &self,
+        i2c: &mut I2C,
+        mode: FifoMode,
+        size: FifoSize,
+    ) -> Result<(), Error<E>>
+    where
+        I2C: I2cTrait<Error = E>,
+    {
+        let val = ((size as u8) << registers::fifo_ctrl::SIZE_SHIFT)
+                | (mode as u8);
+        self.write_register(i2c, registers::FIFO_CTRL, val)
+    }
+
+    /// Set the FIFO watermark threshold in ODR samples (0-255).
+    pub fn set_fifo_watermark<I2C, E>(&self, i2c: &mut I2C, samples: u8) -> Result<(), Error<E>>
+    where
+        I2C: I2cTrait<Error = E>,
+    {
+        self.write_register(i2c, registers::FIFO_WTM_TH, samples)
+    }
+
+    /// Read FIFO status flags and sample count.
+    pub fn fifo_status<I2C, E>(&self, i2c: &mut I2C) -> Result<FifoStatus, Error<E>>
+    where
+        I2C: I2cTrait<Error = E>,
+    {
+        let cnt_lsb = self.read_register(i2c, registers::FIFO_SMPL_CNT)? as u16;
+        let status = self.read_register(i2c, registers::FIFO_STATUS)?;
+        let cnt_msb = (status & 0x03) as u16;
+        Ok(FifoStatus {
+            full:         (status & registers::fifo_status::FULL) != 0,
+            watermark:    (status & registers::fifo_status::WATERMARK) != 0,
+            overflow:     (status & registers::fifo_status::OVERFLOW) != 0,
+            not_empty:    (status & registers::fifo_status::NOT_EMPTY) != 0,
+            sample_count: (cnt_msb << 8) | cnt_lsb,
+        })
+    }
+
+    /// Reset the FIFO via CTRL9 command.
+    pub fn reset_fifo<I2C, E>(&self, i2c: &mut I2C) -> Result<(), Error<E>>
+    where
+        I2C: I2cTrait<Error = E>,
+    {
+        self.exec_ctrl9(i2c, registers::cmd::RST_FIFO)
+    }
+
+    /// Request FIFO data via CTRL9 command, then read `buf.len()` bytes.
+    ///
+    /// After this call, the caller should read FIFO_DATA (0x17) in
+    /// bursts of 6 bytes per enabled sensor until the FIFO is empty,
+    /// then call `fifo_end_read()` to clear the read mode.
+    pub fn fifo_begin_read<I2C, E>(&self, i2c: &mut I2C) -> Result<(), Error<E>>
+    where
+        I2C: I2cTrait<Error = E>,
+    {
+        self.exec_ctrl9(i2c, registers::cmd::REQ_FIFO)
+    }
+
+    /// Read one byte from FIFO_DATA register.
+    pub fn fifo_read_byte<I2C, E>(&self, i2c: &mut I2C) -> Result<u8, Error<E>>
+    where
+        I2C: I2cTrait<Error = E>,
+    {
+        self.read_register(i2c, registers::FIFO_DATA)
+    }
+
+    /// End FIFO read mode by clearing FIFO_rd_mode (FIFO_CTRL bit 7).
+    pub fn fifo_end_read<I2C, E>(&self, i2c: &mut I2C) -> Result<(), Error<E>>
+    where
+        I2C: I2cTrait<Error = E>,
+    {
+        let reg = self.read_register(i2c, registers::FIFO_CTRL)?;
+        self.write_register(i2c, registers::FIFO_CTRL, reg & !registers::fifo_ctrl::RD_MODE)
+    }
+
+    // ---- AttitudeEngine -----------------------------------------------------------
+
+    /// Configure and enable the AttitudeEngine.
+    ///
+    /// Sets the AE output data rate in CTRL6 and enables sEN in CTRL7.
+    /// The accelerometer and gyroscope must already be enabled.
+    pub fn enable_attitude_engine<I2C, E>(&self, i2c: &mut I2C, odr: AeOdr) -> Result<(), Error<E>>
+    where
+        I2C: I2cTrait<Error = E>,
+    {
+        // Set AE ODR in CTRL6 (preserve sMoD bit 7)
+        let ctrl6 = self.read_register(i2c, registers::CTRL6)?;
+        self.write_register(i2c, registers::CTRL6, (ctrl6 & !registers::ctrl6::SODR_MASK) | (odr as u8))?;
+
+        // Enable sEN in CTRL7
+        let ctrl7 = self.read_register(i2c, registers::CTRL7)?;
+        self.write_register(i2c, registers::CTRL7, ctrl7 | registers::ctrl7::AE_EN)
+    }
+
+    /// Disable the AttitudeEngine (clear sEN in CTRL7).
+    pub fn disable_attitude_engine<I2C, E>(&self, i2c: &mut I2C) -> Result<(), Error<E>>
+    where
+        I2C: I2cTrait<Error = E>,
+    {
+        let ctrl7 = self.read_register(i2c, registers::CTRL7)?;
+        self.write_register(i2c, registers::CTRL7, ctrl7 & !registers::ctrl7::AE_EN)
+    }
+
+    /// Enable or disable Motion on Demand (CTRL6 bit 7).
+    ///
+    /// Requires sEN=1 in CTRL7 (AttitudeEngine enabled).
+    pub fn set_motion_on_demand<I2C, E>(&self, i2c: &mut I2C, enable: bool) -> Result<(), Error<E>>
+    where
+        I2C: I2cTrait<Error = E>,
+    {
+        let ctrl6 = self.read_register(i2c, registers::CTRL6)?;
+        let val = if enable { ctrl6 | registers::ctrl6::SMOD } else { ctrl6 & !registers::ctrl6::SMOD };
+        self.write_register(i2c, registers::CTRL6, val)
+    }
+
+    /// Request Motion on Demand data via CTRL9 command.
+    ///
+    /// After completion, quaternion and velocity data is available
+    /// in the output registers (read with `read_quaternion()` and
+    /// `read_velocity()`).
+    pub fn request_motion_data<I2C, E>(&self, i2c: &mut I2C) -> Result<(), Error<E>>
+    where
+        I2C: I2cTrait<Error = E>,
+    {
+        self.exec_ctrl9(i2c, registers::cmd::REQ_SDI)
+    }
+
+    /// Read the AttitudeEngine quaternion increment (dQW, dQX, dQY, dQZ).
+    ///
+    /// Burst-reads 8 bytes from registers 0x49-0x50.
+    pub fn read_quaternion<I2C, E>(&self, i2c: &mut I2C) -> Result<Quaternion, Error<E>>
+    where
+        I2C: I2cTrait<Error = E>,
+    {
+        let mut buf = [0u8; 8];
+        i2c.write_read(self.addr, &[registers::DQW_L], &mut buf)
+            .map_err(Error::I2c)?;
+        Ok(Quaternion {
+            dqw: i16::from_le_bytes([buf[0], buf[1]]),
+            dqx: i16::from_le_bytes([buf[2], buf[3]]),
+            dqy: i16::from_le_bytes([buf[4], buf[5]]),
+            dqz: i16::from_le_bytes([buf[6], buf[7]]),
+        })
+    }
+
+    /// Read the AttitudeEngine velocity increment (dVX, dVY, dVZ).
+    ///
+    /// Burst-reads 6 bytes from registers 0x51-0x56.
+    pub fn read_velocity<I2C, E>(&self, i2c: &mut I2C) -> Result<VelocityIncrement, Error<E>>
+    where
+        I2C: I2cTrait<Error = E>,
+    {
+        let mut buf = [0u8; 6];
+        i2c.write_read(self.addr, &[registers::DVX_L], &mut buf)
+            .map_err(Error::I2c)?;
+        Ok(VelocityIncrement {
+            dvx: i16::from_le_bytes([buf[0], buf[1]]),
+            dvy: i16::from_le_bytes([buf[2], buf[3]]),
+            dvz: i16::from_le_bytes([buf[4], buf[5]]),
+        })
+    }
+
+    /// Read AttitudeEngine status registers (AE_REG1 and AE_REG2).
+    ///
+    /// AE_REG1 (0x57) contains clipping status flags.
+    /// AE_REG2 (0x58) contains velocity overflow flags.
+    pub fn read_ae_status<I2C, E>(&self, i2c: &mut I2C) -> Result<(u8, u8), Error<E>>
+    where
+        I2C: I2cTrait<Error = E>,
+    {
+        let r1 = self.read_register(i2c, registers::AE_REG1)?;
+        let r2 = self.read_register(i2c, registers::AE_REG2)?;
+        Ok((r1, r2))
+    }
+
+    // ---- Wake-on-Motion -----------------------------------------------------------
+
+    /// Configure and enable Wake-on-Motion.
+    ///
+    /// Before calling this, disable all sensors (write 0x00 to CTRL7),
+    /// then configure the accelerometer ODR and scale via CTRL2.
+    /// After this call, enable the accelerometer in CTRL7.
+    ///
+    /// The full sequence is:
+    /// 1. `disable_all()`
+    /// 2. Write desired accel ODR/scale to CTRL2 (via `init()` or directly)
+    /// 3. `configure_wom(&config)`
+    /// 4. `set_accel_enable(true)`
+    ///
+    /// To exit WoM, call `disable_wom()`.
+    pub fn configure_wom<I2C, E>(&self, i2c: &mut I2C, cfg: &WomConfig) -> Result<(), Error<E>>
+    where
+        I2C: I2cTrait<Error = E>,
+    {
+        // CAL1_L: WoM threshold in mg (1 mg/LSB)
+        self.write_register(i2c, registers::CAL1_L, cfg.threshold_mg)?;
+
+        // CAL1_H: bits 7:6 = interrupt select, bits 5:0 = blanking time
+        let cal1_h = ((cfg.interrupt as u8) << 6) | (cfg.blanking_samples & 0x3F);
+        self.write_register(i2c, registers::CAL1_H, cal1_h)?;
+
+        // Issue CTRL9 command to configure WoM
+        self.exec_ctrl9(i2c, registers::cmd::WRITE_WOM_SETTING)
+    }
+
+    /// Disable Wake-on-Motion by writing threshold 0 and executing
+    /// the WoM CTRL9 command. Restores interrupt pins to normal.
+    ///
+    /// Call `disable_all()` before this, then reconfigure sensors
+    /// as desired afterward.
+    pub fn disable_wom<I2C, E>(&self, i2c: &mut I2C) -> Result<(), Error<E>>
+    where
+        I2C: I2cTrait<Error = E>,
+    {
+        self.write_register(i2c, registers::CAL1_L, 0x00)?;
+        self.write_register(i2c, registers::CAL1_H, 0x00)?;
+        self.exec_ctrl9(i2c, registers::cmd::WRITE_WOM_SETTING)
+    }
+
+    /// Check if a Wake-on-Motion event occurred (STATUS1 bit 2).
+    ///
+    /// Reading STATUS1 clears the WoM bit and resets the interrupt line.
+    pub fn wom_event<I2C, E>(&self, i2c: &mut I2C) -> Result<bool, Error<E>>
+    where
+        I2C: I2cTrait<Error = E>,
+    {
+        let s = self.read_register(i2c, registers::STATUS1)?;
+        Ok((s & registers::status1::WOM) != 0)
+    }
+
+    // ---- Accelerometer calibration ------------------------------------------------
+
+    /// Apply accelerometer delta-offset via CTRL9 command 0x09.
+    ///
+    /// Each offset is a signed 4.12 fixed-point value (12 fractional
+    /// bits). To convert from raw sensor units:
+    ///   `delta = bias_raw * 4096 / lsb_per_g`
+    ///
+    /// This offset is volatile - lost on power cycle or reset.
+    pub fn calibrate_accel<I2C, E>(
+        &self,
+        i2c: &mut I2C,
+        bias_x: i16,
+        bias_y: i16,
+        bias_z: i16,
+    ) -> Result<(), Error<E>>
+    where
+        I2C: I2cTrait<Error = E>,
+    {
+        // Convert raw sensor units to signed 4.12 fixed-point.
+        let scale = self.accel_scale.lsb_per_g() as i32;
+        let dx = ((bias_x as i32 * 4096) / scale) as i16;
+        let dy = ((bias_y as i32 * 4096) / scale) as i16;
+        let dz = ((bias_z as i32 * 4096) / scale) as i16;
+
+        let [dx_l, dx_h] = dx.to_le_bytes();
+        let [dy_l, dy_h] = dy.to_le_bytes();
+        let [dz_l, dz_h] = dz.to_le_bytes();
+
+        self.write_register(i2c, registers::CAL1_L, dx_l)?;
+        self.write_register(i2c, registers::CAL1_H, dx_h)?;
+        self.write_register(i2c, registers::CAL2_L, dy_l)?;
+        self.write_register(i2c, registers::CAL2_H, dy_h)?;
+        self.write_register(i2c, registers::CAL3_L, dz_l)?;
+        self.write_register(i2c, registers::CAL3_H, dz_h)?;
+
+        self.exec_ctrl9(i2c, registers::cmd::ACCEL_HOST_DELTA_OFFSET)
+    }
+
+    // ---- Timestamp ----------------------------------------------------------------
+
+    /// Read the 24-bit sample timestamp.
+    ///
+    /// The counter increments by one for each sample from the sensor
+    /// with the highest ODR. It wraps from 0xFFFFFF to 0x000000.
+    pub fn read_timestamp<I2C, E>(&self, i2c: &mut I2C) -> Result<u32, Error<E>>
+    where
+        I2C: I2cTrait<Error = E>,
+    {
+        let mut buf = [0u8; 3];
+        i2c.write_read(self.addr, &[registers::TIMESTAMP_LOW], &mut buf)
+            .map_err(Error::I2c)?;
+        Ok((buf[2] as u32) << 16 | (buf[1] as u32) << 8 | (buf[0] as u32))
+    }
+
+    // ---- USID and firmware version ------------------------------------------------
+
+    /// Copy USID and firmware version to output registers, then read them.
+    ///
+    /// Returns `(fw_version, usid)` where `fw_version` is 3 bytes and
+    /// `usid` is 6 bytes.
+    pub fn read_usid<I2C, E>(&self, i2c: &mut I2C) -> Result<([u8; 3], [u8; 6]), Error<E>>
+    where
+        I2C: I2cTrait<Error = E>,
+    {
+        self.exec_ctrl9(i2c, registers::cmd::COPY_USID)?;
+
+        // FW version is in dQW_L, dQW_H, dQX_L (3 bytes)
+        let mut fw = [0u8; 3];
+        fw[0] = self.read_register(i2c, registers::DQW_L)?;
+        fw[1] = self.read_register(i2c, registers::DQW_H)?;
+        fw[2] = self.read_register(i2c, registers::DQX_L)?;
+
+        // USID is in dVX_L through dVZ_H (6 bytes)
+        let mut usid = [0u8; 6];
+        let mut buf = [0u8; 6];
+        i2c.write_read(self.addr, &[registers::DVX_L], &mut buf)
+            .map_err(Error::I2c)?;
+        usid.copy_from_slice(&buf);
+
+        Ok((fw, usid))
+    }
+
+    // ---- Pull-up resistor configuration -------------------------------------------
+
+    /// Configure IO pull-up resistors via CTRL9 command 0x11.
+    ///
+    /// Each bit in `disable_mask` disables one pull-up:
+    ///   bit 0: aux_rpu_dis
+    ///   bit 1: icm_rpu_dis
+    ///   bit 2: cs_rpu_dis
+    ///   bit 3: ics_rpu_dis
+    pub fn set_pullup_config<I2C, E>(&self, i2c: &mut I2C, disable_mask: u8) -> Result<(), Error<E>>
+    where
+        I2C: I2cTrait<Error = E>,
+    {
+        self.write_register(i2c, registers::CAL1_L, disable_mask & 0x0F)?;
+        self.exec_ctrl9(i2c, registers::cmd::SET_RPU)
+    }
+
+    // ---- Accelerometer ODR / scale runtime change --------------------------------
+
+    /// Change the accelerometer output data rate without touching the
+    /// full-scale range. Useful for switching to a low ODR when
+    /// entering Wake-on-Motion mode.
+    pub fn set_accel_odr<I2C, E>(&self, i2c: &mut I2C, odr: Odr) -> Result<(), Error<E>>
+    where
+        I2C: I2cTrait<Error = E>,
+    {
+        let ctrl2 = self.read_register(i2c, registers::CTRL2)?;
+        // Clear low nibble (aODR), keep bits 7:4 (aST + aFS).
+        self.write_register(i2c, registers::CTRL2, (ctrl2 & 0xF0) | odr.bits())
+    }
+
+    /// Change the gyroscope output data rate without touching the
+    /// full-scale range.
+    pub fn set_gyro_odr<I2C, E>(&self, i2c: &mut I2C, odr: Odr) -> Result<(), Error<E>>
+    where
+        I2C: I2cTrait<Error = E>,
+    {
+        let ctrl3 = self.read_register(i2c, registers::CTRL3)?;
+        self.write_register(i2c, registers::CTRL3, (ctrl3 & 0xF0) | odr.bits())
+    }
+
+    // ---- CTRL9 protocol helper ----------------------------------------------------
+
+    /// Execute a CTRL9 command and wait for completion.
+    ///
+    /// Protocol per QMI8658C Rev 0.6 datasheet:
+    /// 1. Write command to CTRL9 (0x0A)
+    /// 2. Wait for STATUSINT.bit7 (CmdDone) = 1 (actual silicon; the
+    ///    Rev 0.6 docs specify STATUS1.bit0 but the C silicon rev
+    ///    0x7C+ uses STATUSINT.bit7 instead)
+    /// 3. Write NOP (0x00) to CTRL9 to acknowledge completion
+    fn exec_ctrl9<I2C, E>(&self, i2c: &mut I2C, cmd: u8) -> Result<(), Error<E>>
+    where
+        I2C: I2cTrait<Error = E>,
+    {
+        self.write_register(i2c, registers::CTRL9, cmd)?;
+
+        // Wait for CmdDone (STATUSINT bit 7).
         let mut done = false;
         for _ in 0..1000u16 {
             let s = self.read_register(i2c, registers::STATUSINT)?;
@@ -348,12 +819,6 @@ impl Qmi8658 {
         // Acknowledge: write NOP so the device clears CmdDone.
         self.write_register(i2c, registers::CTRL9, registers::cmd::NOP)
     }
-
-    /// Returns the accelerometer scale this driver was configured with.
-    pub fn accel_scale(&self) -> AccelScale { self.accel_scale }
-
-    /// Returns the gyroscope scale this driver was configured with.
-    pub fn gyro_scale(&self)  -> GyroScale  { self.gyro_scale  }
 
     // ---- diagnostic helpers -----------------------------------------------------
 
