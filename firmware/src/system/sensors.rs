@@ -97,12 +97,16 @@ impl SensorSystem {
         Self { imu, rtc, last_minute: 0xFF }
     }
 
-    /// Poll for time changes, push MinuteChanged when the minute rolls over.
+    /// Poll for time changes, push HalfMinuteChanged when the
+    /// half-minute boundary is crossed.
     pub fn poll(&mut self, i2c: &mut impl I2c, events: &mut heapless::Vec<SystemEvent, 8>) {
         if let Ok(dt) = self.rtc.get(i2c) {
-            if dt.minute != self.last_minute {
-                self.last_minute = dt.minute;
-                let _ = events.push(SystemEvent::MinuteChanged);
+            // Track half-minute boundaries: fires at second=0 and
+            // second=30 for each minute.
+            let half = dt.minute.wrapping_mul(2) + if dt.second >= 30 { 1 } else { 0 };
+            if half != self.last_minute {
+                self.last_minute = half;
+                let _ = events.push(SystemEvent::HalfMinuteChanged);
             }
         }
     }

@@ -1,5 +1,5 @@
 use crate::events::{SwipeDir, SwipeRegion, SystemEvent};
-use crate::ui::theme::{EDGE_GESTURE_ZONE, SCREEN_H};
+use crate::ui::theme::{EDGE_GESTURE_ZONE, SCREEN_H, SCREEN_W};
 use drivers::touch::{FT3168, TouchEvent};
 use embassy_futures::select::select;
 use embedded_hal::i2c::I2c;
@@ -80,15 +80,21 @@ impl<'d> InputSystem<'d> {
         };
 
         // Region is determined by where the gesture started. A swipe
-        // whose start y is within EDGE_GESTURE_ZONE of the top or
-        // bottom edge counts as an edge gesture; everything else is
-        // content.
+        // whose start falls within EDGE_GESTURE_ZONE of an edge
+        // counts as an edge gesture; everything else is content.
+        // Top/Bottom take precedence over Left/Right in the corners.
+        let start_x = start.0 as i32;
         let start_y = start.1 as i32;
+        let screen_w = SCREEN_W as i32;
         let screen_h = SCREEN_H as i32;
         let region = if start_y < EDGE_GESTURE_ZONE {
             SwipeRegion::Top
         } else if start_y >= screen_h - EDGE_GESTURE_ZONE {
             SwipeRegion::Bottom
+        } else if start_x < EDGE_GESTURE_ZONE {
+            SwipeRegion::Left
+        } else if start_x >= screen_w - EDGE_GESTURE_ZONE {
+            SwipeRegion::Right
         } else {
             SwipeRegion::Content
         };

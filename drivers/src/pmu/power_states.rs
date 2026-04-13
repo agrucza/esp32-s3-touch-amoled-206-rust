@@ -5,20 +5,22 @@
 //!
 //! ## Wakeup sources on the ESP32-S3-Touch-AMOLED-2.06
 //!
-//! The AXP2101 IRQ pin is connected to IO expander pin EXIO5, **not** to a
-//! direct ESP32 GPIO. This means AXP2101 interrupts cannot directly wake the
-//! ESP32 from deep sleep. The actual wakeup paths are:
+//! The AXP2101 IRQ output is tied to the `EXIO5` net which the schematic
+//! uses as the RTC-VCC power rail - it is NOT routed to any readable
+//! signal. AXP2101 interrupts therefore cannot drive any ESP32 GPIO
+//! directly and must be polled over I2C. The actual wakeup paths are:
 //!
 //! | Source       | Path                                            |
 //! |--------------|-------------------------------------------------|
 //! | Power button | AXP2101 PWRON → CHIP_PU (ESP32 enable, hard reset) |
 //! | Touch        | FT3168 INT → GPIO38 (direct ESP32 ext-wakeup)   |
 //! | RTC alarm    | PCF85063 INT → GPIO39 (direct ESP32 ext-wakeup) |
-//! | VBUS insert  | AXP2101 IRQ → EXIO5 (IO expander, indirect only) |
+//! | IMU motion   | QMI8658 INT1 → GPIO21 (direct ESP32 ext-wakeup) |
+//! | VBUS insert  | AXP2101 IRQ → EXIO5 (not usable - see above)    |
 //!
 //! The `wakeup_sources` field in [`PowerConfig`] configures which AXP2101
 //! interrupt sources are enabled in REG 40h–42h, useful for event handling
-//! while the system is running (not deep sleep wakeup).
+//! while the system is running via I2C polling (not deep sleep wakeup).
 //!
 //! Real power savings figures must be measured with a power profiler
 //! (e.g. Nordic PPK2) from the battery - the AXP2101 does not expose

@@ -7,8 +7,12 @@ use crate::sdcard_hal::EspVolumeManager;
 use crate::system::audio::AudioSystem;
 use crate::system::display::{Display, DisplayState};
 use crate::system::input::InputSystem;
-use crate::system::power::PowerSystem;
+use crate::system::power::PowerControls;
 use crate::system::sensors::SensorSystem;
+use crate::system::tasks::imu::MotionData;
+use crate::system::tasks::power::PowerTaskState;
+use crate::system::tasks::rtc::TimeData;
+use crate::system::tasks::touch::TouchData;
 use crate::ui::primitives;
 use crate::ui::screens::{self, ActiveScreen};
 use crate::ui::types::{Action, ScreenId, SystemData};
@@ -16,7 +20,6 @@ use embedded_graphics::draw_target::DrawTarget;
 use embassy_futures::select::{select3, Either3};
 use embassy_time::{Duration, Instant, Timer, with_timeout};
 use esp_hal::{
-    Blocking,
     dma::DmaDescriptor,
     gpio::{Input, InputConfig, Level, Output, OutputConfig, Pull},
     i2c::master::{Config as I2cConfig, I2c},
@@ -83,11 +86,14 @@ fn row_hash(row: &[u8]) -> u32 {
 // keeps running after `start_audio` brings them online.
 #[allow(dead_code)]
 pub struct SystemManager<'d> {
-    // Bus
-    i2c: I2c<'d, Blocking>,
+    // Shared I2C bus behind an async mutex. Lives in the global
+    // `I2C_BUS` StaticCell; tasks and the main loop lock it before
+    // each access. See `system::bus` for details.
+    i2c_bus: &'static crate::system::bus::SharedI2c,
 
     // Event sources
-    pub power: PowerSystem<'d>,
+    pub power: PowerControls<'d>,
+    pub power_state: PowerTaskState,
     pub input: InputSystem<'d>,
 
     // Peripherals
@@ -101,10 +107,11 @@ pub struct SystemManager<'d> {
     // don't land mid-scanout.
     lcd_te: Input<'d>,
 
-    // RTC minute-interrupt line (GPIO39, active-low pulse). The
-    // PCF85063A pulses this at second=0 every minute. Used as an
-    // async wake source so the main loop can sleep longer when the
-    // display is off instead of polling the RTC over I2C.
+    // RTC interrupt line (GPIO39, active-low). Shared by the
+    // half-minute tick, alarm match, and countdown timer expiry
+    // on the PCF85063A. Used as an async wake source so the main
+    // loop can sleep longer when the display is off instead of
+    // polling the RTC over I2C.
     rtc_int: Input<'d>,
 
     // IMU INT1 line (GPIO21). Used for Wake-on-Motion when the
@@ -162,6 +169,12 @@ pub struct SystemManager<'d> {
     // to the next tick's event loop. Used to inject WakeOnMotion
     // events so WoM flows through the normal event dispatch path.
     pending_event: Option<SystemEvent>,
+
+    // Cached snapshot of all system data (time, battery, IMU,
+    // touch, ...). Event handlers update individual fields as
+    // events arrive; the render path just reads this cache.
+    // Fully refreshed at boot and on wake-from-sleep.
+    cached_data: SystemData,
 }
 
 /// All peripheral tokens needed by the system manager.
@@ -225,11 +238,15 @@ pub struct Peripherals<'d> {
     pub rx_descriptors: &'static mut [DmaDescriptor],
 }
 
-impl<'d> SystemManager<'d> {
+impl SystemManager<'static> {
     /// Initialize all subsystems and assemble the system manager.
     ///
     /// This is the single entry point for the entire system. Call it from
     /// main() after HAL init, timer start, and logger setup.
+    ///
+    /// Requires `'static` peripherals (from `esp_hal::init`) so the
+    /// I2C bus can be stored in the global `I2C_BUS` static mutex
+    /// for sharing with peripheral tasks.
     ///
     /// Init order is critical:
     /// 1. I2C bus (shared by PMU, touch, IMU, RTC, codecs)
@@ -243,19 +260,22 @@ impl<'d> SystemManager<'d> {
     ///    started. A caller invokes `start_audio()` later to actually
     ///    bring the codecs, I2S DMA, and speaker amp online. This
     ///    keeps idle current low on battery by default.
-    pub async fn init(p: Peripherals<'d>) -> Self {
+    pub async fn init(p: Peripherals<'static>) -> Self {
         // 1. I2C bus
         let mut i2c = I2c::new(p.i2c0, I2cConfig::default().with_frequency(Rate::from_khz(400)))
             .unwrap()
             .with_sda(p.i2c_sda)
             .with_scl(p.i2c_scl);
 
-        // 2. Power - must init first (enables all power rails)
-        let power = PowerSystem::init(
+        // 2. Power - must init first (enables all power rails).
+        // PowerControls owns the GPIO sides (sys_out latch, motor);
+        // PowerTaskState owns the I2C-driver Pmu handle for polling.
+        let (power, pmu) = PowerControls::init(
             Output::new(p.sys_out_pin, Level::Low, OutputConfig::default()),
             Output::new(p.motor_pin, Level::Low, OutputConfig::default()),
             &mut i2c,
         ).expect("PMU init failed - halting");
+        let power_state = PowerTaskState::new(pmu);
         Timer::after(Duration::from_millis(20)).await;
 
         // 3. PSRAM allocator + framebuffer
@@ -283,9 +303,11 @@ impl<'d> SystemManager<'d> {
             &mut i2c,
         ).await;
 
-        // RTC minute-interrupt line. The PCF85063A pulses INT# low at
-        // second=0 every minute. We use this as an async wake source
-        // so the display-off sleep can last seconds instead of 150 ms.
+        // RTC interrupt line (GPIO39). The PCF85063A pulses this
+        // low on any of: half-minute tick (second=0 / second=30),
+        // alarm match, or countdown timer expiry. Used as an async
+        // wake source so the display-off sleep can last seconds
+        // instead of 150 ms.
         let rtc_int = Input::new(p.rtc_int, InputConfig::default().with_pull(Pull::Up));
 
         // IMU INT1 line. Used for Wake-on-Motion when display is Off.
@@ -302,9 +324,10 @@ impl<'d> SystemManager<'d> {
         // 7. Sensors (RTC + IMU with gyro calibration)
         let sensors = SensorSystem::init(&mut i2c).await;
 
-        // 7b. Enable the RTC minute interrupt so GPIO39 pulses at second=0.
-        if let Err(_) = sensors.rtc.enable_minute_interrupt(&mut i2c) {
-            log::warn!("RTC: failed to enable minute interrupt");
+        // 7b. Enable the RTC half-minute interrupt so GPIO39 pulses
+        // low at second=0 and second=30 of every minute.
+        if let Err(_) = sensors.rtc.enable_half_minute_interrupt(&mut i2c) {
+            log::warn!("RTC: failed to enable half-minute interrupt");
         }
 
         // 8. Stash audio peripherals for later `start_audio()`.
@@ -328,11 +351,18 @@ impl<'d> SystemManager<'d> {
 
         // Dump PMU status now that all ADC channels have had time to
         // settle during display, touch, SD, and sensor init (~1 s).
-        power.dump_status(&mut i2c);
+        power_state.dump_status(&mut i2c);
+
+        // Move the I2C bus into the global StaticCell-backed mutex.
+        // From here on, every access goes through `i2c_bus.lock()`.
+        // The `i2c` local is consumed and no longer accessible.
+        let i2c_bus: &'static crate::system::bus::SharedI2c = crate::system::bus::I2C_BUS
+            .init(embassy_sync::mutex::Mutex::new(i2c));
 
         Self {
-            i2c,
+            i2c_bus,
             power,
+            power_state,
             input,
             display,
             audio: None,
@@ -355,6 +385,7 @@ impl<'d> SystemManager<'d> {
             last_activity: Instant::now(),
             sleeping: false,
             pending_event: None,
+            cached_data: SystemData::default(),
         }
     }
 
@@ -373,14 +404,16 @@ impl<'d> SystemManager<'d> {
             return;
         };
         log::info!("Audio: bringing subsystem online...");
+        let mut i2c = self.i2c_bus.lock().await;
         let (audio, tx_transfer, rx_transfer) = crate::system::audio::init_audio(
             pa.i2s0, pa.dma_ch1,
             pa.audio_mclk, pa.audio_bclk, pa.audio_ws,
             pa.audio_dout, pa.audio_din,
             Output::new(pa.audio_pa, Level::Low, OutputConfig::default()),
             pa.tx_buffer, pa.rx_buffer, pa.tx_descriptors, pa.rx_descriptors,
-            &mut self.i2c,
+            &mut *i2c,
         ).await;
+        drop(i2c);
         self.audio = Some(audio);
         self.tx_transfer = Some(tx_transfer);
         self.rx_transfer = Some(rx_transfer);
@@ -414,7 +447,10 @@ impl<'d> SystemManager<'d> {
         }
         log::info!("system: sleep");
         self.sleeping = true;
-        self.sensors.enter_wom_mode(&mut self.i2c);
+        {
+            let mut i2c = self.i2c_bus.lock().await;
+            self.sensors.enter_wom_mode(&mut *i2c);
+        }
         let _ = crate::system::display::transition(
             &mut self.display,
             self.display_state,
@@ -443,7 +479,10 @@ impl<'d> SystemManager<'d> {
             &self.config.display,
         ).await;
         self.display_state = DisplayState::Active;
-        self.sensors.exit_wom_mode(&mut self.i2c);
+        {
+            let mut i2c = self.i2c_bus.lock().await;
+            self.sensors.exit_wom_mode(&mut *i2c);
+        }
         self.row_hashes.fill(0);
         self.needs_redraw = true;
     }
@@ -494,12 +533,15 @@ impl<'d> SystemManager<'d> {
 
     /// Poll raw events from all subsystems, plus any pending event
     /// injected by the previous tick's sleep handler (e.g. WoM).
-    fn poll_events(&mut self) -> heapless::Vec<SystemEvent, 8> {
+    async fn poll_events(&mut self) -> heapless::Vec<SystemEvent, 8> {
         let mut events: heapless::Vec<SystemEvent, 8> = heapless::Vec::new();
-        self.input.poll(&mut self.i2c, &mut events);
-        self.power.poll(&mut self.i2c, &mut events);
-        if !self.sleeping {
-            self.sensors.poll(&mut self.i2c, &mut events);
+        {
+            let mut i2c = self.i2c_bus.lock().await;
+            self.input.poll(&mut *i2c, &mut events);
+            self.power_state.poll(&mut *i2c, &mut events);
+            if !self.sleeping {
+                self.sensors.poll(&mut *i2c, &mut events);
+            }
         }
         if let Some(e) = self.pending_event.take() {
             let _ = events.push(e);
@@ -508,18 +550,45 @@ impl<'d> SystemManager<'d> {
     }
 
     /// Collect a fresh `SystemData` snapshot from all subsystems.
-    fn read_snapshot(&mut self) -> SystemData {
-        let sensors = self.sensors.snapshot(&mut self.i2c);
-        let power = self.power.snapshot(&mut self.i2c);
-        SystemData::from_snapshots(&sensors, &power, self.touch_pos, self.tick_count)
+    async fn read_snapshot(&mut self) -> SystemData {
+        let mut i2c = self.i2c_bus.lock().await;
+        let sensors = self.sensors.snapshot(&mut *i2c);
+        let power = self.power_state.snapshot(&mut *i2c);
+        drop(i2c);
+
+        // Convert driver-level types into the UI-facing grouped
+        // data structs. `From` impls live next to each task's
+        // data type in `system::tasks::*`.
+        let time = sensors.time.as_ref().map(TimeData::from).unwrap_or_default();
+        let motion = sensors.imu.as_ref().map(MotionData::from).unwrap_or_default();
+        let touch = TouchData {
+            x: self.touch_pos.map(|(x, _)| x),
+            y: self.touch_pos.map(|(_, y)| y),
+        };
+
+        SystemData {
+            time,
+            power,
+            motion,
+            touch,
+            tick_count: self.tick_count,
+        }
     }
 
     /// Build an empty `SystemData` for ticks where we skip sensor
-    /// reads (sleeping with no wake pending).
+    /// reads (sleeping with no wake pending). Touch position is
+    /// preserved from the cache since it's local state.
     fn empty_snapshot(&self) -> SystemData {
-        let sensors = crate::system::sensors::SensorSnapshot::default();
-        let power = crate::system::power::PowerSnapshot::default();
-        SystemData::from_snapshots(&sensors, &power, self.touch_pos, self.tick_count)
+        SystemData {
+            time: TimeData::default(),
+            power: crate::system::tasks::power::PowerData::default(),
+            motion: MotionData::default(),
+            touch: TouchData {
+                x: self.touch_pos.map(|(x, _)| x),
+                y: self.touch_pos.map(|(_, y)| y),
+            },
+            tick_count: self.tick_count,
+        }
     }
 
     /// Process events: sleep/wake transitions, touch tracking,
@@ -531,7 +600,7 @@ impl<'d> SystemManager<'d> {
             match event {
                 SystemEvent::TouchPressed { x, y } => self.touch_pos = Some((*x, *y)),
                 SystemEvent::TouchReleased => self.touch_pos = None,
-                SystemEvent::MinuteChanged
+                SystemEvent::HalfMinuteChanged
                 | SystemEvent::BatteryChanged { .. } => self.needs_redraw = true,
                 _ => {}
             }
@@ -630,7 +699,7 @@ impl<'d> SystemManager<'d> {
     async fn render(&mut self, data: &SystemData) {
         self.display.clear(crate::ui::theme::BG).ok();
         self.screen.render(&mut self.display, data);
-        if let Some(pct) = data.battery_percent {
+        if let Some(pct) = data.power.battery_percent {
             primitives::battery_warning_frame(&mut self.display, pct);
         }
 
@@ -662,8 +731,9 @@ impl<'d> SystemManager<'d> {
     /// Async wait for the next event. Adaptive sleep behavior:
     ///
     /// - **Sleeping**: 2 s timeout, waiting on touch/BOOT INT, RTC
-    ///   minute INT, or IMU WoM INT. WoM wakes inject a
-    ///   `WakeOnMotion` event for the next tick's event loop.
+    ///   INT (half-minute tick / alarm / timer), or IMU WoM INT.
+    ///   WoM wakes inject a `WakeOnMotion` event for the next
+    ///   tick's event loop.
     /// - **Awake, finger down**: 50 ms timeout for tight drag tracking.
     /// - **Awake, idle**: 150 ms timeout for sensor polling.
     async fn wait_for_next_event(&mut self) {
@@ -681,12 +751,17 @@ impl<'d> SystemManager<'d> {
                 Ok(Either3::Second(_)) => {} // RTC minute - sensors.poll would pick it up but we skip when sleeping
                 Ok(Either3::Third(_)) => {
                     // WoM: clear STATUS1 flag and inject event.
-                    let _ = self.sensors.imu.wom_event(&mut self.i2c);
+                    let mut i2c = self.i2c_bus.lock().await;
+                    let _ = self.sensors.imu.wom_event(&mut *i2c);
+                    drop(i2c);
                     let _ = self.pending_event.insert(SystemEvent::WakeOnMotion);
                 }
                 Err(_) => {
                     // Timeout: check if WoM fired but we missed the edge.
-                    if self.sensors.imu.wom_event(&mut self.i2c).unwrap_or(false) {
+                    let mut i2c = self.i2c_bus.lock().await;
+                    let fired = self.sensors.imu.wom_event(&mut *i2c).unwrap_or(false);
+                    drop(i2c);
+                    if fired {
                         let _ = self.pending_event.insert(SystemEvent::WakeOnMotion);
                     }
                 }
@@ -719,7 +794,7 @@ impl<'d> SystemManager<'d> {
     pub async fn tick(&mut self) {
         self.drain_audio().await;
 
-        let events = self.poll_events();
+        let events = self.poll_events().await;
 
         // Predict whether we're about to wake so we read fresh
         // sensor data now (before handle_events calls wake()) -
@@ -729,7 +804,7 @@ impl<'d> SystemManager<'d> {
             Self::is_user_activity(e) || matches!(e, SystemEvent::WakeOnMotion)
         });
         let data = if !self.sleeping || will_wake {
-            self.read_snapshot()
+            self.read_snapshot().await
         } else {
             self.empty_snapshot()
         };
