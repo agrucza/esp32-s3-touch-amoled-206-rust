@@ -17,7 +17,7 @@ use crate::ui::primitives;
 use crate::ui::screens::{self, ActiveScreen};
 use crate::ui::types::{Action, ScreenId, SystemData};
 use embedded_graphics::draw_target::DrawTarget;
-use embassy_futures::select::{select, Either};
+use embassy_futures::select::{select3, Either3};
 use embassy_time::{Duration, Instant, Timer, with_timeout};
 use esp_hal::{
     dma::DmaDescriptor,
