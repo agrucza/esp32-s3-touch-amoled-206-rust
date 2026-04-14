@@ -2,10 +2,10 @@ extern crate alloc;
 
 use crate::config::Config;
 use crate::display_hal::{self, WIDTH, HEIGHT};
-use crate::events::{SwipeDir, SwipeRegion, SystemEvent};
+use crate::events::{SelfTestId, SwipeDir, SwipeRegion, SystemEvent};
 use crate::sdcard_hal::EspVolumeManager;
 use crate::system::audio::AudioSystem;
-use crate::system::bus::{EVENTS, SLEEP_SIGNAL, SleepState};
+use crate::system::bus::{EVENTS, IMU_COMMAND, ImuCommand, SLEEP_SIGNAL, SleepState};
 use crate::system::display::{Display, DisplayState};
 use crate::system::power::PowerControls;
 use crate::system::tasks::boot_button::BootButtonTaskState;
@@ -17,7 +17,7 @@ use crate::ui::primitives;
 use crate::ui::screens::{self, ActiveScreen};
 use crate::ui::types::{Action, ScreenId, SystemData};
 use embedded_graphics::draw_target::DrawTarget;
-use embassy_futures::select::{select3, Either3};
+use embassy_futures::select::{select, Either};
 use embassy_time::{Duration, Instant, Timer, with_timeout};
 use esp_hal::{
     dma::DmaDescriptor,
@@ -86,7 +86,9 @@ fn row_hash(row: &[u8]) -> u32 {
 ///
 /// Each field owns everything a task needs to run independently
 /// (driver handle, GPIO lines, buffers). The shared I2C bus is
-/// accessed via `&'static SharedI2c` from `system::bus::I2C_BUS`.
+/// handed to each task separately as a `&'static SharedI2c` via
+/// [`SystemManager::i2c_bus`] and is intentionally not part of
+/// this bundle.
 pub struct TaskBundle {
     pub touch: TouchTaskState<'static>,
     pub boot_button: BootButtonTaskState<'static>,
@@ -321,7 +323,7 @@ impl SystemManager<'static> {
             &mut i2c,
         );
         let imu_state = ImuTaskState::init(
-            Input::new(p.imu_int1, InputConfig::default().with_pull(Pull::None)),
+            Input::new(p.imu_int1, InputConfig::default().with_pull(Pull::Down)),
             &mut i2c,
         ).await;
 
@@ -365,7 +367,18 @@ impl SystemManager<'static> {
             motion: Default::default(),
             touch: TouchData::default(),
             tick_count: 0,
+            // Every slot starts in `NotRun`; the IMU task replays the
+            // boot-time self-test results as `SelfTestUpdated` events
+            // during its first iteration, so this is only visible to
+            // whatever runs before that (currently nothing).
+            self_tests: [crate::events::SelfTestResult::NotRun; crate::events::NUM_SELF_TESTS],
         };
+
+        // Build the initial screen and fire its `on_mount` hook so
+        // any state it wants to seed from `cached_data` is ready
+        // before the first render.
+        let mut screen = ActiveScreen::new(ScreenId::Clock);
+        screen.mount(&cached_data);
 
         let manager = Self {
             i2c_bus,
@@ -377,7 +390,7 @@ impl SystemManager<'static> {
             tx_transfer: None,
             rx_transfer: None,
             pending_audio,
-            screen: ActiveScreen::new(ScreenId::Clock),
+            screen,
             tick_count: 0,
             needs_redraw: true, // first frame always draws
             mic_drain_buf: alloc::vec![0u8; MIC_DRAIN_BUF_SIZE].into_boxed_slice(),
@@ -578,6 +591,16 @@ impl SystemManager<'static> {
                 self.needs_redraw = true;
                 return;
             }
+            SystemEvent::SelfTestUpdated { id, result } => {
+                // Stash the latest result under its id and let the
+                // current screen decide whether it cares. Most don't -
+                // only the IMU sub-view of Settings renders this data
+                // today - so we still forward the event below instead
+                // of early-returning, giving the screen a chance to
+                // redraw for a Running → Pass/Fail transition.
+                self.cached_data.self_tests[*id as usize] = *result;
+                self.needs_redraw = true;
+            }
             SystemEvent::TouchPressed { x, y } => {
                 self.cached_data.touch = TouchData { x: Some(*x), y: Some(*y) };
             }
@@ -632,7 +655,7 @@ impl SystemManager<'static> {
         if !matches!(self.screen.id(), ScreenId::Panel) {
             if let SystemEvent::Swipe { dir: SwipeDir::Down, region: SwipeRegion::Top } = &event {
                 let previous = self.screen.id();
-                self.screen = ActiveScreen::new_panel(previous);
+                self.screen.open_panel(previous, &self.cached_data);
                 self.needs_redraw = true;
                 return;
             }
@@ -648,12 +671,12 @@ impl SystemManager<'static> {
                         match dir {
                             SwipeDir::Right => {
                                 let next = screens::cycle_home_app(self.screen.id(), true);
-                                self.screen.switch_to(next);
+                                self.screen.switch_to(next, &self.cached_data);
                                 self.needs_redraw = true;
                             }
                             SwipeDir::Left => {
                                 let prev = screens::cycle_home_app(self.screen.id(), false);
-                                self.screen.switch_to(prev);
+                                self.screen.switch_to(prev, &self.cached_data);
                                 self.needs_redraw = true;
                             }
                             _ => {}
@@ -663,12 +686,27 @@ impl SystemManager<'static> {
             }
             Action::Redraw => self.needs_redraw = true,
             Action::SwitchScreen(id) => {
-                self.screen.switch_to(id);
+                self.screen.switch_to(id, &self.cached_data);
                 self.needs_redraw = true;
             }
             Action::Shutdown => {
                 log::info!("System: shutdown requested");
                 self.power.shutdown();
+            }
+            Action::RunSelfTest(id) => {
+                // Route to whichever task's command signal owns this
+                // test id. Today every id belongs to the IMU task;
+                // future SD-card / PMU / RTC tests will add match
+                // arms here that signal their own task channels.
+                match id {
+                    SelfTestId::ImuAccel | SelfTestId::ImuGyro => {
+                        IMU_COMMAND.signal(ImuCommand::RunSelfTest(id));
+                    }
+                }
+                // Optimistically flag a redraw so the screen can
+                // pick up the Running state emitted by the task as
+                // soon as it runs.
+                self.needs_redraw = true;
             }
         }
     }

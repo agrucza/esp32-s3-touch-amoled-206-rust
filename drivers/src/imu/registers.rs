@@ -52,7 +52,21 @@ pub const CTRL6: u8 = 0x07;
 /// bit 1 = gEN (gyroscope), bit 0 = aEN (accelerometer).
 pub const CTRL7: u8 = 0x08;
 
-/// CTRL8 (0x09, RW, default 0x00): Reserved / Special Settings - Not Used.
+/// CTRL8 (0x09, RW, default 0x00): Motion Detection Control.
+///
+/// Per QMI8658C datasheet Rev 0.9 (Rev 0.6 mislabeled this register
+/// as "reserved"):
+///
+///   * Bit 7: CTRL9 handshake type (0 = INT1, 1 = STATUSINT.bit7)
+///   * Bit 6: INT pin for motion-detection event
+///   * Bits 4..0: per-engine enables (pedometer, sig-motion, no-motion,
+///     any-motion, tap) - all QMI8658A-only features, not present on
+///     the C variant.
+///
+/// The driver sets bit 7 = 1 at init so the CTRL9 command protocol
+/// uses STATUSINT.bit7 for handshake instead of INT1. Otherwise every
+/// CTRL9 command drives INT1 as part of the handshake and leaves it
+/// in an unpredictable state, breaking WoM signalling.
 pub const CTRL8: u8 = 0x09;
 
 /// CTRL9 (0x0A, RW, default 0x00): host command register.
@@ -234,6 +248,25 @@ pub mod ctrl5 {
     pub const ALPF_MODE_SHIFT: u8 = 1;
     /// Enable accelerometer low-pass filter.
     pub const ALPF_EN:         u8 = 1 << 0;
+}
+
+// ---- CTRL8 bit masks ------------------------------------------------------------
+
+pub mod ctrl8 {
+    /// Route CTRL9 command handshake through STATUSINT.bit7 instead
+    /// of INT1. Required when INT1 is used for WoM (or any other
+    /// purpose) so the handshake protocol doesn't clobber the line.
+    pub const CTRL9_HANDSHAKE_STATUSINT: u8 = 1 << 7;
+
+    /// Route motion-detection event interrupts to INT1 instead of
+    /// INT2. The v0.9 datasheet has a typo on this bit (both values
+    /// listed as "INT2") and its note officially only covers
+    /// any/no/sig-motion, pedometer, and tap - not WoM. We set it
+    /// anyway because our board doesn't wire INT2 to an ESP32 pin,
+    /// and because WoM-on-INT1 isn't firing with this bit at its
+    /// default, which suggests the "affects these" list may be
+    /// incomplete on this silicon rev.
+    pub const MOTION_INT_ON_INT1: u8 = 1 << 6;
 }
 
 // ---- CTRL7 bit masks ------------------------------------------------------------

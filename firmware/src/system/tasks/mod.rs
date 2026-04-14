@@ -1,10 +1,12 @@
 //! Per-device task state structs.
 //!
 //! Each submodule here owns the state for a single hardware device
-//! that will eventually run in its own embassy task. For now these
-//! are still polled synchronously from the main loop, but they're
-//! structured so Phase 4 can `#[embassy_executor::task]`-ify them
-//! with minimal churn.
+//! and runs in its own `#[embassy_executor::task]`, spawned from
+//! `main` after [`crate::system::manager::SystemManager::init`]
+//! hands back a [`TaskBundle`]. Tasks communicate with the main
+//! loop via the `EVENTS` channel in [`crate::system::bus`].
+//!
+//! [`TaskBundle`]: crate::system::manager::TaskBundle
 
 pub mod boot_button;
 pub mod imu;

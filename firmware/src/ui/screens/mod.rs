@@ -1,5 +1,6 @@
 pub mod clock;
 pub mod panel;
+pub mod settings;
 pub mod status;
 
 use embedded_graphics::{draw_target::DrawTarget, pixelcolor::Rgb565};
@@ -7,19 +8,32 @@ use embedded_graphics::{draw_target::DrawTarget, pixelcolor::Rgb565};
 use crate::events::SystemEvent;
 use super::types::{Action, Screen, ScreenId, SystemData};
 
-/// Home-row apps, in L/R carousel order. This is the canonical app
-/// list - both the manager's quick-nav L/R swipe and the panel's app
-/// picker draw from this slice. Adding a new app here wires it into
-/// both pieces of navigation automatically.
+/// Home-row apps, in L/R carousel order. The manager's quick-nav
+/// left/right swipe cycles through this list. Keep it minimal -
+/// only screens a user might want to reach by accident.
 pub const HOME_APPS: &[ScreenId] = &[
     ScreenId::Clock,
     ScreenId::Status,
 ];
 
+/// All apps reachable from the pull-down panel. Superset of
+/// [`HOME_APPS`] - includes entries that should be reachable
+/// deliberately but not through casual L/R swipes (Settings, future
+/// File Explorer, etc.). The panel picker renders this list.
+pub const PANEL_APPS: &[ScreenId] = &[
+    ScreenId::Clock,
+    ScreenId::Status,
+    ScreenId::Settings,
+];
+
 /// Return the next or previous home app relative to `current`,
-/// wrapping at the ends.
+/// wrapping at the ends. Operates on [`HOME_APPS`] only - screens
+/// that aren't home-row apps (Settings, Panel) don't participate
+/// in L/R cycling and just return `current` unchanged.
 pub fn cycle_home_app(current: ScreenId, forward: bool) -> ScreenId {
-    let idx = HOME_APPS.iter().position(|s| *s == current).unwrap_or(0);
+    let Some(idx) = HOME_APPS.iter().position(|s| *s == current) else {
+        return current;
+    };
     let len = HOME_APPS.len();
     let next = if forward {
         (idx + 1) % len
@@ -35,6 +49,7 @@ pub fn cycle_home_app(current: ScreenId, forward: bool) -> ScreenId {
 pub enum ActiveScreen {
     Clock(clock::ClockScreen),
     Status(status::StatusScreen),
+    Settings(settings::SettingsScreen),
     Panel(panel::PanelScreen),
 }
 
@@ -50,6 +65,7 @@ impl ActiveScreen {
         match id {
             ScreenId::Clock => Self::Clock(clock::ClockScreen::new()),
             ScreenId::Status => Self::Status(status::StatusScreen::new()),
+            ScreenId::Settings => Self::Settings(settings::SettingsScreen::new()),
             ScreenId::Panel => {
                 debug_assert!(false, "use ActiveScreen::new_panel(previous) for Panel");
                 Self::Clock(clock::ClockScreen::new())
@@ -67,6 +83,7 @@ impl ActiveScreen {
         match self {
             Self::Clock(s) => s.render(display, data),
             Self::Status(s) => s.render(display, data),
+            Self::Settings(s) => s.render(display, data),
             Self::Panel(s) => s.render(display, data),
         }
     }
@@ -75,7 +92,38 @@ impl ActiveScreen {
         match self {
             Self::Clock(s) => s.on_event(event, data),
             Self::Status(s) => s.on_event(event, data),
+            Self::Settings(s) => s.on_event(event, data),
             Self::Panel(s) => s.on_event(event, data),
+        }
+    }
+
+    /// Dispatch `Screen::on_mount` to the active variant. Called
+    /// right after construction and after [`switch_to`] / [`open_panel`]
+    /// replace the active variant.
+    ///
+    /// [`switch_to`]: ActiveScreen::switch_to
+    /// [`open_panel`]: ActiveScreen::open_panel
+    pub fn mount(&mut self, data: &SystemData) {
+        match self {
+            Self::Clock(s) => s.on_mount(data),
+            Self::Status(s) => s.on_mount(data),
+            Self::Settings(s) => s.on_mount(data),
+            Self::Panel(s) => s.on_mount(data),
+        }
+    }
+
+    /// Dispatch `Screen::on_unmount` to the active variant. Called
+    /// before [`switch_to`] / [`open_panel`] replace the active
+    /// variant, so screens get a chance to release state.
+    ///
+    /// [`switch_to`]: ActiveScreen::switch_to
+    /// [`open_panel`]: ActiveScreen::open_panel
+    pub fn unmount(&mut self) {
+        match self {
+            Self::Clock(s) => s.on_unmount(),
+            Self::Status(s) => s.on_unmount(),
+            Self::Settings(s) => s.on_unmount(),
+            Self::Panel(s) => s.on_unmount(),
         }
     }
 
@@ -84,12 +132,28 @@ impl ActiveScreen {
         match self {
             Self::Clock(_) => ScreenId::Clock,
             Self::Status(_) => ScreenId::Status,
+            Self::Settings(_) => ScreenId::Settings,
             Self::Panel(_) => ScreenId::Panel,
         }
     }
 
-    /// Switch to a different screen.
-    pub fn switch_to(&mut self, id: ScreenId) {
+    /// Switch to a different screen. Fires `on_unmount` on the
+    /// outgoing variant and `on_mount` on the incoming one, both
+    /// before/after the variant swap respectively.
+    pub fn switch_to(&mut self, id: ScreenId, data: &SystemData) {
+        self.unmount();
         *self = Self::new(id);
+        self.mount(data);
+    }
+
+    /// Open the panel screen, remembering which screen it should
+    /// return to on close. Mirrors [`switch_to`] but handles the
+    /// Panel variant's extra `previous` argument.
+    ///
+    /// [`switch_to`]: ActiveScreen::switch_to
+    pub fn open_panel(&mut self, previous: ScreenId, data: &SystemData) {
+        self.unmount();
+        *self = Self::new_panel(previous);
+        self.mount(data);
     }
 }

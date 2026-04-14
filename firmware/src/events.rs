@@ -88,6 +88,90 @@ pub enum SystemEvent {
     PowerUpdated {
         data: crate::system::tasks::power::PowerData,
     },
+
+    // -- Self-tests --
+    /// A self-test's state changed. Emitted by whichever task owns
+    /// the hardware under test - Running before the test starts,
+    /// Pass/Fail/Error when it completes. The main loop caches the
+    /// result in `cached_data.self_tests[id as usize]` and flags a
+    /// redraw so any visible self-test screen updates.
+    ///
+    /// This is the only self-test related `SystemEvent` variant -
+    /// requests to *run* a test come from the UI via `Action::RunSelfTest`
+    /// and are routed directly to the owning task's command signal
+    /// without ever entering the event channel.
+    SelfTestUpdated {
+        id: SelfTestId,
+        result: SelfTestResult,
+    },
+}
+
+// -- Self-tests -----------------------------------------------------------
+
+/// Identifier for one hardware self-test. Used as an index into the
+/// `SystemData::self_tests` array and as the routing key the main
+/// loop uses to decide which task's command signal a
+/// [`SystemEvent::RunSelfTestRequested`] should reach.
+///
+/// Adding a new test:
+/// 1. Add a variant here.
+/// 2. Bump [`NUM_SELF_TESTS`] by 1.
+/// 3. Emit `SelfTestUpdated` events from the task that owns the
+///    hardware under test (Running before the measurement,
+///    Pass/Fail/Error after).
+/// 4. Route `RunSelfTestRequested { id }` in the main loop to that
+///    task's command signal.
+/// 5. Add the id to the appropriate screen's card list.
+///
+/// No other changes should be required - the screen rendering is
+/// driven by a const table of `(SelfTestId, label)` entries.
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SelfTestId {
+    /// QMI8658 accelerometer electrostatic self-test (section 11.1).
+    ImuAccel = 0,
+    /// QMI8658 gyroscope electrostatic self-test (section 11.2).
+    ImuGyro = 1,
+}
+
+/// Number of self-test slots, sized to fit every current
+/// [`SelfTestId`] variant. Must be kept in sync with the highest
+/// variant index plus one - bump this when adding a new variant.
+pub const NUM_SELF_TESTS: usize = 2;
+
+/// Current state / last result of a hardware self-test.
+///
+/// Kept deliberately `Copy` (no heap, no owned strings) so the
+/// whole array of per-test results can live in `SystemData` without
+/// forcing a `Clone` on it. Screens format values at render time
+/// using per-test metadata (label, unit) from a const table.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum SelfTestResult {
+    /// Test has never been attempted this session. Initial state
+    /// for every slot until the owning task emits its first update.
+    #[default]
+    NotRun,
+    /// Test is currently in progress. Screens render the card as
+    /// visibly dimmed and non-interactive while in this state.
+    Running,
+    /// Test passed, carrying a 3-axis result vector (mg for accel,
+    /// dps for gyro). The unit comes from the per-test metadata
+    /// table the screen uses - not stored here.
+    PassAxes3([i32; 3]),
+    /// Test failed, same 3-axis result shape as Pass.
+    FailAxes3([i32; 3]),
+    /// Test could not be completed (I2C error, timeout, etc.).
+    Error(SelfTestError),
+}
+
+/// Failure modes for a self-test that couldn't complete.
+/// Kept small and `Copy` so `SelfTestResult` stays `Copy`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SelfTestError {
+    /// Test did not signal completion within the retry budget.
+    Timeout,
+    /// An I2C transaction failed during the test.
+    I2cFailure,
 }
 
 /// Direction of a swipe gesture.

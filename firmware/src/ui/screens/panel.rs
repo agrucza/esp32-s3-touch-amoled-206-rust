@@ -31,7 +31,7 @@ use crate::events::{SwipeDir, SwipeRegion, SystemEvent};
 use crate::ui::{fonts, primitives, theme};
 use crate::ui::types::{Action, Screen, ScreenId, SystemData};
 
-use super::HOME_APPS;
+use super::PANEL_APPS;
 
 // -- Layout constants --------------------------------------------------------
 
@@ -130,7 +130,7 @@ impl PanelScreen {
     /// Construct the panel with the screen it should return to on
     /// close. The initial page is the one containing `previous`.
     pub fn new(previous: ScreenId) -> Self {
-        let idx = HOME_APPS
+        let idx = PANEL_APPS
             .iter()
             .position(|s| *s == previous)
             .unwrap_or(0);
@@ -161,12 +161,12 @@ impl Screen for PanelScreen {
         );
 
         // -- App icons for the current page ---------------------------------
-        let pages = page_count(HOME_APPS.len());
+        let pages = page_count(PANEL_APPS.len());
         let start_idx = self.page * ICONS_PER_PAGE;
         for col in 0..ICONS_PER_PAGE {
             let app_idx = start_idx + col;
-            if app_idx >= HOME_APPS.len() { break; }
-            let app = HOME_APPS[app_idx];
+            if app_idx >= PANEL_APPS.len() { break; }
+            let app = PANEL_APPS[app_idx];
             let is_active = app == self.previous;
             let (cx, cy) = icon_col_position(col);
 
@@ -246,7 +246,7 @@ impl Screen for PanelScreen {
             }
             // Left/right content swipes cycle the carousel page.
             SystemEvent::Swipe { dir: SwipeDir::Right, region: SwipeRegion::Content } => {
-                let pages = page_count(HOME_APPS.len());
+                let pages = page_count(PANEL_APPS.len());
                 if pages > 1 {
                     self.page = (self.page + 1) % pages;
                     Action::Redraw
@@ -255,7 +255,7 @@ impl Screen for PanelScreen {
                 }
             }
             SystemEvent::Swipe { dir: SwipeDir::Left, region: SwipeRegion::Content } => {
-                let pages = page_count(HOME_APPS.len());
+                let pages = page_count(PANEL_APPS.len());
                 if pages > 1 {
                     self.page = (self.page + pages - 1) % pages;
                     Action::Redraw
@@ -268,7 +268,7 @@ impl Screen for PanelScreen {
             SystemEvent::Tap { x, y } => {
                 if let Some(col) = hit_icon_column(*x, *y) {
                     let app_idx = self.page * ICONS_PER_PAGE + col;
-                    if let Some(&target) = HOME_APPS.get(app_idx) {
+                    if let Some(&target) = PANEL_APPS.get(app_idx) {
                         return Action::SwitchScreen(target);
                     }
                 }
@@ -315,6 +315,7 @@ fn app_display_name(id: ScreenId) -> &'static str {
     match id {
         ScreenId::Clock => "Clock",
         ScreenId::Status => "Status",
+        ScreenId::Settings => "Settings",
         ScreenId::Panel => "Panel",
     }
 }
@@ -329,9 +330,30 @@ fn draw_app_icon<D: DrawTarget<Color = Rgb565>>(
     match id {
         ScreenId::Clock => draw_clock_glyph(display, cx, cy, radius, color),
         ScreenId::Status => draw_status_glyph(display, cx, cy, radius, color),
+        ScreenId::Settings => draw_settings_glyph(display, cx, cy, radius, color),
         // Showing the panel inside the panel would be unusual but we
         // give it a sensible glyph anyway (four dots / grid).
         ScreenId::Panel => draw_panel_glyph(display, cx, cy, radius, color),
+    }
+}
+
+/// Three stacked horizontal bars - a neutral "settings / menu"
+/// glyph. We'll swap to a proper gear when we add a gear primitive.
+fn draw_settings_glyph<D: DrawTarget<Color = Rgb565>>(
+    display: &mut D, cx: i32, cy: i32, radius: i32, color: Rgb565,
+) {
+    let style = PrimitiveStyle::with_stroke(color, 3);
+    let half_w = radius * 3 / 4;
+    let spacing = radius / 3;
+    for row in -1..=1 {
+        let y = cy + row * spacing;
+        Line::new(
+            Point::new(cx - half_w, y),
+            Point::new(cx + half_w, y),
+        )
+        .into_styled(style)
+        .draw(display)
+        .ok();
     }
 }
 

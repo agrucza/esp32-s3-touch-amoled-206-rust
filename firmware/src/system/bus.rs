@@ -16,7 +16,7 @@
 //! by tasks via `&'static` references, so lifetimes work out for
 //! `#[embassy_executor::task]` definitions.
 
-use crate::events::SystemEvent;
+use crate::events::{SelfTestId, SystemEvent};
 use embassy_sync::{
     blocking_mutex::raw::CriticalSectionRawMutex,
     channel::Channel,
@@ -63,6 +63,35 @@ pub enum SleepState {
 /// per task, otherwise the IMU will silently stop getting wake
 /// transitions.
 pub static SLEEP_SIGNAL: Signal<CriticalSectionRawMutex, SleepState> = Signal::new();
+
+/// Command sent from the main loop to the IMU task.
+///
+/// Wraps imperative actions the task can't initiate on its own -
+/// typically because the request originates from UI input that the
+/// main loop receives first. The enum exists (rather than the signal
+/// carrying a primitive payload directly) because more commands are
+/// expected: recalibrate gyro bias on demand, force a WoM re-arm,
+/// switch scale/ODR at runtime, etc. Adding a new command is just a
+/// new variant plus a match arm in the IMU task's command handler.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImuCommand {
+    /// Run one specific hardware self-test, identified by its
+    /// [`SelfTestId`]. Only IMU-owned test ids make sense here;
+    /// unrecognised variants are logged and ignored by the task.
+    RunSelfTest(SelfTestId),
+}
+
+/// Main-to-IMU command signal.
+///
+/// The main loop publishes an [`ImuCommand`] here when a UI screen
+/// returns an action that needs IMU hardware access (e.g. tapping a
+/// self-test card returns `Action::RunSelfTest(id)`, the main loop
+/// routes it here). The IMU task listens for it as one arm of its
+/// awake-branch select.
+///
+/// Same single-consumer caveat as [`SLEEP_SIGNAL`] - only the IMU
+/// task should call `wait()` on this.
+pub static IMU_COMMAND: Signal<CriticalSectionRawMutex, ImuCommand> = Signal::new();
 
 /// Type alias for the shared I2C bus, protected by an async mutex.
 ///

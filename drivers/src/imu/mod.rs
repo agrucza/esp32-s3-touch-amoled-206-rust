@@ -124,6 +124,21 @@ impl Qmi8658 {
         self.write_register(i2c, registers::CTRL1,
             registers::ctrl1::SPI_BIG_ENDIAN | registers::ctrl1::AUTO_INCREMENT)?;
 
+        // CTRL8 bit 7 = 1: route CTRL9 command handshake through
+        // STATUSINT.bit7 instead of INT1. Without this, every CTRL9
+        // command (soft reset, gyro bias, WRITE_WOM_SETTING, etc.)
+        // uses INT1 as part of the handshake protocol. exec_ctrl9
+        // already polls STATUSINT.bit7, so this lines up what the
+        // chip does with what the driver polls.
+        //
+        // Note: bit 6 (route motion-detection events to INT1) was
+        // tried empirically as a WoM fix and made no difference -
+        // on this silicon/board, the chip sets STATUS1.WOM but
+        // never drives INT1 for WoM events regardless of config.
+        // WoM wake is handled by polling STATUS1 in the task.
+        self.write_register(i2c, registers::CTRL8,
+            registers::ctrl8::CTRL9_HANDSHAKE_STATUSINT)?;
+
         // CTRL2: accelerometer full-scale and ODR (bit 7 = 0 = self-test off).
         let ctrl2 = (config.accel_scale.ctrl2_bits() << registers::ctrl2::FS_SHIFT)
                   | config.accel_odr.bits();
@@ -374,6 +389,138 @@ impl Qmi8658 {
         let reg = self.read_register(i2c, registers::CTRL3)?;
         let val = if enable { reg | registers::ctrl3::SELF_TEST } else { reg & !registers::ctrl3::SELF_TEST };
         self.write_register(i2c, registers::CTRL3, val)
+    }
+
+    /// Run the accelerometer self-test per datasheet section 11.1.
+    ///
+    /// Procedure:
+    /// 1. Disable all sensors (CTRL7 = 0x00).
+    /// 2. Enable accel self-test (CTRL2.bit7 = 1). The chip forces
+    ///    ±16 g full-scale internally regardless of the aFS field.
+    /// 3. Wait for the chip to drive INT2 high. INT2 is not wired on
+    ///    this board, but `STATUSINT.bit0` (AVAIL) mirrors INT2 when
+    ///    `syncSmpl` is 0 (our default), so we poll it over I2C.
+    /// 4. Clear the self-test bit.
+    /// 5. Wait for `STATUSINT.bit0` to drop back to 0.
+    /// 6. Burst-read `dVX..dVZ` (0x51..0x56). Result format is
+    ///    signed Q5.11 in g (1 LSB = 1/2048 g ≈ 0.488 mg).
+    ///
+    /// On return, the caller must re-run [`init`] to restore the
+    /// normal accel+gyro configuration - self-test leaves CTRL7 = 0
+    /// and CTRL2 in a partially-modified state.
+    ///
+    /// The poll loops are busy waits bounded by `max_poll_iters`
+    /// iterations. At 400 kHz I2C each read takes ~100 μs, so 5000
+    /// iterations ≈ 500 ms total budget, comfortably above the
+    /// worst-case self-test duration.
+    ///
+    /// [`init`]: Qmi8658::init
+    pub fn run_accel_self_test<I2C, E>(&self, i2c: &mut I2C) -> Result<AccelSelfTestResult, Error<E>>
+    where
+        I2C: I2cTrait<Error = E>,
+    {
+        const MAX_POLL_ITERS: u16 = 5000;
+
+        // 1. Disable sensors.
+        self.write_register(i2c, registers::CTRL7, 0x00)?;
+
+        // 2. Set aST, keep current ODR nibble. (Self-test forces 16g
+        //    full-scale internally; the aFS bits are ignored by the
+        //    test, so we don't need to touch them here.)
+        let ctrl2 = self.read_register(i2c, registers::CTRL2)?;
+        self.write_register(i2c, registers::CTRL2, ctrl2 | registers::ctrl2::SELF_TEST)?;
+
+        // 3. Wait for STATUSINT.bit0 = 1 (INT2 mirror, self-test done).
+        self.wait_statusint_avail(i2c, true, MAX_POLL_ITERS)?;
+
+        // 4. Clear aST.
+        self.write_register(i2c, registers::CTRL2, ctrl2 & !registers::ctrl2::SELF_TEST)?;
+
+        // 5. Wait for STATUSINT.bit0 = 0 (ack).
+        self.wait_statusint_avail(i2c, false, MAX_POLL_ITERS)?;
+
+        // 6. Read dVX..dVZ (0x51..0x56) in one burst.
+        let mut buf = [0u8; 6];
+        i2c.write_read(self.addr, &[registers::DVX_L], &mut buf)
+            .map_err(Error::I2c)?;
+        let x_raw = i16::from_le_bytes([buf[0], buf[1]]);
+        let y_raw = i16::from_le_bytes([buf[2], buf[3]]);
+        let z_raw = i16::from_le_bytes([buf[4], buf[5]]);
+
+        // Q5.11 fixed-point in g. 1 LSB = 1/2048 g. Convert to mg.
+        let to_mg = |raw: i16| -> i32 { (raw as i32 * 1000) / 2048 };
+        let x_mg = to_mg(x_raw);
+        let y_mg = to_mg(y_raw);
+        let z_mg = to_mg(z_raw);
+
+        let passed = x_mg.abs() > 200 && y_mg.abs() > 200 && z_mg.abs() > 200;
+
+        Ok(AccelSelfTestResult { x_mg, y_mg, z_mg, passed })
+    }
+
+    /// Run the gyroscope self-test per datasheet section 11.2.
+    ///
+    /// Same procedure as [`run_accel_self_test`], but flips CTRL3.bit7
+    /// instead of CTRL2.bit7. The chip forces ±2048 dps full-scale
+    /// and 1 kHz ODR internally regardless of CTRL3 settings. The
+    /// result format is signed Q12.4 in dps (1 LSB = 1/16 dps).
+    ///
+    /// [`run_accel_self_test`]: Qmi8658::run_accel_self_test
+    pub fn run_gyro_self_test<I2C, E>(&self, i2c: &mut I2C) -> Result<GyroSelfTestResult, Error<E>>
+    where
+        I2C: I2cTrait<Error = E>,
+    {
+        const MAX_POLL_ITERS: u16 = 5000;
+
+        self.write_register(i2c, registers::CTRL7, 0x00)?;
+
+        let ctrl3 = self.read_register(i2c, registers::CTRL3)?;
+        self.write_register(i2c, registers::CTRL3, ctrl3 | registers::ctrl3::SELF_TEST)?;
+
+        self.wait_statusint_avail(i2c, true, MAX_POLL_ITERS)?;
+
+        self.write_register(i2c, registers::CTRL3, ctrl3 & !registers::ctrl3::SELF_TEST)?;
+
+        self.wait_statusint_avail(i2c, false, MAX_POLL_ITERS)?;
+
+        let mut buf = [0u8; 6];
+        i2c.write_read(self.addr, &[registers::DVX_L], &mut buf)
+            .map_err(Error::I2c)?;
+        let x_raw = i16::from_le_bytes([buf[0], buf[1]]);
+        let y_raw = i16::from_le_bytes([buf[2], buf[3]]);
+        let z_raw = i16::from_le_bytes([buf[4], buf[5]]);
+
+        // Q12.4 fixed-point in dps. 1 LSB = 1/16 dps. Integer dps.
+        let to_dps = |raw: i16| -> i32 { raw as i32 / 16 };
+        let x_dps = to_dps(x_raw);
+        let y_dps = to_dps(y_raw);
+        let z_dps = to_dps(z_raw);
+
+        let passed = x_dps.abs() > 300 && y_dps.abs() > 300 && z_dps.abs() > 300;
+
+        Ok(GyroSelfTestResult { x_dps, y_dps, z_dps, passed })
+    }
+
+    /// Poll `STATUSINT.bit0` until it matches `target`, or the retry
+    /// budget is exhausted. Used by the self-test procedures in place
+    /// of waiting on the physical INT2 pin, which isn't wired.
+    fn wait_statusint_avail<I2C, E>(
+        &self,
+        i2c: &mut I2C,
+        target: bool,
+        max_iters: u16,
+    ) -> Result<(), Error<E>>
+    where
+        I2C: I2cTrait<Error = E>,
+    {
+        for _ in 0..max_iters {
+            let s = self.read_register(i2c, registers::STATUSINT)?;
+            let avail = (s & registers::statusint::AVAIL) != 0;
+            if avail == target {
+                return Ok(());
+            }
+        }
+        Err(Error::Timeout)
     }
 
     // ---- Sensor enable/disable ----------------------------------------------------
@@ -791,12 +938,16 @@ impl Qmi8658 {
 
     /// Execute a CTRL9 command and wait for completion.
     ///
-    /// Protocol per QMI8658C Rev 0.6 datasheet:
+    /// Protocol:
     /// 1. Write command to CTRL9 (0x0A)
-    /// 2. Wait for STATUSINT.bit7 (CmdDone) = 1 (actual silicon; the
-    ///    Rev 0.6 docs specify STATUS1.bit0 but the C silicon rev
-    ///    0x7C+ uses STATUSINT.bit7 instead)
+    /// 2. Wait for STATUSINT.bit7 (CmdDone) = 1
     /// 3. Write NOP (0x00) to CTRL9 to acknowledge completion
+    ///
+    /// Rev 0.6 of the datasheet mislabelled step 2 as STATUS1.bit0 -
+    /// that's only true when CTRL8.bit7 = 0, which also routes the
+    /// handshake through INT1. `init()` sets CTRL8.bit7 = 1 so the
+    /// handshake goes through STATUSINT instead and INT1 stays free
+    /// for WoM. Rev 0.9 documents both options in the CTRL8 table.
     fn exec_ctrl9<I2C, E>(&self, i2c: &mut I2C, cmd: u8) -> Result<(), Error<E>>
     where
         I2C: I2cTrait<Error = E>,

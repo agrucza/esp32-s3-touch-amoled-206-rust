@@ -1,9 +1,7 @@
 pub mod audio;
 pub mod bus;
 pub mod display;
-pub mod input;
 pub mod manager;
 pub mod power;
-pub mod sensors;
 pub mod storage;
 pub mod tasks;

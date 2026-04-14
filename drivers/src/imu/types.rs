@@ -348,3 +348,30 @@ impl ImuData {
         (self.temp_raw >> 8) as i8
     }
 }
+
+// ---- Self-test results ----------------------------------------------------------
+
+/// Accelerometer self-test result per datasheet section 11.1.
+///
+/// Values are in milli-g. A functional sensor produces an
+/// absolute response greater than 200 mg on every axis.
+#[derive(Debug, Clone, Copy)]
+pub struct AccelSelfTestResult {
+    pub x_mg: i32,
+    pub y_mg: i32,
+    pub z_mg: i32,
+    pub passed: bool,
+}
+
+/// Gyroscope self-test result per datasheet section 11.2.
+///
+/// Values are in degrees per second. A functional sensor
+/// produces an absolute response greater than 300 dps on
+/// every axis.
+#[derive(Debug, Clone, Copy)]
+pub struct GyroSelfTestResult {
+    pub x_dps: i32,
+    pub y_dps: i32,
+    pub z_dps: i32,
+    pub passed: bool,
+}
