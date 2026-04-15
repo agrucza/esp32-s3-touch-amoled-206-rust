@@ -44,6 +44,7 @@ pub const HEADER_ICON_HIT_WIDTH: i32 = 56;
 
 /// Which icon to draw on the left side of a header bar.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum HeaderIcon {
     /// No icon. Title-only header.
     None,

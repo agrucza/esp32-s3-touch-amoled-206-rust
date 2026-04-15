@@ -8,13 +8,14 @@
 //! device and is only used during initialisation.
 //!
 //! Register map (FocalTech FT3x family):
-//!   0x02  TD_STATUS - touch point count [3:0]
-//!   0x03  P1_XH     - event[7:6], X[11:8][3:0]
-//!   0x04  P1_XL     - X[7:0]
-//!   0x05  P1_YH     - touch ID[7:4], Y[11:8][3:0]
-//!   0x06  P1_YL     - Y[7:0]
-//!   0xA3  CHIP_ID   - 0x54 for FT3168
-//!   0xA6  FW_VER    - firmware version
+//!   0x02  TD_STATUS  - touch point count [3:0]
+//!   0x03  P1_XH      - event[7:6], X[11:8][3:0]
+//!   0x04  P1_XL      - X[7:0]
+//!   0x05  P1_YH      - touch ID[7:4], Y[11:8][3:0]
+//!   0x06  P1_YL      - Y[7:0]
+//!   0xA3  CHIP_ID    - 0x54 for FT3168
+//!   0xA5  POWER_MODE - Active/Monitor/Standby/Hibernate selector
+//!   0xA6  FW_VER     - firmware version
 
 use embedded_hal::digital::OutputPin;
 use embedded_hal::i2c::I2c as I2cTrait;
@@ -25,7 +26,49 @@ pub const ADDR: u8 = 0x38;
 const REG_TD_STATUS: u8 = 0x02;
 const REG_P1_XH:     u8 = 0x03;
 const REG_CHIP_ID:   u8 = 0xA3;
+const REG_POWER_MODE: u8 = 0xA5;
 const REG_FW_VER:    u8 = 0xA6;
+
+/// Power / operating mode of the FT3168. Written to
+/// [`REG_POWER_MODE`] (0xA5) via [`FT3168::set_power_mode`].
+///
+/// Per the FT3168 datasheet section 2.2 (which describes the
+/// modes at a high level but does not document the register) and
+/// FocalTech's own reference driver for the FT3x68 family, which
+/// Waveshare ships for this board and from which these register
+/// values were lifted:
+///
+/// * [`Active`] - full scan at the configured rate (default
+///   60 fps). Reports coordinates. Typical current draw 1.5 mA
+///   per the datasheet's DC characteristics table.
+/// * [`Monitor`] - lower programmable scan rate; the chip only
+///   looks for "is there a touch?" and does not calculate
+///   coordinates. On touch detection it auto-switches back to
+///   Active and the host sees a normal touch event. Typical
+///   current draw 30 µA. Ideal for wake-on-touch.
+/// * [`Standby`] - chip not scanning. Intermediate between
+///   Monitor and Hibernate. Not described in the public datasheet
+///   but present in the FocalTech reference driver.
+/// * [`Hibernate`] - deepest sleep. Analog circuits off, MCU
+///   stopped. Only `RESETB` or a host-driven wake signal can
+///   bring the chip back. Typical current draw 10 µA.
+///
+/// Register values come from the reference driver at
+/// `Arduino_DriveBus/src/touch_chip/Arduino_FT3x68.cpp`
+/// (Waveshare ESP32-S3-Touch-AMOLED-2.06 BSP).
+///
+/// [`Active`]: PowerMode::Active
+/// [`Monitor`]: PowerMode::Monitor
+/// [`Standby`]: PowerMode::Standby
+/// [`Hibernate`]: PowerMode::Hibernate
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PowerMode {
+    Active    = 0x00,
+    Monitor   = 0x01,
+    Standby   = 0x02,
+    Hibernate = 0x03,
+}
 
 /// Touch event returned by [`FT3168::read`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -93,6 +136,23 @@ impl<RST: OutputPin> FT3168<RST> {
     /// [`read`]: FT3168::read
     pub fn is_pressed(&self) -> bool {
         self.was_pressed
+    }
+
+    /// Write the power / operating mode register (0xA5).
+    ///
+    /// See [`PowerMode`] for the available modes and their power /
+    /// wake characteristics. The caller is responsible for any
+    /// follow-up sequencing: Monitor mode auto-wakes on touch and
+    /// needs nothing extra, but Standby / Hibernate only come back
+    /// on RESETB or a host-side wake signal, and after a Hibernate
+    /// exit the chip needs to be re-initialised as at boot.
+    ///
+    /// Returns `Err(())` on I²C failure.
+    pub fn set_power_mode<I2C, E>(&self, i2c: &mut I2C, mode: PowerMode) -> Result<(), ()>
+    where
+        I2C: I2cTrait<Error = E>,
+    {
+        i2c.write(ADDR, &[REG_POWER_MODE, mode as u8]).map_err(|_| ())
     }
 
     /// Read the current touch state.

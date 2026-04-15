@@ -217,18 +217,14 @@ pub fn battery_icon<D: DrawTarget<Color = Rgb565>>(
 /// curve, used as a system-wide low-battery warning overlay: amber at
 /// 10-19%, red below 10%. No frame at 20% or above.
 ///
-/// Important: the frame is *inset* from the framebuffer edges so its
-/// corner arc stays well inside the bezel. We can't trace the bezel
-/// edge directly because the measured `CORNER_R` is approximate -
-/// drawing at the exact bezel radius leaves the corner pixels right
-/// at (or just outside) the visible region, where they get clipped.
-///
-/// By using `(INSET, INSET)` as the rect origin and `CORNER_R - INSET`
-/// as the arc radius, the frame's arc center lands at `(CORNER_R,
-/// CORNER_R)` - the same center as the bezel arc - and the frame arc
-/// runs exactly `INSET` px inside the bezel arc at every point. As
-/// long as the bezel is at least `INSET` px more conservative than
-/// our radius assumption, the frame is fully visible.
+/// Geometry is tuned by eye against the actual visible bezel rather
+/// than `theme::CORNER_R` (which is a conservative *content-safe*
+/// inset, not the real bezel arc - using it produced a frame that sat
+/// well inside the bezel with too-small corners). `BEZEL_ARC_R` is
+/// the empirical bezel corner radius; `INSET` is how far inside the
+/// bezel the frame sits. The arc center lands at
+/// `(BEZEL_ARC_R, BEZEL_ARC_R)`, matching the bezel arc, so the frame
+/// runs exactly `INSET` px inside the bezel at every point.
 pub fn battery_warning_frame<D: DrawTarget<Color = Rgb565>>(
     display: &mut D,
     percent: u8,
@@ -237,10 +233,14 @@ pub fn battery_warning_frame<D: DrawTarget<Color = Rgb565>>(
     if percent >= 20 { return; }
     let color = if percent < 10 { theme::RED } else { theme::AMBER };
 
-    const INSET: i32 = 12;
+    /// Empirical bezel corner radius - tuned by eye against the
+    /// actual visible bezel curve, not `theme::CORNER_R`.
+    const BEZEL_ARC_R: i32 = 116;
+    /// Pixels between the bezel and the frame stroke.
+    const INSET: i32 = 0;
     let w = theme::SCREEN_W as i32 - INSET * 2;
     let h = theme::SCREEN_H as i32 - INSET * 2;
-    let radius = (theme::CORNER_R - INSET) as u32;
+    let radius = (BEZEL_ARC_R - INSET) as u32;
 
     let style = PrimitiveStyleBuilder::new()
         .stroke_color(color)

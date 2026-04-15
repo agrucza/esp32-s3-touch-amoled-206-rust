@@ -60,22 +60,52 @@
 //! ```
 
 use crate::events::SystemEvent;
-use crate::system::bus::{EVENTS, SharedI2c};
+use crate::system::bus::{EVENTS, SLEEP_WATCH, SharedI2c, SleepState};
 use drivers::pmu::{
     ChargeVoltage, ChargerPhase, CurrentDirection, InputCurrentLimit, InterruptSource, Pmu,
 };
+use embassy_futures::select::{select, Either};
 use embassy_time::{Duration, Timer};
 use embedded_hal::i2c::I2c as I2cTrait;
 
-/// Power task: poll the AXP2101 every [`POLL_INTERVAL_MS`], diff
-/// against the previous snapshot, and emit specific change events
-/// (button press, VBUS plug/unplug, charger phase, battery %).
+/// Power task: poll the AXP2101 on a cadence that depends on the
+/// current sleep state, diff against the previous snapshot, and
+/// emit specific change events (button press, VBUS plug/unplug,
+/// charger phase, battery %).
+///
+/// Cadence:
+/// * Awake: [`POLL_INTERVAL_MS`] - fast enough that battery
+///   percent and charger transitions feel responsive on screen.
+/// * Sleeping: [`SLEEP_POLL_INTERVAL_MS`] - the display is off so
+///   we don't need sub-second freshness on any field; we just
+///   need to keep button-interrupt handling alive. Most of the
+///   PMU fields are handled through the AXP2101's own IRQ path
+///   rather than our polling anyway.
 #[embassy_executor::task]
 pub async fn power_task(bus: &'static SharedI2c, mut state: PowerTaskState) {
+    let mut sleep_rx = SLEEP_WATCH
+        .receiver()
+        .expect("Power: no SLEEP_WATCH receiver slot available");
+
     let mut prev = PowerData::default();
     let mut first = true;
+    let mut interval_ms = POLL_INTERVAL_MS;
+
     loop {
-        Timer::after(Duration::from_millis(POLL_INTERVAL_MS)).await;
+        match select(
+            Timer::after(Duration::from_millis(interval_ms)),
+            sleep_rx.changed(),
+        ).await {
+            Either::Second(new_state) => {
+                interval_ms = match new_state {
+                    SleepState::Sleeping => SLEEP_POLL_INTERVAL_MS,
+                    SleepState::Awake => POLL_INTERVAL_MS,
+                };
+                log::info!("Power: poll interval -> {} ms", interval_ms);
+                continue;
+            }
+            Either::First(_) => {}
+        }
 
         let (fresh, events) = {
             let mut i2c = bus.lock().await;
@@ -124,6 +154,16 @@ pub async fn power_task(bus: &'static SharedI2c, mut state: PowerTaskState) {
 /// Polling interval for the PMU task in milliseconds.
 pub const POLL_INTERVAL_MS: u64 = 500;
 
+/// Polling interval for the PMU task while the system is sleeping.
+/// The display is off, no screens are rendering battery/charger
+/// values, and button + VBUS events are surfaced via the PMU's IRQ
+/// path rather than this polling loop - so there's no reason to
+/// keep hitting the bus at the awake cadence. 5 s is a compromise
+/// between "low enough wake-up rate to actually save power" and
+/// "still timely enough to catch slow-drift status changes on the
+/// first poll after waking up naturally."
+pub const SLEEP_POLL_INTERVAL_MS: u64 = 5_000;
+
 /// Complete power / battery / charger state read from the AXP2101.
 ///
 /// All status-register bits are flattened into individual fields
@@ -133,6 +173,7 @@ pub const POLL_INTERVAL_MS: u64 = 500;
 /// their inactive state when the read fails (screens treat that
 /// as "nothing is happening").
 #[derive(Debug, Clone, Copy, Default)]
+#[allow(dead_code)]
 pub struct PowerData {
     // --- Battery ---
     pub battery_percent: Option<u8>,
@@ -216,11 +257,13 @@ impl PowerTaskState {
     }
 
     /// Read battery percentage for the render snapshot.
+    #[allow(dead_code)]
     pub fn battery_percent(&self, i2c: &mut impl I2cTrait) -> Option<u8> {
         self.pmu.battery_percent(i2c).ok()
     }
 
     /// Read battery voltage for the render snapshot.
+    #[allow(dead_code)]
     pub fn battery_voltage_mv(&self, i2c: &mut impl I2cTrait) -> Option<u16> {
         self.pmu.battery_voltage_mv(i2c).ok()
     }

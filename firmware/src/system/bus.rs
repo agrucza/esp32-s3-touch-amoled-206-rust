@@ -7,10 +7,12 @@
 //!     this channel; the main loop drains it.
 //!   * [`I2C_BUS`] - Shared I2C bus protected by an async mutex.
 //!     Every task that needs I2C locks this before accessing it.
-//!   * [`SLEEP_SIGNAL`] - Signal that broadcasts the current sleep
-//!     state. Tasks can `.wait()` on it to react to sleep/wake
-//!     transitions (e.g. the IMU task switches into WoM mode on
-//!     entering sleep).
+//!   * [`SLEEP_WATCH`] - Watch that broadcasts the current sleep
+//!     state. Tasks subscribe once at startup and await `changed()`
+//!     in their main loops to react to sleep/wake transitions
+//!     (IMU swaps between snapshot polling and WoM, touch flips
+//!     between Active and Monitor power modes, the power task
+//!     stretches its PMU poll cadence).
 //!
 //! Everything here is initialised in `main()` and then referenced
 //! by tasks via `&'static` references, so lifetimes work out for
@@ -22,6 +24,7 @@ use embassy_sync::{
     channel::Channel,
     mutex::Mutex,
     signal::Signal,
+    watch::Watch,
 };
 use esp_hal::{i2c::master::I2c, Blocking};
 use static_cell::StaticCell;
@@ -49,20 +52,30 @@ pub enum SleepState {
     Sleeping,
 }
 
-/// Broadcast signal for sleep state changes.
+/// Maximum number of tasks that can subscribe to [`SLEEP_WATCH`] at
+/// once. Bump this when adding a new subscriber beyond the current
+/// three (IMU, touch, power). Each subscriber consumes one slot
+/// whether or not it's currently parked on `changed()`.
+pub const SLEEP_WATCH_SUBSCRIBERS: usize = 4;
+
+/// Broadcast of the current system sleep state.
 ///
-/// Main publishes the new state via `SLEEP_SIGNAL.signal(state)`
-/// when entering/exiting sleep. Tasks that care can
-/// `SLEEP_SIGNAL.wait().await` to react.
+/// Main publishes transitions via
+/// `SLEEP_WATCH.sender().send(state)` when entering or exiting
+/// sleep. Any task that needs to react acquires a receiver once
+/// at task startup (`SLEEP_WATCH.receiver().unwrap()`) and awaits
+/// `rx.changed()` inside its main loop's select.
 ///
-/// **Single-consumer limit**: `Signal::wait()` consumes the value,
-/// so only one task can subscribe. Today that's the IMU task.
-/// Before adding a second subscriber (touch monitor mode, RTC
-/// HMI gating, stretched power poll, ...), swap this for an
-/// `embassy_sync::pubsub::PubSubChannel` or split into one signal
-/// per task, otherwise the IMU will silently stop getting wake
-/// transitions.
-pub static SLEEP_SIGNAL: Signal<CriticalSectionRawMutex, SleepState> = Signal::new();
+/// The `Watch` primitive fans out the latest value to multiple
+/// independent receivers, each tracking its own "last seen" id -
+/// exactly what's needed for sleep state broadcast without the
+/// single-consumer limitation of the old `Signal`-based design.
+/// Current subscribers: IMU task (enters WoM mode on Sleeping,
+/// restores normal config on Awake), touch task (switches
+/// FT3168 to Monitor mode / back to Active), power task (slows
+/// its PMU poll cadence while sleeping).
+pub static SLEEP_WATCH: Watch<CriticalSectionRawMutex, SleepState, SLEEP_WATCH_SUBSCRIBERS> =
+    Watch::new();
 
 /// Command sent from the main loop to the IMU task.
 ///
@@ -89,8 +102,7 @@ pub enum ImuCommand {
 /// routes it here). The IMU task listens for it as one arm of its
 /// awake-branch select.
 ///
-/// Same single-consumer caveat as [`SLEEP_SIGNAL`] - only the IMU
-/// task should call `wait()` on this.
+/// Single-consumer: only the IMU task should call `wait()` on this.
 pub static IMU_COMMAND: Signal<CriticalSectionRawMutex, ImuCommand> = Signal::new();
 
 /// Type alias for the shared I2C bus, protected by an async mutex.

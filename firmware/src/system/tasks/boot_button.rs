@@ -49,6 +49,7 @@ pub async fn boot_button_task(mut state: BootButtonTaskState<'static>) {
 
 pub struct BootButtonTaskState<'d> {
     pin: Input<'d>,
+    #[allow(dead_code)]
     prev_low: bool,
 }
 
@@ -59,6 +60,7 @@ impl<'d> BootButtonTaskState<'d> {
 
     /// Synchronous edge-detection poll. Intended for tick-time use
     /// until Phase 4 moves to a task-based wait.
+    #[allow(dead_code)]
     pub fn poll(&mut self, events: &mut heapless::Vec<SystemEvent, 8>) {
         let now = self.pin.is_low();
         if now && !self.prev_low {

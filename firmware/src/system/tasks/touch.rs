@@ -34,32 +34,91 @@
 //! ```
 
 use crate::events::{SwipeDir, SwipeRegion, SystemEvent};
-use crate::system::bus::{EVENTS, SharedI2c};
+use crate::system::bus::{EVENTS, SLEEP_WATCH, SharedI2c, SleepState};
 use crate::ui::theme::{EDGE_GESTURE_ZONE, SCREEN_H, SCREEN_W};
-use drivers::touch::{FT3168, TouchEvent};
+use drivers::touch::{FT3168, PowerMode, TouchEvent};
+use embassy_futures::select::{select, Either};
 use embassy_time::{Duration, Timer};
 use embedded_hal::i2c::I2c as I2cTrait;
 use esp_hal::gpio::{Input, Output};
 
 /// Touch task: interrupt-driven outer loop with an inner drag
-/// poll at ~120 Hz while a finger is down.
+/// poll at ~120 Hz while a finger is down. Also subscribes to
+/// `SLEEP_WATCH` so it can flip the FT3168 between Active mode
+/// (full scan, reports coordinates) and Monitor mode (lower
+/// scan rate, auto-wake on touch) as the system sleeps and wakes.
+///
+/// Per the FT3168 datasheet DC characteristics, that transition
+/// drops the chip's typical current draw from ~1.5 mA to ~30 uA
+/// while still letting a touch wake the system: in Monitor mode
+/// the chip auto-switches itself back to Active on touch and
+/// drives INT# low, which lands here the same way a normal
+/// touch does, with the first touch event also serving as the
+/// wake trigger on the main loop.
 #[embassy_executor::task]
 pub async fn touch_task(bus: &'static SharedI2c, mut state: TouchTaskState<'static>) {
+    let mut sleep_rx = SLEEP_WATCH
+        .receiver()
+        .expect("Touch: no SLEEP_WATCH receiver slot available");
+
     loop {
-        state.wait_for_int().await;
-        loop {
-            let mut events: heapless::Vec<SystemEvent, 8> = heapless::Vec::new();
-            {
-                let mut i2c = bus.lock().await;
-                state.read_events(&mut *i2c, &mut events);
+        match select(state.wait_for_int(), sleep_rx.changed()).await {
+            Either::First(_) => {
+                // Process the touch that just fired INT#, plus any
+                // follow-up drag samples while the finger stays down.
+                loop {
+                    let mut events: heapless::Vec<SystemEvent, 8> = heapless::Vec::new();
+                    {
+                        let mut i2c = bus.lock().await;
+                        state.read_events(&mut *i2c, &mut events);
+                    }
+                    for event in events {
+                        EVENTS.send(event).await;
+                    }
+                    if !state.is_touching() {
+                        break;
+                    }
+                    Timer::after(Duration::from_millis(8)).await;
+                }
             }
-            for event in events {
-                EVENTS.send(event).await;
+            Either::Second(new_state) => {
+                // These writes are best-effort hints. The FT3168
+                // auto-manages its own low-power state: it drops
+                // to an internal Monitor-like mode after extended
+                // idle and auto-switches back to Active on any
+                // touch event. Per datasheet section 2.3, once
+                // the chip is in Monitor or Sleep mode its I2C
+                // state machine rejects host writes after any
+                // other slave on the bus has been accessed, until
+                // the next touch clears it. So either direction
+                // of our transition write (Active <-> Monitor)
+                // can silently NAK, and that's fine - the chip
+                // arrives at the right state on its own via the
+                // touch-driven auto-transition, and normal touch
+                // handling resumes as soon as the user taps.
+                //
+                // We still issue the write because when it does
+                // land it's strictly better than waiting for the
+                // chip's own timeout (~30 s observed) to drop to
+                // the low-power state on sleep, or for a touch
+                // to wake it on wake.
+                let mode = match new_state {
+                    SleepState::Sleeping => PowerMode::Monitor,
+                    SleepState::Awake => PowerMode::Active,
+                };
+                let result = {
+                    let mut i2c = bus.lock().await;
+                    state.touch.set_power_mode(&mut *i2c, mode)
+                };
+                match result {
+                    Ok(()) => log::info!("Touch: power mode -> {:?}", mode),
+                    Err(_) => log::info!(
+                        "Touch: {:?} write deferred (I2C state machine locked), \
+                         chip will self-manage on next touch",
+                        mode,
+                    ),
+                }
             }
-            if !state.is_touching() {
-                break;
-            }
-            Timer::after(Duration::from_millis(8)).await;
         }
     }
 }
@@ -200,6 +259,7 @@ impl<'d> TouchTaskState<'d> {
     /// Current touch point as a `TouchData` snapshot. This is
     /// purely local state (no I2C read) since the task tracks
     /// the current press position in `touch_last`.
+    #[allow(dead_code)]
     pub fn snapshot(&self) -> TouchData {
         match self.touch_last {
             Some((x, y)) => TouchData { x: Some(x), y: Some(y) },

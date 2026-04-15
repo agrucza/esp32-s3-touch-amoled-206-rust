@@ -40,7 +40,7 @@
 //! will clear the WoM bit").
 
 use crate::events::{NUM_SELF_TESTS, SelfTestError, SelfTestId, SelfTestResult, SystemEvent};
-use crate::system::bus::{EVENTS, IMU_COMMAND, ImuCommand, SleepState, SharedI2c, SLEEP_SIGNAL};
+use crate::system::bus::{EVENTS, IMU_COMMAND, ImuCommand, SleepState, SharedI2c, SLEEP_WATCH};
 use drivers::imu::{ImuData, Qmi8658, Config as ImuConfig, Odr, WomConfig, WomInterrupt};
 use embassy_futures::select::{select, select3, Either, Either3};
 use embassy_time::{Duration, Timer};
@@ -58,7 +58,7 @@ const AWAKE_POLL_MS: u64 = 50;
 /// polling wouldn't help during that window anyway.
 const WOM_POLL_MS: u64 = 500;
 
-/// IMU task: two modes driven by [`SLEEP_SIGNAL`]. Awake it
+/// IMU task: two modes driven by [`SLEEP_WATCH`]. Awake it
 /// emits `MotionUpdated` events at 20 Hz; sleeping it arms WoM
 /// and polls STATUS1.WOM at 2 Hz, emitting `WakeOnMotion` on set.
 #[embassy_executor::task]
@@ -71,13 +71,19 @@ pub async fn imu_task(bus: &'static SharedI2c, mut state: ImuTaskState<'static>)
         EVENTS.send(SystemEvent::SelfTestUpdated { id, result }).await;
     }
 
+    // Subscribe once; reused for both the awake and sleeping
+    // branches of the task's main loop.
+    let mut sleep_rx = SLEEP_WATCH
+        .receiver()
+        .expect("IMU: no SLEEP_WATCH receiver slot available");
+
     let mut sleep_state = SleepState::Awake;
     loop {
         match sleep_state {
             SleepState::Awake => {
                 match select3(
                     Timer::after(Duration::from_millis(AWAKE_POLL_MS)),
-                    SLEEP_SIGNAL.wait(),
+                    sleep_rx.changed(),
                     IMU_COMMAND.wait(),
                 ).await {
                     Either3::First(_) => {
@@ -114,7 +120,7 @@ pub async fn imu_task(bus: &'static SharedI2c, mut state: ImuTaskState<'static>)
                         }
                     }
                 };
-                match select(wom_fired, SLEEP_SIGNAL.wait()).await {
+                match select(wom_fired, sleep_rx.changed()).await {
                     Either::First(_) => {
                         EVENTS.send(SystemEvent::WakeOnMotion).await;
                     }
@@ -157,6 +163,7 @@ const WOM_BLANKING_SAMPLES: u8 = 63;
 /// Number of samples averaged for the initial gyro bias at
 /// boot. At 125 Hz that's ~512 ms; the device must be held
 /// still during this window.
+#[allow(dead_code)]
 const GYRO_BIAS_SAMPLES: u8 = 64;
 
 /// Motion state (accel + gyro + IMU temperature) consumed by
@@ -314,6 +321,7 @@ impl<'d> ImuTaskState<'d> {
 
     /// Raw driver-level read. Kept for places that want access
     /// to the un-converted `ImuData` (e.g. calibration routines).
+    #[allow(dead_code)]
     pub fn read(&mut self, i2c: &mut impl I2cTrait) -> Option<ImuData> {
         self.imu.read(i2c).ok()
     }

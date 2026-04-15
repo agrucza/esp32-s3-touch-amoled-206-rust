@@ -146,6 +146,7 @@ pub fn draw_centered_in_rect<D: DrawTarget<Color = Rgb565>>(
 }
 
 /// Draw text top-left aligned at `(x, y)`.
+#[allow(dead_code)]
 pub fn draw_at<D: DrawTarget<Color = Rgb565>>(
     display: &mut D,
     font: &FontRenderer,

@@ -14,6 +14,14 @@ mod sdcard_hal;
 // don't have an audio use case yet. When audio work begins, re-add
 // the audio peripheral tokens in Peripherals, call init_audio in
 // SystemManager::init, and drain the mic DMA in tick.
+//
+// IMPORTANT: the ES8311 / ES7210 analog supply (A3V3) is fed by
+// AXP2101 ALDO1 and is held OFF at boot by `Pmu::init`. Before any
+// codec / ADC I²C access, the audio bring-up path MUST enable
+// ALDO1 via `Pmu::set_audio_rail(true)` and wait ~10 ms for the
+// rail to stabilise. `SystemManager::start_audio` already does
+// this - don't bypass it. See `drivers/src/pmu/mod.rs` module
+// comment and `Pmu::set_audio_rail` docs for the full contract.
 #[allow(dead_code)]
 mod audio_hal;
 mod system;

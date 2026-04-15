@@ -51,6 +51,7 @@ pub const CONTENT_BOTTOM: i32 = (SCREEN_H as i32) - CORNER_R;
 pub const CONTENT_H: i32 = CONTENT_BOTTOM - CONTENT_TOP;
 
 /// Side margin for content area.
+#[allow(dead_code)]
 pub const MARGIN: i32 = 8;
 /// Default corner radius for rounded panels and cards.
 pub const CARD_RADIUS: u32 = 16;

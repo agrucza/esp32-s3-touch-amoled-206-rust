@@ -32,6 +32,21 @@ pub struct AudioSystem<'d> {
 ///
 /// The `dma_circular_buffers!` macro must be called in the caller's scope and
 /// the resulting buffers/descriptors passed here.
+///
+/// # Power rail prerequisite
+///
+/// The ES8311 and ES7210 analog supplies live on AXP2101 ALDO1
+/// (net name `A3V3`), which is held OFF at boot by `Pmu::init` to
+/// save idle current while audio is dormant. **Before calling this
+/// function the caller MUST enable ALDO1 via
+/// `drivers::pmu::Pmu::set_audio_rail(i2c, true)` and wait at
+/// least 10 ms for the rail to stabilise.** Skipping that step will
+/// cause the first codec / ADC I²C transactions here to silently
+/// NAK or corrupt register writes.
+///
+/// `SystemManager::start_audio` already handles the rail-enable +
+/// settle-delay sequence and then calls this function; prefer that
+/// entry point to direct calls.
 pub async fn init_audio<'d>(
     i2s: impl esp_hal::i2s::master::Instance + 'd,
     dma_ch: impl DmaChannelFor<AnyI2s<'d>>,

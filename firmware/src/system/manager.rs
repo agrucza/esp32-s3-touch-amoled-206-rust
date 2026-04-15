@@ -5,7 +5,7 @@ use crate::display_hal::{self, WIDTH, HEIGHT};
 use crate::events::{SelfTestId, SwipeDir, SwipeRegion, SystemEvent};
 use crate::sdcard_hal::EspVolumeManager;
 use crate::system::audio::AudioSystem;
-use crate::system::bus::{EVENTS, IMU_COMMAND, ImuCommand, SLEEP_SIGNAL, SleepState};
+use crate::system::bus::{EVENTS, IMU_COMMAND, ImuCommand, SLEEP_WATCH, SleepState};
 use crate::system::display::{Display, DisplayState};
 use crate::system::power::PowerControls;
 use crate::system::tasks::boot_button::BootButtonTaskState;
@@ -438,6 +438,29 @@ impl SystemManager<'static> {
             return;
         };
         log::info!("Audio: bringing subsystem online...");
+
+        // Enable the audio analog rail (ALDO1 → A3V3) before any
+        // codec / ADC access. The rail is held off at boot by
+        // `Pmu::init` to save idle current while the audio stack
+        // is dormant, so it MUST be turned on here before
+        // `init_audio` touches the ES8311 or ES7210 over I²C.
+        // Leaving this step out will manifest as I²C NAKs or
+        // silent corruption inside the codec / ADC init routines,
+        // so this block is deliberately part of `start_audio`
+        // rather than a separate method the caller might forget
+        // to invoke. See `Pmu::set_audio_rail` for the full
+        // audio-init contract.
+        {
+            let mut i2c = self.i2c_bus.lock().await;
+            let pmu = drivers::pmu::Pmu::new(drivers::pmu::Config::default());
+            match pmu.set_audio_rail(&mut *i2c, true) {
+                Ok(()) => log::info!("Audio: ALDO1 (A3V3) enabled"),
+                Err(_) => log::warn!("Audio: failed to enable ALDO1 - codec/ADC init will likely fail"),
+            }
+        }
+        // Let the LDO settle before driving I²C to the codec/ADC.
+        Timer::after(Duration::from_millis(10)).await;
+
         let mut i2c = self.i2c_bus.lock().await;
         let (audio, tx_transfer, rx_transfer) = crate::system::audio::init_audio(
             pa.i2s0, pa.dma_ch1,
@@ -471,18 +494,17 @@ impl SystemManager<'static> {
 
     /// Enter low-power sleep. Idempotent.
     ///
-    /// Signals the IMU task (via `SLEEP_SIGNAL`) to switch into
-    /// Wake-on-Motion mode, blanks the display, and sets the
-    /// `sleeping` flag. Peripheral power-down for other
-    /// subsystems (audio, CPU freq, etc.) will hang off this
-    /// method in the future.
+    /// Broadcasts the sleep state on [`SLEEP_WATCH`] so every
+    /// subscriber task can apply its own low-power adjustments
+    /// (IMU -> WoM, touch -> Monitor, power task -> slow poll),
+    /// blanks the display, and sets the `sleeping` flag.
     async fn sleep(&mut self) {
         if self.sleeping {
             return;
         }
         log::info!("system: sleep");
         self.sleeping = true;
-        SLEEP_SIGNAL.signal(SleepState::Sleeping);
+        SLEEP_WATCH.sender().send(SleepState::Sleeping);
         let _ = crate::system::display::transition(
             &mut self.display,
             self.display_state,
@@ -494,10 +516,10 @@ impl SystemManager<'static> {
 
     /// Exit low-power sleep. Idempotent.
     ///
-    /// Signals the IMU task to restore normal mode, turns the
-    /// display back on at full brightness, resets the idle timer,
-    /// and forces a full redraw so the first frame after wake is
-    /// current.
+    /// Broadcasts the awake state so subscriber tasks restore
+    /// their normal config, turns the display back on at full
+    /// brightness, resets the idle timer, and forces a full
+    /// redraw so the first frame after wake is current.
     async fn wake(&mut self) {
         if !self.sleeping {
             return;
@@ -505,7 +527,7 @@ impl SystemManager<'static> {
         log::info!("system: wake");
         self.sleeping = false;
         self.last_activity = Instant::now();
-        SLEEP_SIGNAL.signal(SleepState::Awake);
+        SLEEP_WATCH.sender().send(SleepState::Awake);
         let _ = crate::system::display::transition(
             &mut self.display,
             self.display_state,

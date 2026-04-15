@@ -167,6 +167,7 @@ pub enum SelfTestResult {
 /// Failure modes for a self-test that couldn't complete.
 /// Kept small and `Copy` so `SelfTestResult` stays `Copy`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum SelfTestError {
     /// Test did not signal completion within the retry budget.
     Timeout,

@@ -123,7 +123,31 @@ pub const REG_VSYS_PWROFF: u8 = 0x24;
 pub const REG_PWROK_CFG: u8 = 0x25;
 
 /// Sleep and wakeup control (REG 26h).
-/// Bit 0 = sleep enable, bit 1 = wakeup enable, bit 4 = IRQ-pin wakeup.
+///
+/// Per datasheet section 6.5.4.4:
+///
+///   * bit 0 - Prepare sleep: host writes 1 to snapshot the
+///     current REG80H/REG90H/REG91H rail state so the wake
+///     sequence can restore it. Step 1 of the sleep sequence.
+///   * bit 1 - Software wakeup: host writes 1 to trigger a
+///     wake from sleep. Only useful when the host is still
+///     powered (i.e. the ESP32 is in a light sleep or fully
+///     awake while the PMU's own low-power state is entered).
+///   * bit 2 - Wake voltage source: selects whether rails are
+///     brought back to their *default* values or to the
+///     previously snapshotted values on wake.
+///   * bit 4 - IRQ pin wake enable: when 1, a low level on the
+///     PMU IRQ pin held for > 16 ms wakes the chip from sleep.
+///
+/// Step 2 of the sleep sequence (disabling individual rails)
+/// is performed via the DCDC and LDO enable registers:
+///
+///   * [`REG_DCDC_EN`] / [`dcdc_en`]  - DCDC1..DCDC4 bits
+///   * [`REG_LDO_EN0`] / [`ldo_en0`]  - ALDO1..BLDO2, CPUSLDO, DLDO1
+///   * [`REG_LDO_EN1`] / [`ldo_en1`]  - DLDO2 bit
+///
+/// Bit-mask constants for all three are defined below so the
+/// host can build the disable mask without raw bit shifts.
 pub const REG_SLEEP_WAKEUP: u8 = 0x26;
 
 /// IRQ / off / on level timing (REG 27h).
@@ -354,7 +378,17 @@ pub const REG_GAUGE_CFG:    u8 = 0xA2;
 pub const REG_BAT_PERCENT:  u8 = 0xA4;
 
 // =============================================================================
-// Convenience: bitmask constants for LDO enable register (REG 90h)
+// Convenience: bitmask constants for DCDC enable register (REG 80h)
+// =============================================================================
+pub mod dcdc_en {
+    pub const DCDC1: u8 = 1 << 0;
+    pub const DCDC2: u8 = 1 << 1;
+    pub const DCDC3: u8 = 1 << 2;
+    pub const DCDC4: u8 = 1 << 3;
+}
+
+// =============================================================================
+// Convenience: bitmask constants for LDO enable register 0 (REG 90h)
 // =============================================================================
 pub mod ldo_en0 {
     pub const ALDO1:   u8 = 1 << 0;
@@ -365,6 +399,13 @@ pub mod ldo_en0 {
     pub const BLDO2:   u8 = 1 << 5;
     pub const CPUSLDO: u8 = 1 << 6;
     pub const DLDO1:   u8 = 1 << 7;
+}
+
+// =============================================================================
+// Convenience: bitmask constants for LDO enable register 1 (REG 91h)
+// =============================================================================
+pub mod ldo_en1 {
+    pub const DLDO2: u8 = 1 << 0;
 }
 
 // =============================================================================

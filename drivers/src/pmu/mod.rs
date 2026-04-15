@@ -8,13 +8,74 @@
 //! reference on each call. This allows the same bus to be shared with the
 //! touch controller, RTC, IMU, and any other I²C peripheral.
 //!
-//! Rail wiring on the ESP32-S3-Touch-AMOLED-2.06 (from schematic):
-//!   ALDO1 → VL1_3.3V  touch controller, IMU, RTC
-//!   ALDO2 → VL2_3.3V  general 3.3 V peripherals
-//!   ALDO3 → VCC3V     general 3.3 V LDO
-//!   ALDO4 → VL3_1.8V  CO5300 AMOLED VDDIO
-//!   BLDO1 → VL_1.2V   CO5300 AMOLED VCORE
-//!   BLDO2 → VL_2.8V   CO5300 AMOLED AVDD
+//! Rail wiring on the ESP32-S3-Touch-AMOLED-2.06.
+//!
+//! Verified against the Waveshare schematic on 2026-04-14 by
+//! reading each peripheral block (ESP32, AXP2101, USB, Motor,
+//! Keys, SD card, QMI8658, PCF85063, AMOLED, Codec, ADC,
+//! PA & Speaker, Mic):
+//!
+//!   DCDC1    → VCC3V3    Master system rail. Powers the ESP32-S3
+//!                        + its SPI flash, the SD card, the
+//!                        QMI8658 IMU, the entire display-plus-
+//!                        touch FPC module (CO5300 display and
+//!                        FT3168 touch are on the same flex; the
+//!                        module has an internal boost that
+//!                        generates the AMOLED panel rails from
+//!                        VCC3V3), the NS4150B speaker amp, and
+//!                        the ES8311 / ES7210 digital supplies
+//!                        (PVDD / DVDD). Effectively every I²C
+//!                        and SPI peripheral on the board. This
+//!                        is the rail the ESP32 runs off of, so
+//!                        **it MUST stay on anywhere the ESP32
+//!                        is expected to keep running**.
+//!   ALDO1    → A3V3      Audio analog supply **plus at least one
+//!                        other consumer we haven't fully traced**.
+//!                        Confirmed loads: ES8311 DAC AVDD (via
+//!                        R29 0Ω) and ES7210 ADC AVDD / VDDA (via
+//!                        R34 0Ω). A 2026-04-14 attempt to hold
+//!                        this rail off at boot (because audio is
+//!                        dormant) made the FT3168 touch controller
+//!                        unresponsive on I²C, which means the
+//!                        touch IC also depends on A3V3 somewhere
+//!                        we didn't see in the AMOLED schematic
+//!                        block. Until that dependency is traced,
+//!                        **ALDO1 must stay on at boot** - leave
+//!                        `enable_all_rails` alone.
+//!                        [`Pmu::set_audio_rail`] still exists as
+//!                        an explicit audio-rail toggle, but today
+//!                        it's effectively "enable only" because
+//!                        disabling the rail also kills touch.
+//!   ALDO2    → signal    Not a power rail to any real load.
+//!                        Drives the display FPC's DSI_PWR_EN
+//!                        enable input via a 10 kΩ series resistor
+//!                        (R10). Effectively a slow GPIO
+//!                        implemented by toggling an LDO.
+//!   ALDO3    → VCC3V     Haptic motor supply. Gated by GPIO18
+//!                        via an MMBT3904 NPN switch - the LDO
+//!                        stays on continuously, current only
+//!                        flows through the motor while GPIO18
+//!                        is driven high.
+//!   RTC-LDO1 → VCC-RTC   PCF85063 VDD (pin 10). Also feeds the
+//!                        10 kΩ pull-up reference (RP5) for the
+//!                        AXP2101's own open-drain IRQ output
+//!                        (AXP_IRQ, pin 38). Because RTC-LDO1 is
+//!                        backup-battery-backed on the chip side
+//!                        it stays alive through any sleep path,
+//!                        so both RTC timekeeping and PMU
+//!                        interrupt signalling continue to work
+//!                        even if DCDC1 is disabled in a future
+//!                        deep-sleep scenario.
+//!
+//! No schematic consumer found for: ALDO4, BLDO1, BLDO2, DCDC2,
+//! DCDC3, DCDC4, CPUSLDO, DLDO1, DLDO2, RTC-LDO2. Earlier versions
+//! of this comment guessed these powered AMOLED VDDIO / VCORE /
+//! AVDD, but the 2026-04-14 schematic trace showed the display is
+//! on VCC3V3 via its internal boost, so those rails are actually
+//! unclaimed. They're still enabled at boot by `enable_all_rails`
+//! because disabling them without PPK2 measurements + another
+//! schematic pass carries more risk than reward; revisit when
+//! idle current matters enough to measure.
 
 pub mod interrupts;
 pub mod power_states;
@@ -87,14 +148,16 @@ impl Pmu {
         Ok(raw)
     }
 
-    /// Initialise the PMU: verify presence, set rail voltages, enable all rails.
+    /// Initialise the PMU: verify presence, set rail voltages,
+    /// enable the boot-time rails.
     ///
-    /// Returns the raw chip ID byte on success. The version can be extracted
-    /// from bits 5:4 of that byte (0=A, 1=B).
+    /// Returns the raw chip ID byte on success. The version can be
+    /// extracted from bits 5:4 of that byte (0=A, 1=B).
     ///
-    /// Call this early in `main`, **before** accessing the display or any other
-    /// peripheral that depends on these power rails. After returning `Ok(...)`,
-    /// wait at least 20 ms for the rails to stabilise.
+    /// Call this early in `main`, **before** accessing the display
+    /// or any other peripheral that depends on these power rails.
+    /// After returning `Ok(...)`, wait at least 20 ms for the rails
+    /// to stabilise.
     pub fn init<I2C, E>(&self, i2c: &mut I2C) -> Result<u8, Error<E>>
     where
         I2C: I2cTrait<Error = E>,
@@ -103,14 +166,14 @@ impl Pmu {
         let chip_id = self.check_device(i2c)?;
 
         // Set all output voltages while LDOs are still disabled.
-        self.set_aldo1_voltage(i2c, 3300)?; // VL1_3.3V - touch, IMU, RTC
-        self.set_aldo2_voltage(i2c, 3300)?; // VL2_3.3V - general 3.3 V
-        self.set_aldo3_voltage(i2c, 3300)?; // VCC3V    - general 3.3 V
-        self.set_aldo4_voltage(i2c, 1800)?; // VL3_1.8V - CO5300 VDDIO
-        self.set_bldo1_voltage(i2c, 1200)?; // VL_1.2V  - CO5300 VCORE
-        self.set_bldo2_voltage(i2c, 2800)?; // VL_2.8V  - CO5300 AVDD
+        self.set_aldo1_voltage(i2c, 3300)?; // A3V3     - touch + audio analog
+        self.set_aldo2_voltage(i2c, 3300)?; // VL2_3.3V - display DSI_PWR_EN enable
+        self.set_aldo3_voltage(i2c, 3300)?; // VCC3V    - haptic motor
+        self.set_aldo4_voltage(i2c, 1800)?; // VL3_1.8V - unclaimed (no consumer found)
+        self.set_bldo1_voltage(i2c, 1200)?; // VL_1.2V  - unclaimed (no consumer found)
+        self.set_bldo2_voltage(i2c, 2800)?; // VL_2.8V  - unclaimed (no consumer found)
 
-        // Enable all six LDOs in one register write.
+        // Enable all six boot-time LDOs in one register write.
         self.enable_all_rails(i2c)?;
 
         // Enable all ADC channels (battery, VBUS, Vsys, die temp, TS)
@@ -227,10 +290,20 @@ impl Pmu {
         self.write_register(i2c, registers::REG_BLDO2_VOLT, Self::mv_to_register(millivolts)?)
     }
 
-    /// Enable ALDO1–ALDO4 and BLDO1–BLDO2 (the six rails used on this board).
+    /// Enable ALDO1-ALDO4 and BLDO1-BLDO2 (the six rails used at
+    /// boot on this board).
     ///
-    /// Writes `ldo_en0::ALDO1 | ALDO2 | ALDO3 | ALDO4 | BLDO1 | BLDO2` = 0x3F
-    /// to REG 90h. CPUSLDO and DLDO1/2 are left off.
+    /// Writes `ALDO1 | ALDO2 | ALDO3 | ALDO4 | BLDO1 | BLDO2`
+    /// (= 0x3F) to REG 90h. CPUSLDO and DLDO1/2 are left off.
+    ///
+    /// NOTE: on 2026-04-14 ALDO1 was briefly removed from this
+    /// mask under the (wrong) assumption that it only powered the
+    /// audio codec + ADC analog supplies. It turned out touch also
+    /// depends on ALDO1 - disabling it at boot made the FT3168
+    /// unresponsive on I²C. ALDO1 must stay on at boot until the
+    /// "what else is on A3V3" question is properly answered with
+    /// a more careful schematic trace. See `set_audio_rail` below
+    /// if you still want to toggle just the audio use of this rail.
     pub fn enable_all_rails<I2C, E>(&self, i2c: &mut I2C) -> Result<(), Error<E>>
     where
         I2C: I2cTrait<Error = E>,
@@ -239,6 +312,49 @@ impl Pmu {
         let mask = ldo_en0::ALDO1 | ldo_en0::ALDO2 | ldo_en0::ALDO3
                  | ldo_en0::ALDO4 | ldo_en0::BLDO1 | ldo_en0::BLDO2;
         self.write_register(i2c, registers::REG_LDO_EN0, mask)
+    }
+
+    /// Enable or disable ALDO1 (net `A3V3`).
+    ///
+    /// ALDO1 is enabled at boot by [`enable_all_rails`] because
+    /// the FT3168 touch controller depends on it. The audio codec
+    /// (ES8311 AVDD) and ADC (ES7210 AVDD / VDDA) also sit on this
+    /// rail, so any future audio bring-up sequence should make
+    /// sure the rail is on before touching those chips over I²C.
+    /// Since the rail is already on after boot, `set_audio_rail`
+    /// is idempotent in practice - calling it with `enable = true`
+    /// just re-asserts the bit via a read-modify-write.
+    ///
+    /// **Passing `false` will also kill touch**, so only use that
+    /// path if you've first confirmed with a proper schematic trace
+    /// that nothing on the board other than the audio chips is on
+    /// A3V3. As of 2026-04-14 that confirmation has NOT been done.
+    ///
+    /// Contract for audio initialisation (still valid for future
+    /// audio wire-up, even though the rail is currently already
+    /// on):
+    ///
+    /// 1. Call `set_audio_rail(i2c, true)`.
+    /// 2. Wait at least **10 ms** for the LDO to settle before
+    ///    touching the codec or ADC over I²C - the ES8311 /
+    ///    ES7210 need a stable analog supply before their I²C
+    ///    state machines will answer reliably.
+    /// 3. Run `system::audio::init_audio(...)`.
+    ///
+    /// Only ALDO1 is touched - all other rail enables in REG 90h
+    /// are preserved via a read-modify-write.
+    pub fn set_audio_rail<I2C, E>(&self, i2c: &mut I2C, enable: bool) -> Result<(), Error<E>>
+    where
+        I2C: I2cTrait<Error = E>,
+    {
+        use registers::ldo_en0;
+        let cur = self.read_register(i2c, registers::REG_LDO_EN0)?;
+        let new = if enable {
+            cur | ldo_en0::ALDO1
+        } else {
+            cur & !ldo_en0::ALDO1
+        };
+        self.write_register(i2c, registers::REG_LDO_EN0, new)
     }
 
     /// Disable all LDOs (REG 90h and REG 91h both cleared).

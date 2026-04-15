@@ -23,6 +23,7 @@ use esp_hal::gpio::Output;
 /// Produced by `PowerTaskState::snapshot`; consumed by the UI
 /// data builder.
 #[derive(Default)]
+#[allow(dead_code)]
 pub struct PowerSnapshot {
     /// Battery state of charge (0-100%) from the fuel gauge.
     pub battery_percent: Option<u8>,

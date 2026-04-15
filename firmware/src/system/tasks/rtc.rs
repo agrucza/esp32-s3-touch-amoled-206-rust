@@ -141,6 +141,7 @@ impl<'d> RtcTaskState<'d> {
 
     /// Read the current date/time from the RTC. Called by the
     /// render path to build a fresh SystemData snapshot.
+    #[allow(dead_code)]
     pub fn read_time(&self, i2c: &mut impl I2cTrait) -> Option<RtcDateTime> {
         self.rtc.get(i2c).ok()
     }
