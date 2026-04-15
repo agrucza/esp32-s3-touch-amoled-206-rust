@@ -492,6 +492,19 @@ impl SystemManager<'static> {
         )
     }
 
+    /// Returns `true` if the event is a non-user wake source -
+    /// something that should bring the device out of sleep even
+    /// though no one touched it. Covers IMU wake-on-motion and
+    /// RTC alarm / countdown-timer expiries.
+    fn is_wake_source(event: &SystemEvent) -> bool {
+        matches!(
+            event,
+            SystemEvent::WakeOnMotion
+                | SystemEvent::AlarmFired
+                | SystemEvent::TimerExpired
+        )
+    }
+
     /// Enter low-power sleep. Idempotent.
     ///
     /// Broadcasts the sleep state on [`SLEEP_WATCH`] so every
@@ -636,9 +649,17 @@ impl SystemManager<'static> {
             _ => {}
         }
 
-        // WoM wake: clear sleep flag and skip screen dispatch.
-        if matches!(event, SystemEvent::WakeOnMotion) {
-            log::info!("wake: IMU motion");
+        // Non-user wake sources (IMU motion, RTC alarm, RTC timer):
+        // clear sleep flag and skip screen dispatch so we don't
+        // route the wake event itself into a handler.
+        if Self::is_wake_source(&event) {
+            let reason = match event {
+                SystemEvent::WakeOnMotion => "IMU motion",
+                SystemEvent::AlarmFired => "RTC alarm",
+                SystemEvent::TimerExpired => "RTC timer",
+                _ => "unknown",
+            };
+            log::info!("wake: {}", reason);
             self.wake().await;
             return;
         }

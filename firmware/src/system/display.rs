@@ -69,8 +69,17 @@ pub async fn init_display<'d, 'fb>(
 }
 
 /// Apply a display-state transition. Issues the necessary DCS
-/// commands over SPI: brightness changes for Active/Dim, `DISPOFF`
-/// for Off, and `DISPON` + brightness when waking from Off.
+/// commands over SPI: brightness changes for Active/Dim, the full
+/// `DISPOFF` + `SLPIN` sequence for Off, and `SLPOUT` + `DISPON` +
+/// brightness when waking from Off.
+///
+/// Going to `Off` sends both DISPOFF (stops panel output) and
+/// SLPIN (shuts down the panel oscillator + booster) because
+/// DISPOFF alone still leaves the panel internal logic running at
+/// ~mA. SLPIN drops to panel standby (~uA).
+///
+/// Waking from Off must respect the 120 ms SLPOUT settle window
+/// mandated by the CO5300 datasheet before issuing DISPON.
 ///
 /// Returns `true` if the caller should treat this as "waking from
 /// Off" and force a full redraw: the caller is expected to reset
@@ -88,16 +97,32 @@ pub async fn transition(
     match to {
         DisplayState::Off => {
             display.display_off().await;
+            // Small settle between DISPOFF and SLPIN so the panel has
+            // finished stopping its output scan before we drop the
+            // oscillator. Datasheet requires >= 5 ms after SLPIN before
+            // the next command; 10 ms is comfortable either way.
+            Timer::after(Duration::from_millis(10)).await;
+            display.sleep().await;
+            Timer::after(Duration::from_millis(10)).await;
         }
         DisplayState::Active => {
             if waking_from_off {
+                display.wake().await;
+                // Datasheet 7.5.12: wait >= 120 ms after SLPOUT before
+                // DISPON. Skipping this can leave the panel booster
+                // un-stabilized and produce a first-frame flash.
+                Timer::after(Duration::from_millis(120)).await;
                 display.display_on().await;
+                Timer::after(Duration::from_millis(70)).await;
             }
             display.set_brightness(config.brightness_active).await;
         }
         DisplayState::Dim => {
             if waking_from_off {
+                display.wake().await;
+                Timer::after(Duration::from_millis(120)).await;
                 display.display_on().await;
+                Timer::after(Duration::from_millis(70)).await;
             }
             display.set_brightness(config.brightness_dim).await;
         }
