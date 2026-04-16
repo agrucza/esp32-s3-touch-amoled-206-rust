@@ -33,5 +33,5 @@ pub mod bodies;
 pub mod chrome;
 
 pub use containers::{card, CardStyle};
-pub use bodies::{circle_stat, value_body};
-pub use chrome::{header_bar, HeaderIcon, HEADER_ICON_HIT_WIDTH};
+pub use bodies::{icon_button, value_body};
+pub use chrome::{header_bar, page_scrollbar, HeaderIcon, HEADER_ICON_HIT_WIDTH};

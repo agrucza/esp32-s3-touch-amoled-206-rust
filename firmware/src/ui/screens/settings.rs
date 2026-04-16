@@ -32,7 +32,7 @@ use core::fmt::Write;
 use crate::ui::layout;
 use crate::ui::theme;
 use crate::ui::types::{
-    Action, Screen, ScreenId, SelfTestId, SelfTestResult, SystemData, SystemEvent,
+    Action, Screen, SelfTestId, SelfTestResult, SystemData, SystemEvent,
 };
 use crate::ui::widgets::{card, header_bar, value_body, CardStyle, HeaderIcon};
 
@@ -153,16 +153,10 @@ impl SettingsScreen {
 
     fn index_event(&mut self, event: &SystemEvent) -> Action {
         match event {
-            // Header icon (X): close the screen, return home.
+            // Header icon (X): close the screen, pop nav stack.
             SystemEvent::Tap { x, y } if layout::header_icon_hit(*x, *y) => {
-                Action::SwitchScreen(ScreenId::Clock)
+                Action::Back
             }
-            // Swipe down to close (mirrors the panel "pull to close" feel).
-            SystemEvent::Swipe {
-                dir: crate::events::SwipeDir::Down,
-                region: crate::events::SwipeRegion::Content,
-            } => Action::SwitchScreen(ScreenId::Clock),
-
             // Tap an index row: open the matching sub-view.
             SystemEvent::Tap { x, y } => {
                 for (i, row) in INDEX_ROWS.iter().enumerate() {

@@ -23,13 +23,14 @@ use embedded_graphics::{
     geometry::{Point, Size},
     pixelcolor::Rgb565,
     prelude::Primitive,
-    primitives::{Circle, Line, PrimitiveStyle, Rectangle},
+    primitives::{PrimitiveStyle, Rectangle},
     Drawable,
 };
 
 use crate::events::{SwipeDir, SwipeRegion, SystemEvent};
-use crate::ui::{fonts, primitives, theme};
+use crate::ui::{fonts, glyphs, layout, primitives, theme};
 use crate::ui::types::{Action, Screen, ScreenId, SystemData};
+use crate::ui::widgets::icon_button;
 
 use super::PANEL_APPS;
 
@@ -47,23 +48,16 @@ const CARD_RADIUS: u32 = 40;
 
 // -- Icon geometry (derived from the card dimensions) ----------------------
 
-/// Drawn circle radius (130 px diameter).
-const ICON_RADIUS: i32 = 65;
-/// Slightly larger tap target than the visible circle for easier hits.
-const ICON_HIT_RADIUS: i32 = 71;
-/// Pixel gap between the icon circle and the label below it.
-const ICON_LABEL_GAP: i32 = 16;
-/// Approximate height of the body font used for the label.
+/// Approximate height of the caption font used for the label.
 const ICON_LABEL_H: i32 = 14;
 
-/// Vertical height of one icon-plus-label block.
-const ICON_BLOCK_H: i32 = ICON_RADIUS * 2 + ICON_LABEL_GAP + ICON_LABEL_H;
+/// Vertical height of one icon-plus-label block (circle + gap + label).
+const ICON_BLOCK_H: i32 =
+    layout::CIRCLE_RADIUS * 2 + layout::CIRCLE_LABEL_GAP + ICON_LABEL_H;
 /// Top y of the icon-plus-label block, vertically centered inside the card.
 const ICON_BLOCK_TOP: i32 = CARD_Y + (CARD_H - ICON_BLOCK_H) / 2;
 /// Vertical center of every icon circle (shared row).
-const ICON_CY: i32 = ICON_BLOCK_TOP + ICON_RADIUS;
-/// Top y of every label.
-const ICON_LABEL_Y: i32 = ICON_CY + ICON_RADIUS + ICON_LABEL_GAP;
+const ICON_CY: i32 = ICON_BLOCK_TOP + layout::CIRCLE_RADIUS;
 
 /// Number of app icons shown on one page. Fixed so the icons always
 /// sit at the same size and visual position; more apps paginate
@@ -171,23 +165,15 @@ impl Screen for PanelScreen {
             let (cx, cy) = icon_col_position(col);
 
             let border = if is_active { theme::AMBER } else { theme::AMBER_DIM };
-            let glyph = if is_active { theme::TEXT_WHITE } else { theme::TEXT_DIM };
+            let glyph_color = if is_active { theme::TEXT_WHITE } else { theme::TEXT_DIM };
             let label_color = if is_active { theme::TEXT_WHITE } else { theme::TEXT_MUTED };
 
-            primitives::circle_button(
-                display,
-                cx, cy, ICON_RADIUS,
-                theme::BG,
-                Some(border),
-            );
-
-            draw_app_icon(display, app, cx, cy, ICON_RADIUS - 12, glyph);
-
-            fonts::draw_centered(
-                display, &fonts::body(),
-                app_display_name(app),
-                cx, ICON_LABEL_Y,
-                label_color,
+            icon_button(
+                display, cx, cy,
+                theme::BG, Some(border),
+                |d, x, y, r, c| draw_app_icon(d, app, x, y, r, c),
+                glyph_color,
+                app_display_name(app), label_color,
             );
         }
 
@@ -287,11 +273,12 @@ impl Screen for PanelScreen {
 fn hit_icon_column(x: u16, y: u16) -> Option<usize> {
     let px = x as i32;
     let py = y as i32;
+    let r = layout::CIRCLE_RADIUS;
     for col in 0..ICONS_PER_PAGE {
         let (cx, cy) = icon_col_position(col);
         let dx = px - cx;
         let dy = py - cy;
-        if dx * dx + dy * dy <= ICON_HIT_RADIUS * ICON_HIT_RADIUS {
+        if dx * dx + dy * dy <= r * r {
             return Some(col);
         }
     }
@@ -329,133 +316,10 @@ fn draw_app_icon<D: DrawTarget<Color = Rgb565>>(
     color: Rgb565,
 ) {
     match id {
-        ScreenId::Clock => draw_clock_glyph(display, cx, cy, radius, color),
-        ScreenId::Status => draw_status_glyph(display, cx, cy, radius, color),
-        ScreenId::Stopwatch => draw_stopwatch_glyph(display, cx, cy, radius, color),
-        ScreenId::Settings => draw_settings_glyph(display, cx, cy, radius, color),
-        // Showing the panel inside the panel would be unusual but we
-        // give it a sensible glyph anyway (four dots / grid).
-        ScreenId::Panel => draw_panel_glyph(display, cx, cy, radius, color),
-    }
-}
-
-/// Three stacked horizontal bars - a neutral "settings / menu"
-/// glyph. We'll swap to a proper gear when we add a gear primitive.
-fn draw_settings_glyph<D: DrawTarget<Color = Rgb565>>(
-    display: &mut D, cx: i32, cy: i32, radius: i32, color: Rgb565,
-) {
-    let style = PrimitiveStyle::with_stroke(color, 3);
-    let half_w = radius * 3 / 4;
-    let spacing = radius / 3;
-    for row in -1..=1 {
-        let y = cy + row * spacing;
-        Line::new(
-            Point::new(cx - half_w, y),
-            Point::new(cx + half_w, y),
-        )
-        .into_styled(style)
-        .draw(display)
-        .ok();
-    }
-}
-
-fn draw_clock_glyph<D: DrawTarget<Color = Rgb565>>(
-    display: &mut D, cx: i32, cy: i32, radius: i32, color: Rgb565,
-) {
-    let thin = PrimitiveStyle::with_stroke(color, 2);
-    let thick = PrimitiveStyle::with_stroke(color, 3);
-
-    Circle::with_center(Point::new(cx, cy), (radius * 2) as u32)
-        .into_styled(thin).draw(display).ok();
-
-    Line::new(
-        Point::new(cx, cy),
-        Point::new(cx, cy - radius * 2 / 3),
-    ).into_styled(thick).draw(display).ok();
-
-    Line::new(
-        Point::new(cx, cy),
-        Point::new(cx + radius / 3, cy - radius / 3),
-    ).into_styled(thick).draw(display).ok();
-
-    Circle::with_center(Point::new(cx, cy), 4)
-        .into_styled(PrimitiveStyle::with_fill(color))
-        .draw(display).ok();
-}
-
-/// Stopwatch glyph: a small stopwatch dial with a button stem on
-/// top and a hand pointing up-right. Distinct enough from the
-/// regular clock glyph that the two apps don't look identical in
-/// the panel picker.
-fn draw_stopwatch_glyph<D: DrawTarget<Color = Rgb565>>(
-    display: &mut D, cx: i32, cy: i32, radius: i32, color: Rgb565,
-) {
-    let thin  = PrimitiveStyle::with_stroke(color, 2);
-    let thick = PrimitiveStyle::with_stroke(color, 3);
-    let fill  = PrimitiveStyle::with_fill(color);
-
-    // Slightly smaller main dial so there's room for the stem above
-    // without the glyph overflowing its allotted radius.
-    let dial_r = radius * 4 / 5;
-
-    // Button stem on top: small filled rectangle.
-    Rectangle::new(
-        Point::new(cx - 3, cy - dial_r - 5),
-        Size::new(6, 5),
-    ).into_styled(fill).draw(display).ok();
-
-    // Main dial.
-    Circle::with_center(Point::new(cx, cy), (dial_r * 2) as u32)
-        .into_styled(thin).draw(display).ok();
-
-    // Hand pointing up-right (~1 o'clock).
-    Line::new(
-        Point::new(cx, cy),
-        Point::new(cx + dial_r / 2, cy - dial_r / 2),
-    ).into_styled(thick).draw(display).ok();
-
-    // Center cap.
-    Circle::with_center(Point::new(cx, cy), 4)
-        .into_styled(fill).draw(display).ok();
-}
-
-fn draw_status_glyph<D: DrawTarget<Color = Rgb565>>(
-    display: &mut D, cx: i32, cy: i32, radius: i32, color: Rgb565,
-) {
-    let bar_w = (radius / 3).max(4);
-    let gap = 4;
-    let total_w = 3 * bar_w + 2 * gap;
-    let start_x = cx - total_w / 2;
-    let base_y = cy + radius / 2;
-    let heights = [radius / 2, radius * 3 / 4, radius];
-    let fill = PrimitiveStyle::with_fill(color);
-
-    for (i, h) in heights.iter().enumerate() {
-        let x = start_x + i as i32 * (bar_w + gap);
-        let y = base_y - *h;
-        Rectangle::new(Point::new(x, y), Size::new(bar_w as u32, *h as u32))
-            .into_styled(fill).draw(display).ok();
-    }
-}
-
-fn draw_panel_glyph<D: DrawTarget<Color = Rgb565>>(
-    display: &mut D, cx: i32, cy: i32, radius: i32, color: Rgb565,
-) {
-    // Four small filled squares in a 2x2 grid.
-    let s = (radius / 3).max(4);
-    let gap = 4;
-    let offsets = [
-        (-(s + gap / 2), -(s + gap / 2)),
-        ( gap / 2,       -(s + gap / 2)),
-        (-(s + gap / 2),  gap / 2),
-        ( gap / 2,        gap / 2),
-    ];
-    let fill = PrimitiveStyle::with_fill(color);
-    for (dx, dy) in offsets.iter() {
-        Rectangle::new(
-            Point::new(cx + dx, cy + dy),
-            Size::new(s as u32, s as u32),
-        )
-        .into_styled(fill).draw(display).ok();
+        ScreenId::Clock => glyphs::clock(display, cx, cy, radius, color),
+        ScreenId::Status => glyphs::status(display, cx, cy, radius, color),
+        ScreenId::Stopwatch => glyphs::stopwatch(display, cx, cy, radius, color),
+        ScreenId::Settings => glyphs::settings(display, cx, cy, radius, color),
+        ScreenId::Panel => glyphs::panel(display, cx, cy, radius, color),
     }
 }

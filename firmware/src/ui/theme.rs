@@ -22,8 +22,7 @@ pub const TEXT_WHITE: Rgb565 = Rgb565::new(31, 63, 31);
 pub const TEXT_DIM:   Rgb565 = Rgb565::new(16, 32, 16);
 /// Tertiary text: darker grey for inactive/placeholder labels.
 pub const TEXT_MUTED: Rgb565 = Rgb565::new(10, 20, 10);
-/// Notification green (reserved for future notification dots).
-#[allow(dead_code)]
+/// Notification green.
 pub const GREEN:      Rgb565 = Rgb565::new(0, 50, 10);
 /// Warning red.
 pub const RED:        Rgb565 = Rgb565::new(31, 0, 2);

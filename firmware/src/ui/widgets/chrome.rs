@@ -19,7 +19,7 @@ use embedded_graphics::{
     Drawable,
 };
 
-use crate::ui::{fonts, theme};
+use crate::ui::{fonts, layout, primitives, theme};
 
 // -- Layout constants --------------------------------------------------------
 
@@ -104,6 +104,35 @@ pub fn header_bar<D: DrawTarget<Color = Rgb565>>(
         right - HEADER_MARGIN,
         cy - 9,
         title_color,
+    );
+}
+
+// -- page_scrollbar ----------------------------------------------------------
+
+/// Draw a vertical page-indicator scrollbar at the standard position.
+///
+/// This is the paginated-screen counterpart to `header_bar` - screens
+/// that have multiple pages call this once per render with their page
+/// count and active index. All positioning and colors are determined
+/// by the layout and theme modules so screens don't carry local
+/// scrollbar constants.
+///
+/// Does nothing when `page_count < 2` (single-page screens don't
+/// need a scrollbar).
+pub fn page_scrollbar<D: DrawTarget<Color = Rgb565>>(
+    display: &mut D,
+    page_count: usize,
+    active_page: usize,
+) {
+    if page_count < 2 { return; }
+    primitives::scrollbar_v(
+        display,
+        layout::SCROLLBAR_X, layout::SCROLLBAR_Y,
+        layout::SCROLLBAR_W, layout::SCROLLBAR_H,
+        page_count,
+        active_page,
+        theme::AMBER,
+        theme::AMBER_DIM,
     );
 }
 

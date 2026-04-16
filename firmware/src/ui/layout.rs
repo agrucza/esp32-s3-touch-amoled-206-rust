@@ -1,11 +1,10 @@
-//! Shared layout grammar for card-list screens.
+//! Shared layout grammar for all screens.
 //!
-//! These constants define the positional defaults every standard
-//! Settings-style screen uses - where the header bar sits, how wide
-//! a card is, how much space between cards, where the first card
-//! starts. Screens import from here instead of declaring their own
-//! copies so the vertical rhythm stays consistent as the user moves
-//! between screens and sub-views.
+//! These constants define the positional defaults screens use -
+//! where the header bar sits, hero pill dimensions, circle button
+//! positions, card stack geometry, scrollbar placement. Screens
+//! import from here instead of declaring their own copies so the
+//! visual rhythm stays consistent across the UI.
 //!
 //! Split from `theme` on purpose:
 //!
@@ -13,12 +12,12 @@
 //!   physical screen constants, bezel geometry. Colors and sizes
 //!   of things.
 //! * [`layout`] is about **where things go**: rect helpers,
-//!   content positioning, standard card stack geometry. Composition
+//!   content positioning, standard screen geometry. Composition
 //!   of things.
 //!
 //! A palette tweak doesn't force re-reading this file, and a layout
 //! tweak doesn't force re-reading the palette. Screens pulling in
-//! `use crate::ui::layout::*` get the whole grammar at once.
+//! `use crate::ui::layout` get the whole grammar at once.
 //!
 //! [`theme`]: super::theme
 
@@ -45,6 +44,69 @@ pub const fn header_rect() -> Rectangle {
         Point::new(0, HEADER_TOP),
         Size::new(theme::SCREEN_W as u32, HEADER_HEIGHT as u32),
     )
+}
+
+// -- Hero pill ---------------------------------------------------------------
+
+/// Width of the amber hero pill (clock, stopwatch, future timer).
+pub const HERO_PILL_W: i32 = 320;
+
+/// Height of the amber hero pill.
+pub const HERO_PILL_H: i32 = 130;
+
+/// Top of the hero pill, measured from the framebuffer top.
+pub const HERO_PILL_Y: i32 = 160;
+
+/// Left edge of the hero pill (horizontally centered on screen).
+pub const HERO_PILL_X: i32 = (theme::SCREEN_W as i32 - HERO_PILL_W) / 2;
+
+/// Rect for centering text inside the hero pill. Pass this to
+/// `fonts::draw_centered_in_rect` for visually centered content.
+pub const HERO_RECT: Rectangle = Rectangle::new(
+    Point::new(HERO_PILL_X, HERO_PILL_Y),
+    Size::new(HERO_PILL_W as u32, HERO_PILL_H as u32),
+);
+
+// -- Circle button pair ------------------------------------------------------
+
+/// Drawn radius of each bottom circle.
+pub const CIRCLE_RADIUS: i32 = 70;
+
+/// Horizontal gap between the two circles (edge-to-edge).
+pub const CIRCLE_GAP: i32 = 24;
+
+/// X center of the left circle.
+pub const LEFT_CIRCLE_CX: i32 =
+    theme::SCREEN_W as i32 / 2 - CIRCLE_GAP / 2 - CIRCLE_RADIUS;
+
+/// X center of the right circle.
+pub const RIGHT_CIRCLE_CX: i32 =
+    theme::SCREEN_W as i32 / 2 + CIRCLE_GAP / 2 + CIRCLE_RADIUS;
+
+/// Vertical center of both circles.
+pub const CIRCLE_CY: i32 = 310 + CIRCLE_RADIUS;
+
+/// Glyph drawing radius - insets the icon inside the circle so it
+/// doesn't kiss the border.
+pub const GLYPH_RADIUS: i32 = CIRCLE_RADIUS - 37;
+
+/// Gap between the bottom of a circle and the top of its caption.
+pub const CIRCLE_LABEL_GAP: i32 = 14;
+
+// -- Circle hit testing ------------------------------------------------------
+
+/// Returns `true` if `(x, y)` lands inside the left circle.
+pub fn left_circle_hit(x: u16, y: u16) -> bool {
+    let dx = x as i32 - LEFT_CIRCLE_CX;
+    let dy = y as i32 - CIRCLE_CY;
+    dx * dx + dy * dy <= CIRCLE_RADIUS * CIRCLE_RADIUS
+}
+
+/// Returns `true` if `(x, y)` lands inside the right circle.
+pub fn right_circle_hit(x: u16, y: u16) -> bool {
+    let dx = x as i32 - RIGHT_CIRCLE_CX;
+    let dy = y as i32 - CIRCLE_CY;
+    dx * dx + dy * dy <= CIRCLE_RADIUS * CIRCLE_RADIUS
 }
 
 // -- Card list grammar -------------------------------------------------------
@@ -84,6 +146,23 @@ pub const fn content_card_rect(index: usize) -> Rectangle {
         Size::new(CARD_WIDTH as u32, CARD_HEIGHT as u32),
     )
 }
+
+// -- Page scrollbar ----------------------------------------------------------
+
+/// Width of the vertical page-indicator scrollbar (pill track).
+pub const SCROLLBAR_W: i32 = 4;
+
+/// X position of the scrollbar. Sits near the right edge, inset
+/// enough to clear the bezel arc (screen is 410 wide, bezel corner
+/// radius is 98).
+pub const SCROLLBAR_X: i32 = theme::SCREEN_W as i32 - 18;
+
+/// Top of the scrollbar track. Aligned with the bezel-safe content
+/// band so it spans the full usable height.
+pub const SCROLLBAR_Y: i32 = theme::CONTENT_TOP;
+
+/// Height of the scrollbar track.
+pub const SCROLLBAR_H: i32 = theme::CONTENT_H;
 
 // -- Header icon hit testing -------------------------------------------------
 
