@@ -105,6 +105,32 @@ pub enum ImuCommand {
 /// Single-consumer: only the IMU task should call `wait()` on this.
 pub static IMU_COMMAND: Signal<CriticalSectionRawMutex, ImuCommand> = Signal::new();
 
+/// Command sent from the main loop to the RTC task.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RtcCommand {
+    /// Start the hardware countdown timer. The RTC task picks the
+    /// best clock source (Hz1 for <= 255s, Per60 for longer) and
+    /// calls `Rtc::set_timer`. When the countdown expires, the
+    /// task emits `SystemEvent::TimerExpired`.
+    StartTimer { seconds: u32 },
+    /// Cancel a running hardware countdown timer.
+    CancelTimer,
+    /// Set an alarm at the given hour and minute. Optionally restrict
+    /// to a single weekday (0=Sunday..6=Saturday); `None` fires every
+    /// day. The RTC task calls `Rtc::set_alarm` with second=0.
+    /// When the alarm fires, the task emits `SystemEvent::AlarmFired`.
+    SetAlarm { hour: u8, minute: u8, weekday: Option<u8> },
+    /// Cancel a set alarm.
+    CancelAlarm,
+    /// Set the RTC date and time. Used by the settings time screen.
+    SetTime { year: u16, month: u8, day: u8, hour: u8, minute: u8, second: u8 },
+}
+
+/// Main-to-RTC command signal.
+///
+/// Single-consumer: only the RTC task should call `wait()` on this.
+pub static RTC_COMMAND: Signal<CriticalSectionRawMutex, RtcCommand> = Signal::new();
+
 /// Type alias for the shared I2C bus, protected by an async mutex.
 ///
 /// Four devices sit on this bus (PMU, touch, RTC, IMU) and each

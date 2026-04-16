@@ -17,10 +17,11 @@ pub use crate::events::{
 pub enum ScreenId {
     Clock,
     Status,
-    /// Count-up stopwatch (MM:SS.hh). Panel-only app - not on the
-    /// home-row rotation, reached by tapping its icon in the pull-
-    /// down panel.
+    /// Count-up stopwatch (HH:MM:SS). Panel-only app.
     Stopwatch,
+    /// Count-down timer with numpad duration entry. Panel-only app,
+    /// also reachable by tapping the TIMER circle on the clock face.
+    Timer,
     /// Device settings - internally state-machined into sub-views
     /// (IMU, RTC, Power, ...) via `SettingsScreen`'s own enum, so
     /// from the outside there is only one screen id.
@@ -82,6 +83,18 @@ pub enum Action {
     /// Progress and results come back asynchronously as
     /// [`SystemEvent::SelfTestUpdated`] events.
     RunSelfTest(SelfTestId),
+    /// Start the RTC hardware countdown timer. Duration is capped
+    /// at 15300 seconds (4h15m) by the UI. When the timer expires
+    /// the RTC task emits `SystemEvent::TimerExpired`.
+    StartTimer { seconds: u32 },
+    /// Cancel a running RTC countdown timer.
+    CancelTimer,
+    /// Set an RTC alarm at the given time. Optionally restrict to
+    /// a single weekday (0=Sunday..6=Saturday). Fires
+    /// `SystemEvent::AlarmFired` when matched.
+    SetAlarm { hour: u8, minute: u8, weekday: Option<u8> },
+    /// Cancel a set RTC alarm.
+    CancelAlarm,
 }
 
 // -- System data snapshot ----------------------------------------------------

@@ -3,6 +3,7 @@ pub mod panel;
 pub mod settings;
 pub mod status;
 pub mod stopwatch;
+pub mod timer;
 
 use embedded_graphics::{draw_target::DrawTarget, pixelcolor::Rgb565};
 
@@ -25,6 +26,7 @@ pub const PANEL_APPS: &[ScreenId] = &[
     ScreenId::Clock,
     ScreenId::Status,
     ScreenId::Stopwatch,
+    ScreenId::Timer,
     ScreenId::Settings,
 ];
 
@@ -52,6 +54,7 @@ pub enum ActiveScreen {
     Clock(clock::ClockScreen),
     Status(status::StatusScreen),
     Stopwatch(stopwatch::StopwatchScreen),
+    Timer(timer::TimerScreen),
     Settings(settings::SettingsScreen),
     Panel(panel::PanelScreen),
 }
@@ -62,13 +65,12 @@ impl ActiveScreen {
     /// Note: `ScreenId::Panel` can't be constructed this way - the
     /// panel needs a `previous: ScreenId` context that plain id-based
     /// construction can't supply. Use `new_panel(previous)` instead.
-    /// Passing `ScreenId::Panel` here is a programming error and will
-    /// trip a debug assertion; release builds fall back to Clock.
     pub fn new(id: ScreenId) -> Self {
         match id {
             ScreenId::Clock => Self::Clock(clock::ClockScreen::new()),
             ScreenId::Status => Self::Status(status::StatusScreen::new()),
             ScreenId::Stopwatch => Self::Stopwatch(stopwatch::StopwatchScreen::new()),
+            ScreenId::Timer => Self::Timer(timer::TimerScreen::new()),
             ScreenId::Settings => Self::Settings(settings::SettingsScreen::new()),
             ScreenId::Panel => {
                 debug_assert!(false, "use ActiveScreen::new_panel(previous) for Panel");
@@ -88,6 +90,7 @@ impl ActiveScreen {
             Self::Clock(s) => s.render(display, data),
             Self::Status(s) => s.render(display, data),
             Self::Stopwatch(s) => s.render(display, data),
+            Self::Timer(s) => s.render(display, data),
             Self::Settings(s) => s.render(display, data),
             Self::Panel(s) => s.render(display, data),
         }
@@ -98,38 +101,29 @@ impl ActiveScreen {
             Self::Clock(s) => s.on_event(event, data),
             Self::Status(s) => s.on_event(event, data),
             Self::Stopwatch(s) => s.on_event(event, data),
+            Self::Timer(s) => s.on_event(event, data),
             Self::Settings(s) => s.on_event(event, data),
             Self::Panel(s) => s.on_event(event, data),
         }
     }
 
-    /// Dispatch `Screen::on_mount` to the active variant. Called
-    /// right after construction and after [`switch_to`] / [`open_panel`]
-    /// replace the active variant.
-    ///
-    /// [`switch_to`]: ActiveScreen::switch_to
-    /// [`open_panel`]: ActiveScreen::open_panel
     pub fn mount(&mut self, data: &SystemData) {
         match self {
             Self::Clock(s) => s.on_mount(data),
             Self::Status(s) => s.on_mount(data),
             Self::Stopwatch(s) => s.on_mount(data),
+            Self::Timer(s) => s.on_mount(data),
             Self::Settings(s) => s.on_mount(data),
             Self::Panel(s) => s.on_mount(data),
         }
     }
 
-    /// Dispatch `Screen::on_unmount` to the active variant. Called
-    /// before [`switch_to`] / [`open_panel`] replace the active
-    /// variant, so screens get a chance to release state.
-    ///
-    /// [`switch_to`]: ActiveScreen::switch_to
-    /// [`open_panel`]: ActiveScreen::open_panel
     pub fn unmount(&mut self) {
         match self {
             Self::Clock(s) => s.on_unmount(),
             Self::Status(s) => s.on_unmount(),
             Self::Stopwatch(s) => s.on_unmount(),
+            Self::Timer(s) => s.on_unmount(),
             Self::Settings(s) => s.on_unmount(),
             Self::Panel(s) => s.on_unmount(),
         }
@@ -141,25 +135,20 @@ impl ActiveScreen {
             Self::Clock(_) => ScreenId::Clock,
             Self::Status(_) => ScreenId::Status,
             Self::Stopwatch(_) => ScreenId::Stopwatch,
+            Self::Timer(_) => ScreenId::Timer,
             Self::Settings(_) => ScreenId::Settings,
             Self::Panel(_) => ScreenId::Panel,
         }
     }
 
-    /// Switch to a different screen. Fires `on_unmount` on the
-    /// outgoing variant and `on_mount` on the incoming one, both
-    /// before/after the variant swap respectively.
+    /// Switch to a different screen.
     pub fn switch_to(&mut self, id: ScreenId, data: &SystemData) {
         self.unmount();
         *self = Self::new(id);
         self.mount(data);
     }
 
-    /// Open the panel screen, remembering which screen it should
-    /// return to on close. Mirrors [`switch_to`] but handles the
-    /// Panel variant's extra `previous` argument.
-    ///
-    /// [`switch_to`]: ActiveScreen::switch_to
+    /// Open the panel screen.
     pub fn open_panel(&mut self, previous: ScreenId, data: &SystemData) {
         self.unmount();
         *self = Self::new_panel(previous);

@@ -32,8 +32,9 @@
 //! ```
 
 use crate::events::SystemEvent;
-use crate::system::bus::{EVENTS, SharedI2c};
-use drivers::rtc::{Rtc, Config as RtcConfig, DateTime as RtcDateTime};
+use crate::system::bus::{EVENTS, RTC_COMMAND, RtcCommand, SharedI2c};
+use drivers::rtc::{Alarm, Rtc, Config as RtcConfig, DateTime as RtcDateTime, TimerClock, TimerOutput};
+use embassy_futures::select::{select, Either};
 use embedded_hal::i2c::I2c as I2cTrait;
 use esp_hal::gpio::Input;
 
@@ -43,16 +44,24 @@ use esp_hal::gpio::Input;
 #[embassy_executor::task]
 pub async fn rtc_task(bus: &'static SharedI2c, mut state: RtcTaskState<'static>) {
     loop {
-        state.wait_for_int().await;
-        let (event, time) = {
-            let mut i2c = bus.lock().await;
-            let event = state.classify_interrupt(&mut *i2c);
-            let time = state.snapshot(&mut *i2c);
-            (event, time)
-        };
-        EVENTS.send(SystemEvent::TimeUpdated { data: time }).await;
-        if let Some(ev) = event {
-            EVENTS.send(ev).await;
+        match select(state.wait_for_int(), RTC_COMMAND.wait()).await {
+            Either::First(()) => {
+                // INT# fired - classify and emit events.
+                let (event, time) = {
+                    let mut i2c = bus.lock().await;
+                    let event = state.classify_interrupt(&mut *i2c);
+                    let time = state.snapshot(&mut *i2c);
+                    (event, time)
+                };
+                EVENTS.send(SystemEvent::TimeUpdated { data: time }).await;
+                if let Some(ev) = event {
+                    EVENTS.send(ev).await;
+                }
+            }
+            Either::Second(cmd) => {
+                let mut i2c = bus.lock().await;
+                state.handle_command(&mut *i2c, cmd);
+            }
         }
     }
 }
@@ -151,6 +160,63 @@ impl<'d> RtcTaskState<'d> {
     /// fails.
     pub fn snapshot(&self, i2c: &mut impl I2cTrait) -> TimeData {
         self.rtc.get(i2c).ok().as_ref().map(TimeData::from).unwrap_or_default()
+    }
+
+    /// Handle a command from the main loop.
+    pub fn handle_command(&self, i2c: &mut impl I2cTrait, cmd: RtcCommand) {
+        match cmd {
+            RtcCommand::StartTimer { seconds } => {
+                if seconds == 0 {
+                    log::warn!("RTC: timer request with 0 seconds, ignoring");
+                    return;
+                }
+                // Hz1: 1-255 seconds. Per60: 256-15300 seconds.
+                // UI caps input at 15300s so we don't exceed hw range.
+                let (clock, value) = if seconds <= 255 {
+                    (TimerClock::Hz1, seconds as u8)
+                } else {
+                    let ticks = ((seconds + 59) / 60).min(255) as u8;
+                    (TimerClock::Per60, ticks)
+                };
+                match self.rtc.set_timer(i2c, value, clock, TimerOutput::Interrupt) {
+                    Ok(()) => log::info!("RTC: timer started, value={} clock={:?}", value, clock),
+                    Err(_) => log::error!("RTC: failed to start timer"),
+                }
+            }
+            RtcCommand::CancelTimer => {
+                match self.rtc.disable_timer(i2c) {
+                    Ok(()) => log::info!("RTC: timer cancelled"),
+                    Err(_) => log::error!("RTC: failed to cancel timer"),
+                }
+            }
+            RtcCommand::SetAlarm { hour, minute, weekday } => {
+                let alarm = Alarm {
+                    second: Some(0),
+                    minute: Some(minute),
+                    hour: Some(hour),
+                    day: None,
+                    weekday,
+                };
+                match self.rtc.set_alarm(i2c, &alarm) {
+                    Ok(()) => log::info!("RTC: alarm set {:02}:{:02} weekday={:?}", hour, minute, weekday),
+                    Err(_) => log::error!("RTC: failed to set alarm"),
+                }
+            }
+            RtcCommand::CancelAlarm => {
+                match self.rtc.disable_alarm(i2c) {
+                    Ok(()) => log::info!("RTC: alarm cancelled"),
+                    Err(_) => log::error!("RTC: failed to cancel alarm"),
+                }
+            }
+            RtcCommand::SetTime { year, month, day, hour, minute, second } => {
+                let dt = RtcDateTime::new(year, month, day, 0, hour, minute, second);
+                match self.rtc.set(i2c, &dt) {
+                    Ok(()) => log::info!("RTC: time set {:04}-{:02}-{:02} {:02}:{:02}:{:02}",
+                        year, month, day, hour, minute, second),
+                    Err(_) => log::error!("RTC: failed to set time"),
+                }
+            }
+        }
     }
 
     /// Async wait for any source on the INT# line (GPIO39 falling

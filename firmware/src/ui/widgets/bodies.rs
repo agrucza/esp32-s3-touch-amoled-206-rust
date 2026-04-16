@@ -86,7 +86,6 @@ pub fn icon_button<D, F>(
     display: &mut D,
     cx: i32, cy: i32,
     fill: Rgb565,
-    border: Option<Rgb565>,
     glyph: F,
     glyph_color: Rgb565,
     label: &str,
@@ -98,7 +97,7 @@ where
 {
     primitives::circle_button(
         display, cx, cy,
-        layout::CIRCLE_RADIUS, fill, border,
+        layout::CIRCLE_RADIUS, fill, None,
     );
 
     glyph(display, cx, cy, layout::GLYPH_RADIUS, glyph_color);

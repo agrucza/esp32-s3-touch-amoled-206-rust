@@ -30,7 +30,7 @@ use embedded_graphics::{
 
 use crate::events::SystemEvent;
 use crate::ui::{fonts, glyphs, layout, primitives, theme};
-use crate::ui::types::{Action, Screen, SystemData};
+use crate::ui::types::{Action, Screen, ScreenId, SystemData};
 use crate::ui::widgets::icon_button;
 
 // -- Layout constants (clock-specific) ---------------------------------------
@@ -91,7 +91,7 @@ impl Screen for ClockScreen {
         icon_button(
             display,
             layout::LEFT_CIRCLE_CX, layout::CIRCLE_CY,
-            theme::PANEL_BG, None,
+            theme::PANEL_BG,
             glyphs::hourglass, theme::TEXT_WHITE,
             "TIMER", theme::TEXT_DIM,
         );
@@ -100,7 +100,7 @@ impl Screen for ClockScreen {
         icon_button(
             display,
             layout::RIGHT_CIRCLE_CX, layout::CIRCLE_CY,
-            theme::PANEL_BG, None,
+            theme::PANEL_BG,
             glyphs::bell, theme::TEXT_WHITE,
             "ALARM", theme::TEXT_DIM,
         );
@@ -122,6 +122,9 @@ impl Screen for ClockScreen {
     fn on_event(&mut self, event: &SystemEvent, _data: &SystemData) -> Action {
         match event {
             SystemEvent::PowerButtonLong => Action::Shutdown,
+            SystemEvent::Tap { x, y } if layout::left_circle_hit(*x, *y) => {
+                Action::SwitchScreen(ScreenId::Timer)
+            }
             _ => Action::None,
         }
     }

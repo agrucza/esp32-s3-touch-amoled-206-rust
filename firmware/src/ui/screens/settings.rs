@@ -120,7 +120,6 @@ impl Screen for SettingsScreen {
     }
 
     fn on_event(&mut self, event: &SystemEvent, _data: &SystemData) -> Action {
-        // Long-press power is always shutdown, regardless of sub-view.
         if matches!(event, SystemEvent::PowerButtonLong) {
             return Action::Shutdown;
         }
@@ -153,11 +152,9 @@ impl SettingsScreen {
 
     fn index_event(&mut self, event: &SystemEvent) -> Action {
         match event {
-            // Header icon (X): close the screen, pop nav stack.
             SystemEvent::Tap { x, y } if layout::header_icon_hit(*x, *y) => {
                 Action::Back
             }
-            // Tap an index row: open the matching sub-view.
             SystemEvent::Tap { x, y } => {
                 for (i, row) in INDEX_ROWS.iter().enumerate() {
                     if layout::content_card_rect(i)
@@ -228,12 +225,6 @@ impl SettingsScreen {
                 Action::Redraw
             }
 
-            // Tap on a test card: request that single test to re-run.
-            // We don't check "is it already running?" here because we
-            // don't have SystemData in on_event. The IMU task drops
-            // re-entry requests while a test is mid-run, and the card
-            // is visibly dimmed, so double-taps are rate-limited by
-            // the backend anyway.
             SystemEvent::Tap { x, y } => {
                 for (i, test) in IMU_TESTS.iter().enumerate() {
                     if !layout::content_card_rect(i)
@@ -246,7 +237,6 @@ impl SettingsScreen {
                 Action::None
             }
 
-            // Fresh test results arriving - just redraw.
             SystemEvent::SelfTestUpdated { .. } => Action::Redraw,
 
             _ => Action::None,

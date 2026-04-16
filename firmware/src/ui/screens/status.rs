@@ -68,20 +68,19 @@ impl Screen for StatusScreen {
         match event {
             SystemEvent::PowerButtonLong => Action::Shutdown,
 
+            // Accel/gyro pages show live motion data.
+            SystemEvent::MotionUpdated { .. } if self.page < 2 => Action::Redraw,
+
             // Header icon (X): close and return to previous screen.
             SystemEvent::Tap { x, y } if layout::header_icon_hit(*x, *y) => {
                 Action::Back
             }
 
-            // ENV page shows live touch coords - redraw while a finger
-            // is down so the TOUCH card tracks the drag.
+            // ENV page shows live touch coords.
             SystemEvent::TouchPressed { .. } if self.page == 2 => Action::Redraw,
             SystemEvent::TouchReleased if self.page == 2 => Action::Redraw,
 
-            // Up/down content swipes cycle pages (same as before
-            // migration). Swipe-down-to-close is not used here
-            // because it would conflict with page navigation - the
-            // header X icon is the close affordance.
+            // Up/down content swipes cycle pages.
             SystemEvent::Swipe { dir: SwipeDir::Up, region: SwipeRegion::Content } => {
                 self.page = (self.page + 1) % PAGE_COUNT;
                 Action::Redraw

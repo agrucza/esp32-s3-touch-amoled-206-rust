@@ -109,6 +109,18 @@ pub fn right_circle_hit(x: u16, y: u16) -> bool {
     dx * dx + dy * dy <= CIRCLE_RADIUS * CIRCLE_RADIUS
 }
 
+// -- Hero pill hit testing ---------------------------------------------------
+
+/// Returns `true` if `(x, y)` lands inside the hero pill's bounding rect.
+pub fn hero_pill_hit(x: u16, y: u16) -> bool {
+    let px = x as i32;
+    let py = y as i32;
+    px >= HERO_PILL_X
+        && px < HERO_PILL_X + HERO_PILL_W
+        && py >= HERO_PILL_Y
+        && py < HERO_PILL_Y + HERO_PILL_H
+}
+
 // -- Card list grammar -------------------------------------------------------
 
 /// Horizontal inset of a card from the screen edge. Picked so the

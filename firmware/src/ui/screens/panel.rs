@@ -145,12 +145,12 @@ impl Screen for PanelScreen {
         .into_styled(PrimitiveStyle::with_fill(theme::AMBER))
         .draw(display).ok();
 
-        // -- Upper dark card: the app picker --------------------------------
+        // -- Upper card: the app picker --------------------------------------
         primitives::rounded_panel(
             display,
             CARD_X, CARD_Y, CARD_W, CARD_H,
             CARD_RADIUS,
-            Some(theme::PANEL_BG),
+            Some(theme::BG),
             None,
         );
 
@@ -164,13 +164,12 @@ impl Screen for PanelScreen {
             let is_active = app == self.previous;
             let (cx, cy) = icon_col_position(col);
 
-            let border = if is_active { theme::AMBER } else { theme::AMBER_DIM };
             let glyph_color = if is_active { theme::TEXT_WHITE } else { theme::TEXT_DIM };
             let label_color = if is_active { theme::TEXT_WHITE } else { theme::TEXT_MUTED };
 
             icon_button(
                 display, cx, cy,
-                theme::BG, Some(border),
+                theme::PANEL_BG,
                 |d, x, y, r, c| draw_app_icon(d, app, x, y, r, c),
                 glyph_color,
                 app_display_name(app), label_color,
@@ -190,11 +189,11 @@ impl Screen for PanelScreen {
             );
         }
 
-        // -- Lower dark action pill (placeholder) ---------------------------
+        // -- Lower action pill (placeholder) -----------------------------------
         primitives::pill_solid(
             display,
             ACTION_X, ACTION_Y, ACTION_W, ACTION_H,
-            theme::PANEL_BG,
+            theme::BG,
         );
 
         // Glyph + label, centered as a group, both in amber so they
@@ -226,12 +225,15 @@ impl Screen for PanelScreen {
 
     fn on_event(&mut self, event: &SystemEvent, _data: &SystemData) -> Action {
         match event {
+            SystemEvent::PowerButtonLong => Action::Shutdown,
             // Swipe up from anywhere: close the panel and go back.
             SystemEvent::Swipe { dir: SwipeDir::Up, .. } => {
                 Action::SwitchScreen(self.previous)
             }
             // Left/right content swipes cycle the carousel page.
-            SystemEvent::Swipe { dir: SwipeDir::Right, region: SwipeRegion::Content } => {
+            // Swipe left = next page, swipe right = previous page
+            // (content scrolls in the direction of the swipe).
+            SystemEvent::Swipe { dir: SwipeDir::Left, region: SwipeRegion::Content } => {
                 let pages = page_count(PANEL_APPS.len());
                 if pages > 1 {
                     self.page = (self.page + 1) % pages;
@@ -240,7 +242,7 @@ impl Screen for PanelScreen {
                     Action::None
                 }
             }
-            SystemEvent::Swipe { dir: SwipeDir::Left, region: SwipeRegion::Content } => {
+            SystemEvent::Swipe { dir: SwipeDir::Right, region: SwipeRegion::Content } => {
                 let pages = page_count(PANEL_APPS.len());
                 if pages > 1 {
                     self.page = (self.page + pages - 1) % pages;
@@ -258,10 +260,8 @@ impl Screen for PanelScreen {
                         return Action::SwitchScreen(target);
                     }
                 }
-                // Future: hit_action(x, y) for the bottom pill.
                 Action::None
             }
-            SystemEvent::PowerButtonLong => Action::Shutdown,
             _ => Action::None,
         }
     }
@@ -303,6 +303,7 @@ fn app_display_name(id: ScreenId) -> &'static str {
         ScreenId::Clock => "Clock",
         ScreenId::Status => "Status",
         ScreenId::Stopwatch => "Stopwatch",
+        ScreenId::Timer => "Timer",
         ScreenId::Settings => "Settings",
         ScreenId::Panel => "Panel",
     }
@@ -319,6 +320,7 @@ fn draw_app_icon<D: DrawTarget<Color = Rgb565>>(
         ScreenId::Clock => glyphs::clock(display, cx, cy, radius, color),
         ScreenId::Status => glyphs::status(display, cx, cy, radius, color),
         ScreenId::Stopwatch => glyphs::stopwatch(display, cx, cy, radius, color),
+        ScreenId::Timer => glyphs::hourglass(display, cx, cy, radius, color),
         ScreenId::Settings => glyphs::settings(display, cx, cy, radius, color),
         ScreenId::Panel => glyphs::panel(display, cx, cy, radius, color),
     }

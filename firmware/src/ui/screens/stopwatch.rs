@@ -70,11 +70,13 @@ impl RunState {
 
 pub struct StopwatchScreen {
     state: RunState,
+    /// Last displayed elapsed second, to avoid redundant redraws.
+    last_rendered_sec: u64,
 }
 
 impl StopwatchScreen {
     pub fn new() -> Self {
-        Self { state: RunState::Idle }
+        Self { state: RunState::Idle, last_rendered_sec: 0 }
     }
 }
 
@@ -114,14 +116,14 @@ impl Screen for StopwatchScreen {
             RunState::Running { .. } => icon_button(
                 display,
                 layout::LEFT_CIRCLE_CX, layout::CIRCLE_CY,
-                theme::PANEL_BG, None,
+                theme::PANEL_BG,
                 glyphs::pause, theme::TEXT_WHITE,
                 "PAUSE", theme::TEXT_DIM,
             ),
             RunState::Idle | RunState::Paused { .. } => icon_button(
                 display,
                 layout::LEFT_CIRCLE_CX, layout::CIRCLE_CY,
-                theme::PANEL_BG, None,
+                theme::PANEL_BG,
                 glyphs::play, theme::TEXT_WHITE,
                 "START", theme::TEXT_DIM,
             ),
@@ -131,7 +133,7 @@ impl Screen for StopwatchScreen {
         icon_button(
             display,
             layout::RIGHT_CIRCLE_CX, layout::CIRCLE_CY,
-            theme::PANEL_BG, None,
+            theme::PANEL_BG,
             glyphs::stop, theme::TEXT_WHITE,
             "RESET", theme::TEXT_DIM,
         );
@@ -141,18 +143,20 @@ impl Screen for StopwatchScreen {
         match event {
             SystemEvent::PowerButtonLong => Action::Shutdown,
 
-            // Motion-updated cadence (20 Hz from IMU task) keeps the
-            // running display fresh. We don't read the motion data -
-            // we just use the event as a periodic tick signal, and
-            // only when actually counting.
+            // 20 Hz tick: redraw only when the displayed second changes.
             SystemEvent::MotionUpdated { .. }
                 if matches!(self.state, RunState::Running { .. }) =>
             {
-                Action::Redraw
+                let sec = self.state.elapsed().as_secs();
+                if sec != self.last_rendered_sec {
+                    self.last_rendered_sec = sec;
+                    Action::Redraw
+                } else {
+                    Action::None
+                }
             }
 
-            // Header icon (X): pop the nav stack and return to
-            // whatever screen opened the panel we were launched from.
+            // Header icon (X): pop the nav stack.
             SystemEvent::Tap { x, y } if layout::header_icon_hit(*x, *y) => {
                 Action::Back
             }
@@ -174,8 +178,6 @@ impl Screen for StopwatchScreen {
                     };
                     Action::Redraw
                 } else if layout::right_circle_hit(*x, *y) {
-                    // Reset is always available - including mid-run,
-                    // which stops-and-clears in one tap.
                     self.state = RunState::Idle;
                     Action::Redraw
                 } else {

@@ -5,7 +5,7 @@ use crate::display_hal::{self, WIDTH, HEIGHT};
 use crate::events::{SelfTestId, SwipeDir, SwipeRegion, SystemEvent};
 use crate::sdcard_hal::EspVolumeManager;
 use crate::system::audio::AudioSystem;
-use crate::system::bus::{EVENTS, IMU_COMMAND, ImuCommand, SLEEP_WATCH, SleepState};
+use crate::system::bus::{EVENTS, IMU_COMMAND, ImuCommand, RTC_COMMAND, RtcCommand, SLEEP_WATCH, SleepState};
 use crate::system::display::{Display, DisplayState};
 use crate::system::power::PowerControls;
 use crate::system::tasks::boot_button::BootButtonTaskState;
@@ -637,11 +637,9 @@ impl SystemManager<'static> {
             }
             SystemEvent::MotionUpdated { data } => {
                 self.cached_data.motion = *data;
-                // Live motion screens (Status page 0/1) need a
-                // redraw on every motion tick. Cheap to over-draw
-                // here - dirty-row hashing skips unchanged rows.
-                self.needs_redraw = true;
-                return;
+                // Don't early-return - forward to the screen so it
+                // can decide whether to redraw (e.g. stopwatch/timer
+                // tick, status live motion display, flash animations).
             }
             SystemEvent::SelfTestUpdated { id, result } => {
                 // Stash the latest result under its id and let the
@@ -787,6 +785,22 @@ impl SystemManager<'static> {
                 // Optimistically flag a redraw so the screen can
                 // pick up the Running state emitted by the task as
                 // soon as it runs.
+                self.needs_redraw = true;
+            }
+            Action::StartTimer { seconds } => {
+                RTC_COMMAND.signal(RtcCommand::StartTimer { seconds });
+                self.needs_redraw = true;
+            }
+            Action::CancelTimer => {
+                RTC_COMMAND.signal(RtcCommand::CancelTimer);
+                self.needs_redraw = true;
+            }
+            Action::SetAlarm { hour, minute, weekday } => {
+                RTC_COMMAND.signal(RtcCommand::SetAlarm { hour, minute, weekday });
+                self.needs_redraw = true;
+            }
+            Action::CancelAlarm => {
+                RTC_COMMAND.signal(RtcCommand::CancelAlarm);
                 self.needs_redraw = true;
             }
         }
