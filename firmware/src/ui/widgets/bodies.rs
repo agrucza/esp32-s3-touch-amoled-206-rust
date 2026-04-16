@@ -16,11 +16,12 @@
 
 use embedded_graphics::{
     draw_target::DrawTarget,
+    geometry::{Point, Size},
     pixelcolor::Rgb565,
     primitives::Rectangle,
 };
 
-use crate::ui::{fonts, theme};
+use crate::ui::{fonts, primitives, theme};
 
 // -- Layout constants --------------------------------------------------------
 //
@@ -75,5 +76,55 @@ pub fn value_body<D: DrawTarget<Color = Rgb565>>(
         display, &fonts::value(),
         value, cx, top + VALUE_TOP_OFFSET,
         value_color,
+    );
+}
+
+// -- circle_stat -------------------------------------------------------------
+
+/// Gap between the bottom of the circle and the top of its label.
+const CIRCLE_STAT_LABEL_GAP: i32 = 12;
+
+/// Render a "dark circle containing a value, with a small caption
+/// below" stat element at `(cx, cy)` with the given `radius`.
+///
+/// Matches the reference watch-face pattern: a `primitives::circle_button`
+/// filled with `theme::PANEL_BG` and outlined in `theme::AMBER_DIM`, the
+/// `value` text centered inside (body font) in `value_color`, and the
+/// `label` caption drawn centered immediately below the circle in
+/// `theme::TEXT_DIM`.
+///
+/// Currently unused - the clock face ended up with icon glyphs in
+/// its circles instead of values, per the reference visual. Kept
+/// as a ready helper for Stopwatch / Timer that will show running
+/// times or similar values in the same circle style.
+#[allow(dead_code)]
+pub fn circle_stat<D: DrawTarget<Color = Rgb565>>(
+    display: &mut D,
+    cx: i32, cy: i32, radius: i32,
+    value: &str,
+    value_color: Rgb565,
+    label: &str,
+) {
+    primitives::circle_button(
+        display,
+        cx, cy, radius,
+        theme::PANEL_BG,
+        Some(theme::AMBER_DIM),
+    );
+
+    let bounds = Rectangle::new(
+        Point::new(cx - radius, cy - radius),
+        Size::new((radius * 2) as u32, (radius * 2) as u32),
+    );
+    fonts::draw_centered_in_rect(
+        display, &fonts::body(),
+        value, bounds,
+        value_color,
+    );
+
+    fonts::draw_centered(
+        display, &fonts::caption(),
+        label, cx, cy + radius + CIRCLE_STAT_LABEL_GAP,
+        theme::TEXT_DIM,
     );
 }

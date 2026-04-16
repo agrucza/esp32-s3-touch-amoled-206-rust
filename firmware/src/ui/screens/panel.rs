@@ -315,6 +315,7 @@ fn app_display_name(id: ScreenId) -> &'static str {
     match id {
         ScreenId::Clock => "Clock",
         ScreenId::Status => "Status",
+        ScreenId::Stopwatch => "Stopwatch",
         ScreenId::Settings => "Settings",
         ScreenId::Panel => "Panel",
     }
@@ -330,6 +331,7 @@ fn draw_app_icon<D: DrawTarget<Color = Rgb565>>(
     match id {
         ScreenId::Clock => draw_clock_glyph(display, cx, cy, radius, color),
         ScreenId::Status => draw_status_glyph(display, cx, cy, radius, color),
+        ScreenId::Stopwatch => draw_stopwatch_glyph(display, cx, cy, radius, color),
         ScreenId::Settings => draw_settings_glyph(display, cx, cy, radius, color),
         // Showing the panel inside the panel would be unusual but we
         // give it a sensible glyph anyway (four dots / grid).
@@ -379,6 +381,42 @@ fn draw_clock_glyph<D: DrawTarget<Color = Rgb565>>(
     Circle::with_center(Point::new(cx, cy), 4)
         .into_styled(PrimitiveStyle::with_fill(color))
         .draw(display).ok();
+}
+
+/// Stopwatch glyph: a small stopwatch dial with a button stem on
+/// top and a hand pointing up-right. Distinct enough from the
+/// regular clock glyph that the two apps don't look identical in
+/// the panel picker.
+fn draw_stopwatch_glyph<D: DrawTarget<Color = Rgb565>>(
+    display: &mut D, cx: i32, cy: i32, radius: i32, color: Rgb565,
+) {
+    let thin  = PrimitiveStyle::with_stroke(color, 2);
+    let thick = PrimitiveStyle::with_stroke(color, 3);
+    let fill  = PrimitiveStyle::with_fill(color);
+
+    // Slightly smaller main dial so there's room for the stem above
+    // without the glyph overflowing its allotted radius.
+    let dial_r = radius * 4 / 5;
+
+    // Button stem on top: small filled rectangle.
+    Rectangle::new(
+        Point::new(cx - 3, cy - dial_r - 5),
+        Size::new(6, 5),
+    ).into_styled(fill).draw(display).ok();
+
+    // Main dial.
+    Circle::with_center(Point::new(cx, cy), (dial_r * 2) as u32)
+        .into_styled(thin).draw(display).ok();
+
+    // Hand pointing up-right (~1 o'clock).
+    Line::new(
+        Point::new(cx, cy),
+        Point::new(cx + dial_r / 2, cy - dial_r / 2),
+    ).into_styled(thick).draw(display).ok();
+
+    // Center cap.
+    Circle::with_center(Point::new(cx, cy), 4)
+        .into_styled(fill).draw(display).ok();
 }
 
 fn draw_status_glyph<D: DrawTarget<Color = Rgb565>>(

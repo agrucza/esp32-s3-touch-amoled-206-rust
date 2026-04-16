@@ -132,6 +132,14 @@ pub struct SystemManager<'d> {
 
     // UI
     screen: ActiveScreen,
+    /// LIFO nav stack for `Action::Back`. Each entry is a screen
+    /// the user can return to. Pushed when the user navigates
+    /// *into* a new screen (tapping a panel app, opening the
+    /// pull-down panel) and popped when a screen returns
+    /// [`Action::Back`]. The Panel modal is never pushed - it
+    /// replaces the current screen on launch-an-app and the
+    /// pre-panel screen already sits below it on the stack.
+    nav_stack: heapless::Vec<ScreenId, NAV_STACK_DEPTH>,
     tick_count: u32,
     needs_redraw: bool,
 
@@ -170,6 +178,14 @@ pub struct SystemManager<'d> {
     // Fully refreshed at boot and on wake-from-sleep.
     cached_data: SystemData,
 }
+
+/// Maximum depth of the navigation stack. Realistically the
+/// deepest chain today is `Clock -> Panel -> App -> Panel ->
+/// App`, but the panel replaces-top so the stack never actually
+/// contains more than one "real" entry per visited screen. Four
+/// slots leaves generous headroom; push failures beyond this
+/// degrade gracefully to "Back returns to Clock".
+const NAV_STACK_DEPTH: usize = 4;
 
 /// All peripheral tokens needed by the system manager.
 ///
@@ -391,6 +407,7 @@ impl SystemManager<'static> {
             rx_transfer: None,
             pending_audio,
             screen,
+            nav_stack: heapless::Vec::new(),
             tick_count: 0,
             needs_redraw: true, // first frame always draws
             mic_drain_buf: alloc::vec![0u8; MIC_DRAIN_BUF_SIZE].into_boxed_slice(),
@@ -695,9 +712,12 @@ impl SystemManager<'static> {
         }
 
         // System-level gesture: swipe-down-from-top opens panel.
+        // Push the pre-panel screen so `Action::Back` from an app
+        // launched via the panel returns here, not to hardcoded Clock.
         if !matches!(self.screen.id(), ScreenId::Panel) {
             if let SystemEvent::Swipe { dir: SwipeDir::Down, region: SwipeRegion::Top } = &event {
                 let previous = self.screen.id();
+                let _ = self.nav_stack.push(previous);
                 self.screen.open_panel(previous, &self.cached_data);
                 self.needs_redraw = true;
                 return;
@@ -729,7 +749,25 @@ impl SystemManager<'static> {
             }
             Action::Redraw => self.needs_redraw = true,
             Action::SwitchScreen(id) => {
+                // Modal replace-top: when leaving Panel (e.g. the
+                // user tapped an app icon), the pre-panel screen
+                // is already at the top of the nav stack from when
+                // the panel was opened, so don't push Panel itself.
+                // Every other transition is a real "into" nav and
+                // pushes so `Back` can find its way home.
+                if !matches!(self.screen.id(), ScreenId::Panel) {
+                    let _ = self.nav_stack.push(self.screen.id());
+                }
                 self.screen.switch_to(id, &self.cached_data);
+                self.needs_redraw = true;
+            }
+            Action::Back => {
+                // Pop the previous screen; fall back to Clock if the
+                // stack is empty (first screen on boot, overflow, or
+                // a screen that returned Back without anyone having
+                // pushed anything). Clock is always a safe landing.
+                let target = self.nav_stack.pop().unwrap_or(ScreenId::Clock);
+                self.screen.switch_to(target, &self.cached_data);
                 self.needs_redraw = true;
             }
             Action::Shutdown => {

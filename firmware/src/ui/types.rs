@@ -17,6 +17,10 @@ pub use crate::events::{
 pub enum ScreenId {
     Clock,
     Status,
+    /// Count-up stopwatch (MM:SS.hh). Panel-only app - not on the
+    /// home-row rotation, reached by tapping its icon in the pull-
+    /// down panel.
+    Stopwatch,
     /// Device settings - internally state-machined into sub-views
     /// (IMU, RTC, Power, ...) via `SettingsScreen`'s own enum, so
     /// from the outside there is only one screen id.
@@ -38,19 +42,38 @@ pub enum ScreenId {
 /// tasks, shut down) - screens never touch those directly. This
 /// keeps screens portable and the control flow easy to trace.
 ///
-/// `SwitchScreen` is currently unused but stays as part of the screen
-/// API - screens may want to programmatically navigate (e.g., a
-/// settings screen returning to Clock, an alarm firing jumping to a
-/// timer screen).
-#[allow(dead_code)] // SwitchScreen is reserved for programmatic nav
+/// ## Forward vs. back navigation
+///
+/// Screens that want to *go somewhere specific* return
+/// [`SwitchScreen`]. The navigator pushes the current screen onto
+/// its nav stack (unless the current screen is the Panel modal,
+/// which is replaced rather than pushed) and switches to the
+/// requested target.
+///
+/// Screens that want to *close and return to whatever opened them*
+/// return [`Back`]. The navigator pops the nav stack and switches
+/// to the popped id. When the stack is empty it falls back to
+/// [`ScreenId::Clock`]. This is the right return for close X
+/// buttons and swipe-to-dismiss gestures - screens don't hard-code
+/// a target, so "close Stopwatch" goes back to Settings if that's
+/// where the panel was opened from, or Clock if the user was there
+/// before.
+///
+/// [`SwitchScreen`]: Action::SwitchScreen
+/// [`Back`]: Action::Back
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Action {
     /// Nothing to do.
     None,
     /// Screen content changed, request a display refresh.
     Redraw,
-    /// Switch to a different screen.
+    /// Switch to a specific target screen. Pushes the current
+    /// screen onto the nav stack unless the current screen is
+    /// [`ScreenId::Panel`] (modal replace-top semantics).
     SwitchScreen(ScreenId),
+    /// Pop the nav stack and return to the previous screen. Falls
+    /// back to [`ScreenId::Clock`] when the stack is empty.
+    Back,
     /// Request system shutdown.
     Shutdown,
     /// Run a hardware self-test. The main loop routes the id to the

@@ -2,6 +2,7 @@ pub mod clock;
 pub mod panel;
 pub mod settings;
 pub mod status;
+pub mod stopwatch;
 
 use embedded_graphics::{draw_target::DrawTarget, pixelcolor::Rgb565};
 
@@ -23,6 +24,7 @@ pub const HOME_APPS: &[ScreenId] = &[
 pub const PANEL_APPS: &[ScreenId] = &[
     ScreenId::Clock,
     ScreenId::Status,
+    ScreenId::Stopwatch,
     ScreenId::Settings,
 ];
 
@@ -49,6 +51,7 @@ pub fn cycle_home_app(current: ScreenId, forward: bool) -> ScreenId {
 pub enum ActiveScreen {
     Clock(clock::ClockScreen),
     Status(status::StatusScreen),
+    Stopwatch(stopwatch::StopwatchScreen),
     Settings(settings::SettingsScreen),
     Panel(panel::PanelScreen),
 }
@@ -65,6 +68,7 @@ impl ActiveScreen {
         match id {
             ScreenId::Clock => Self::Clock(clock::ClockScreen::new()),
             ScreenId::Status => Self::Status(status::StatusScreen::new()),
+            ScreenId::Stopwatch => Self::Stopwatch(stopwatch::StopwatchScreen::new()),
             ScreenId::Settings => Self::Settings(settings::SettingsScreen::new()),
             ScreenId::Panel => {
                 debug_assert!(false, "use ActiveScreen::new_panel(previous) for Panel");
@@ -83,6 +87,7 @@ impl ActiveScreen {
         match self {
             Self::Clock(s) => s.render(display, data),
             Self::Status(s) => s.render(display, data),
+            Self::Stopwatch(s) => s.render(display, data),
             Self::Settings(s) => s.render(display, data),
             Self::Panel(s) => s.render(display, data),
         }
@@ -92,6 +97,7 @@ impl ActiveScreen {
         match self {
             Self::Clock(s) => s.on_event(event, data),
             Self::Status(s) => s.on_event(event, data),
+            Self::Stopwatch(s) => s.on_event(event, data),
             Self::Settings(s) => s.on_event(event, data),
             Self::Panel(s) => s.on_event(event, data),
         }
@@ -107,6 +113,7 @@ impl ActiveScreen {
         match self {
             Self::Clock(s) => s.on_mount(data),
             Self::Status(s) => s.on_mount(data),
+            Self::Stopwatch(s) => s.on_mount(data),
             Self::Settings(s) => s.on_mount(data),
             Self::Panel(s) => s.on_mount(data),
         }
@@ -122,6 +129,7 @@ impl ActiveScreen {
         match self {
             Self::Clock(s) => s.on_unmount(),
             Self::Status(s) => s.on_unmount(),
+            Self::Stopwatch(s) => s.on_unmount(),
             Self::Settings(s) => s.on_unmount(),
             Self::Panel(s) => s.on_unmount(),
         }
@@ -132,6 +140,7 @@ impl ActiveScreen {
         match self {
             Self::Clock(_) => ScreenId::Clock,
             Self::Status(_) => ScreenId::Status,
+            Self::Stopwatch(_) => ScreenId::Stopwatch,
             Self::Settings(_) => ScreenId::Settings,
             Self::Panel(_) => ScreenId::Panel,
         }

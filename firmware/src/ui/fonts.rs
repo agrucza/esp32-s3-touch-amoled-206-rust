@@ -32,6 +32,12 @@ pub type Body = raw::u8g2_font_helvR14_te;
 pub type Headline = raw::u8g2_font_helvR18_te;
 /// Bold value / headline text (~24 px tall, bold weight).
 pub type Value = raw::u8g2_font_helvB24_te;
+/// Monospace bold value text (~24 px tall). Same visual weight as
+/// [`Value`] but every glyph advances the same width, so a digit-
+/// based display (stopwatch, timer, countdown) doesn't shimmer
+/// horizontally as the digits change width. Courier Bold 24 is a
+/// clean typewriter-style monospace that reads well at this size.
+pub type Mono = raw::u8g2_font_courB24_tr;
 /// Hero numeric display text - clean bold sans-serif at 49 px, used
 /// for the clock face and any other large-numeric hero elements
 /// (stopwatches, timers, big readings). Digits-only `_tn` charset for
@@ -47,6 +53,7 @@ pub fn caption()  -> FontRenderer { FontRenderer::new::<Caption>() }
 pub fn body()     -> FontRenderer { FontRenderer::new::<Body>() }
 pub fn headline() -> FontRenderer { FontRenderer::new::<Headline>() }
 pub fn value()    -> FontRenderer { FontRenderer::new::<Value>() }
+pub fn mono()     -> FontRenderer { FontRenderer::new::<Mono>() }
 pub fn hero()     -> FontRenderer { FontRenderer::new::<Hero>() }
 
 // -- Rendering helpers -------------------------------------------------------
