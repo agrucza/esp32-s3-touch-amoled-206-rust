@@ -18,8 +18,8 @@ use crate::ui::{fonts, primitives, theme};
 
 // -- Layout constants --------------------------------------------------------
 
-/// Top of the numpad button grid.
-const NUMPAD_TOP: i32 = 150;
+/// Default top of the numpad button grid.
+const DEFAULT_TOP: i32 = 150;
 /// Button width.
 const BTN_W: i32 = 90;
 /// Button height.
@@ -68,6 +68,8 @@ pub struct Numpad {
     pub digits: heapless::Vec<u8, MAX_DIGITS>,
     /// Maximum number of digits accepted.
     max_digits: usize,
+    /// Top Y of the first button row.
+    top_y: i32,
 }
 
 impl Numpad {
@@ -76,12 +78,36 @@ impl Numpad {
         Self {
             digits: heapless::Vec::new(),
             max_digits: max_digits.min(MAX_DIGITS),
+            top_y: DEFAULT_TOP,
         }
     }
 
+    /// Set a custom top Y for the button grid. Use this when there
+    /// is extra content (e.g. day selector) between the header and
+    /// the numpad.
+    pub fn with_top(mut self, top_y: i32) -> Self {
+        self.top_y = top_y;
+        self
+    }
+
     /// Clear all entered digits.
+    #[allow(dead_code)]
     pub fn clear(&mut self) {
         self.digits.clear();
+    }
+
+    /// Pre-fill with digits from a slice, stripping leading zeros.
+    /// Use this when opening the numpad with an existing value.
+    pub fn prefill(&mut self, raw: &[u8]) {
+        self.digits.clear();
+        let mut started = false;
+        for &d in raw {
+            if d != 0 { started = true; }
+            if started {
+                if self.digits.len() >= self.max_digits { break; }
+                let _ = self.digits.push(d);
+            }
+        }
     }
 
     /// Render the button grid (no header, no label - the caller
@@ -89,7 +115,7 @@ impl Numpad {
     pub fn render<D: DrawTarget<Color = Rgb565>>(&self, display: &mut D) {
         for row in 0..4 {
             for col in 0..3 {
-                let (bx, by) = button_origin(row, col);
+                let (bx, by) = button_origin(self.top_y, row, col);
                 let label = BUTTON_LABELS[row][col];
 
                 if !label.is_empty() {
@@ -127,7 +153,7 @@ impl Numpad {
 
         for row in 0..4 {
             for col in 0..3 {
-                let (bx, by) = button_origin(row, col);
+                let (bx, by) = button_origin(self.top_y, row, col);
                 if px >= bx && px < bx + BTN_W && py >= by && py < by + BTN_H {
                     return match BUTTON_LABELS[row][col] {
                         "" if row == 3 && col == 0 => Some(NumpadAction::Backspace),
@@ -180,9 +206,9 @@ impl Numpad {
 // -- Private helpers ---------------------------------------------------------
 
 /// Top-left corner of the button at (row, col).
-fn button_origin(row: usize, col: usize) -> (i32, i32) {
+fn button_origin(top_y: i32, row: usize, col: usize) -> (i32, i32) {
     let x = GRID_X + col as i32 * (BTN_W + BTN_GAP_X);
-    let y = NUMPAD_TOP + row as i32 * (BTN_H + BTN_GAP_Y);
+    let y = top_y + row as i32 * (BTN_H + BTN_GAP_Y);
     (x, y)
 }
 

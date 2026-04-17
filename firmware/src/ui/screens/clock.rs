@@ -95,6 +95,20 @@ impl Screen for ClockScreen {
             glyphs::hourglass, theme::TEXT_WHITE,
             "TIMER", theme::TEXT_DIM,
         );
+        // Notification dot when timer is running.
+        if data.timer.is_running() {
+            let dot_offset = (layout::CIRCLE_RADIUS as f32 * 0.707) as i32;
+            Circle::with_center(
+                Point::new(
+                    layout::LEFT_CIRCLE_CX + dot_offset,
+                    layout::CIRCLE_CY - dot_offset,
+                ),
+                (NOTIFY_DOT_RADIUS * 2) as u32,
+            )
+            .into_styled(PrimitiveStyle::with_fill(theme::AMBER))
+            .draw(display)
+            .ok();
+        }
 
         // -- Right circle: bell glyph, ALARM label, notification dot -------
         icon_button(
@@ -104,19 +118,20 @@ impl Screen for ClockScreen {
             glyphs::bell, theme::TEXT_WHITE,
             "ALARM", theme::TEXT_DIM,
         );
-        // Notification dot: sits on the upper-right edge of the
-        // circle, roughly on the 45-deg (1:30 o'clock) tangent.
-        let dot_offset = (layout::CIRCLE_RADIUS as f32 * 0.707) as i32;
-        Circle::with_center(
-            Point::new(
-                layout::RIGHT_CIRCLE_CX + dot_offset,
-                layout::CIRCLE_CY - dot_offset,
-            ),
-            (NOTIFY_DOT_RADIUS * 2) as u32,
-        )
-        .into_styled(PrimitiveStyle::with_fill(theme::GREEN))
-        .draw(display)
-        .ok();
+        // Notification dot: only shown when alarms are enabled.
+        if data.alarms.enabled_count() > 0 {
+            let dot_offset = (layout::CIRCLE_RADIUS as f32 * 0.707) as i32;
+            Circle::with_center(
+                Point::new(
+                    layout::RIGHT_CIRCLE_CX + dot_offset,
+                    layout::CIRCLE_CY - dot_offset,
+                ),
+                (NOTIFY_DOT_RADIUS * 2) as u32,
+            )
+            .into_styled(PrimitiveStyle::with_fill(theme::GREEN))
+            .draw(display)
+            .ok();
+        }
     }
 
     fn on_event(&mut self, event: &SystemEvent, _data: &mut SystemData) -> Action {
@@ -125,6 +140,9 @@ impl Screen for ClockScreen {
             SystemEvent::TimeUpdated { .. } => Action::Redraw,
             SystemEvent::Tap { x, y } if layout::left_circle_hit(*x, *y) => {
                 Action::SwitchScreen(ScreenId::Timer)
+            }
+            SystemEvent::Tap { x, y } if layout::right_circle_hit(*x, *y) => {
+                Action::SwitchScreen(ScreenId::Alarm)
             }
             _ => Action::None,
         }

@@ -1,3 +1,4 @@
+pub mod alarm;
 pub mod clock;
 pub mod panel;
 pub mod settings;
@@ -27,6 +28,7 @@ pub const PANEL_APPS: &[ScreenId] = &[
     ScreenId::Status,
     ScreenId::Stopwatch,
     ScreenId::Timer,
+    ScreenId::Alarm,
     ScreenId::Settings,
 ];
 
@@ -55,6 +57,7 @@ pub enum ActiveScreen {
     Status(status::StatusScreen),
     Stopwatch(stopwatch::StopwatchScreen),
     Timer(timer::TimerScreen),
+    Alarm(alarm::AlarmScreen),
     Settings(settings::SettingsScreen),
     Panel(panel::PanelScreen),
 }
@@ -71,6 +74,7 @@ impl ActiveScreen {
             ScreenId::Status => Self::Status(status::StatusScreen::new()),
             ScreenId::Stopwatch => Self::Stopwatch(stopwatch::StopwatchScreen::new()),
             ScreenId::Timer => Self::Timer(timer::TimerScreen::new()),
+            ScreenId::Alarm => Self::Alarm(alarm::AlarmScreen::new()),
             ScreenId::Settings => Self::Settings(settings::SettingsScreen::new()),
             ScreenId::Panel => {
                 debug_assert!(false, "use ActiveScreen::new_panel(previous) for Panel");
@@ -91,6 +95,7 @@ impl ActiveScreen {
             Self::Status(s) => s.render(display, data),
             Self::Stopwatch(s) => s.render(display, data),
             Self::Timer(s) => s.render(display, data),
+            Self::Alarm(s) => s.render(display, data),
             Self::Settings(s) => s.render(display, data),
             Self::Panel(s) => s.render(display, data),
         }
@@ -102,6 +107,7 @@ impl ActiveScreen {
             Self::Status(s) => s.on_event(event, data),
             Self::Stopwatch(s) => s.on_event(event, data),
             Self::Timer(s) => s.on_event(event, data),
+            Self::Alarm(s) => s.on_event(event, data),
             Self::Settings(s) => s.on_event(event, data),
             Self::Panel(s) => s.on_event(event, data),
         }
@@ -113,6 +119,7 @@ impl ActiveScreen {
             Self::Status(s) => s.on_mount(data),
             Self::Stopwatch(s) => s.on_mount(data),
             Self::Timer(s) => s.on_mount(data),
+            Self::Alarm(s) => s.on_mount(data),
             Self::Settings(s) => s.on_mount(data),
             Self::Panel(s) => s.on_mount(data),
         }
@@ -124,6 +131,7 @@ impl ActiveScreen {
             Self::Status(s) => s.on_unmount(),
             Self::Stopwatch(s) => s.on_unmount(),
             Self::Timer(s) => s.on_unmount(),
+            Self::Alarm(s) => s.on_unmount(),
             Self::Settings(s) => s.on_unmount(),
             Self::Panel(s) => s.on_unmount(),
         }
@@ -136,6 +144,7 @@ impl ActiveScreen {
             Self::Status(_) => ScreenId::Status,
             Self::Stopwatch(_) => ScreenId::Stopwatch,
             Self::Timer(_) => ScreenId::Timer,
+            Self::Alarm(_) => ScreenId::Alarm,
             Self::Settings(_) => ScreenId::Settings,
             Self::Panel(_) => ScreenId::Panel,
         }

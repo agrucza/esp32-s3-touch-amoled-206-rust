@@ -22,6 +22,9 @@ pub enum ScreenId {
     /// Count-down timer with numpad duration entry. Panel-only app,
     /// also reachable by tapping the TIMER circle on the clock face.
     Timer,
+    /// Alarm manager. Reachable from the clock face's ALARM circle
+    /// and the panel.
+    Alarm,
     /// Device settings - internally state-machined into sub-views
     /// (IMU, RTC, Power, ...) via `SettingsScreen`'s own enum, so
     /// from the outside there is only one screen id.
@@ -100,10 +103,16 @@ pub enum Action {
     /// Set the RTC date and time.
     SetTime { year: u16, month: u8, day: u8, hour: u8, minute: u8, second: u8 },
     /// Start a repeating haptic buzz pattern. The manager buzzes
-    /// `on_ms` on, `off_ms` off, repeated until `BuzzStop` is sent.
-    BuzzStart { on_ms: u16, off_ms: u16 },
+    /// `on_ms` on, `off_ms` off, repeated until `StopBuzz` is sent.
+    StartBuzz { on_ms: u16, off_ms: u16 },
     /// Stop an active buzz pattern.
-    BuzzStop,
+    StopBuzz,
+    /// Snooze the active alarm. The manager stops the buzz, sets
+    /// the snoozed flag, and programs the RTC with now + 10 minutes.
+    SnoozeAlarm,
+    /// Dismiss the active alarm. The manager stops the buzz and
+    /// navigates back to the previous screen.
+    DismissAlarm,
 }
 
 // -- Persistent app state ----------------------------------------------------
@@ -183,6 +192,110 @@ impl Default for TimerState {
     }
 }
 
+// -- Alarm state -------------------------------------------------------------
+
+/// Maximum number of user-configurable alarms.
+pub const MAX_ALARMS: usize = 8;
+
+/// One alarm entry.
+#[derive(Debug, Clone, Copy)]
+pub struct AlarmEntry {
+    pub hour: u8,
+    pub minute: u8,
+    /// Bitmask of active days: bit 0 = Sunday, bit 1 = Monday, ...
+    /// bit 6 = Saturday. 0x7F = every day, 0x3E = Mon-Fri,
+    /// 0x41 = Sat+Sun, 0x00 = disabled.
+    pub days: u8,
+    pub enabled: bool,
+}
+
+impl Default for AlarmEntry {
+    fn default() -> Self {
+        Self { hour: 0, minute: 0, days: 0x7F, enabled: false }
+    }
+}
+
+impl AlarmEntry {
+    /// True if this alarm fires on the given weekday (0=Sunday..6=Saturday).
+    pub fn fires_on(&self, weekday: u8) -> bool {
+        self.enabled && (self.days & (1 << weekday)) != 0
+    }
+}
+
+/// Persistent alarm list. Screens mutate this directly.
+#[derive(Debug, Clone, Copy)]
+pub struct AlarmState {
+    pub entries: [AlarmEntry; MAX_ALARMS],
+    /// Index of the alarm currently programmed into the RTC hardware,
+    /// or None if no alarm is active.
+    pub active_hw: Option<usize>,
+    /// True when an alarm has fired and the user hasn't dismissed it.
+    pub alerting: bool,
+    /// True when a snooze is active. The manager skips regular
+    /// reprogramming while this is set. Cleared when the snooze
+    /// alarm fires.
+    pub snoozed: bool,
+}
+
+impl Default for AlarmState {
+    fn default() -> Self {
+        Self {
+            entries: [AlarmEntry::default(); MAX_ALARMS],
+            active_hw: None,
+            alerting: false,
+            snoozed: false,
+        }
+    }
+}
+
+impl AlarmState {
+    /// Count of enabled alarms.
+    pub fn enabled_count(&self) -> usize {
+        self.entries.iter().filter(|e| e.enabled).count()
+    }
+
+    /// Find the next alarm that should fire after the given time
+    /// and weekday. Returns the index, or None if no alarms are enabled.
+    pub fn next_alarm(&self, hour: u8, minute: u8, weekday: u8) -> Option<usize> {
+        let now_mins = hour as u16 * 60 + minute as u16;
+        let mut best: Option<(usize, u16)> = None; // (index, minutes_until)
+
+        for (i, entry) in self.entries.iter().enumerate() {
+            if !entry.enabled {
+                continue;
+            }
+            let alarm_mins = entry.hour as u16 * 60 + entry.minute as u16;
+
+            // Check each of the next 7 days.
+            for day_offset in 0u8..7 {
+                let check_day = (weekday + day_offset) % 7;
+                if !entry.fires_on(check_day) {
+                    continue;
+                }
+                let mut mins_until = day_offset as u16 * 24 * 60 + alarm_mins;
+                if day_offset == 0 && alarm_mins <= now_mins {
+                    // Already passed today, try next week.
+                    continue;
+                }
+                if day_offset == 0 {
+                    mins_until = alarm_mins - now_mins;
+                }
+                match best {
+                    Some((_, best_mins)) if mins_until < best_mins => {
+                        best = Some((i, mins_until));
+                    }
+                    None => {
+                        best = Some((i, mins_until));
+                    }
+                    _ => {}
+                }
+                break; // found the earliest firing day for this entry
+            }
+        }
+        best.map(|(i, _)| i)
+    }
+}
+
 // -- System data snapshot ----------------------------------------------------
 
 // The per-peripheral data structs live alongside the task that
@@ -209,6 +322,7 @@ pub struct SystemData {
     pub tick_count: u32,
     pub stopwatch: StopwatchState,
     pub timer: TimerState,
+    pub alarms: AlarmState,
     /// Per-test latest result, indexed by [`SelfTestId`] cast to
     /// `usize`. Updated by the main loop whenever a
     /// [`SystemEvent::SelfTestUpdated`] arrives.

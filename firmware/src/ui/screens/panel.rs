@@ -304,6 +304,7 @@ fn app_display_name(id: ScreenId) -> &'static str {
         ScreenId::Status => "Status",
         ScreenId::Stopwatch => "Stopwatch",
         ScreenId::Timer => "Timer",
+        ScreenId::Alarm => "Alarm",
         ScreenId::Settings => "Settings",
         ScreenId::Panel => "Panel",
     }
@@ -321,6 +322,7 @@ fn draw_app_icon<D: DrawTarget<Color = Rgb565>>(
         ScreenId::Status => glyphs::status(display, cx, cy, radius, color),
         ScreenId::Stopwatch => glyphs::stopwatch(display, cx, cy, radius, color),
         ScreenId::Timer => glyphs::hourglass(display, cx, cy, radius, color),
+        ScreenId::Alarm => glyphs::bell(display, cx, cy, radius, color),
         ScreenId::Settings => glyphs::settings(display, cx, cy, radius, color),
         ScreenId::Panel => glyphs::panel(display, cx, cy, radius, color),
     }

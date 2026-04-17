@@ -405,6 +405,7 @@ impl SystemManager<'static> {
             self_tests: [crate::events::SelfTestResult::NotRun; crate::events::NUM_SELF_TESTS],
             stopwatch: Default::default(),
             timer: Default::default(),
+            alarms: Default::default(),
         };
 
         // Build the initial screen and fire its `on_mount` hook so
@@ -648,6 +649,36 @@ impl SystemManager<'static> {
         }
     }
 
+    /// Check if the next-to-fire alarm differs from what's programmed
+    /// in the RTC. If so, reprogram. Called on every TimeUpdated.
+    fn check_alarm_reprogram(&mut self) {
+        // Don't reprogram while snoozing - the snooze time is in the RTC.
+        if self.cached_data.alarms.snoozed {
+            return;
+        }
+
+        let d = &self.cached_data;
+        let weekday = crate::ui::screens::alarm::day_of_week(
+            d.time.year as i32,
+            d.time.month as i32,
+            d.time.day as i32,
+        );
+        let next = d.alarms.next_alarm(d.time.hour, d.time.minute, weekday);
+        if next != self.cached_data.alarms.active_hw {
+            self.cached_data.alarms.active_hw = next;
+            if let Some(idx) = next {
+                let entry = &self.cached_data.alarms.entries[idx];
+                RTC_COMMAND.signal(RtcCommand::SetAlarm {
+                    hour: entry.hour,
+                    minute: entry.minute,
+                    weekday: None,
+                });
+            } else {
+                RTC_COMMAND.signal(RtcCommand::CancelAlarm);
+            }
+        }
+    }
+
     // ================= Event loop ================================================
 
     /// Handle a single event received from the global event channel.
@@ -665,6 +696,8 @@ impl SystemManager<'static> {
         match &event {
             SystemEvent::TimeUpdated { data } => {
                 self.cached_data.time = *data;
+                // Check if the next alarm needs reprogramming.
+                self.check_alarm_reprogram();
                 // Don't early-return - forward to the screen so it
                 // can resync timer deadlines from RTC time.
             }
@@ -698,6 +731,15 @@ impl SystemManager<'static> {
                 self.needs_redraw = true;
                 // Forward to the timer screen so it can buzz/alert.
             }
+            SystemEvent::AlarmFired => {
+                // Navigate to alarm screen to handle the notification.
+                if !matches!(self.screen.id(), ScreenId::Alarm) {
+                    let _ = self.nav_stack.push(self.screen.id());
+                    self.screen.switch_to(ScreenId::Alarm, &self.cached_data);
+                }
+                self.needs_redraw = true;
+                // Forward to the alarm screen so it can buzz/alert.
+            }
             SystemEvent::SelfTestUpdated { id, result } => {
                 // Stash the latest result under its id and let the
                 // current screen decide whether it cares. Most don't -
@@ -721,10 +763,9 @@ impl SystemManager<'static> {
             _ => {}
         }
 
-        // Non-user wake sources (IMU motion, RTC alarm, RTC timer):
-        // clear sleep flag and skip screen dispatch so we don't
-        // route the wake event itself into a handler.
-        if Self::is_wake_source(&event) {
+        // Non-user wake sources: wake the device first, then let
+        // the event continue through to screen dispatch.
+        if self.sleeping && Self::is_wake_source(&event) {
             let reason = match event {
                 SystemEvent::WakeOnMotion => "IMU motion",
                 SystemEvent::AlarmFired => "RTC alarm",
@@ -733,7 +774,11 @@ impl SystemManager<'static> {
             };
             log::info!("wake: {}", reason);
             self.wake().await;
-            return;
+            // WakeOnMotion just wakes - no screen needs the event.
+            // AlarmFired and TimerExpired need to reach the screen.
+            if matches!(event, SystemEvent::WakeOnMotion) {
+                return;
+            }
         }
 
         // Sleep/wake transitions on user activity.
@@ -864,7 +909,7 @@ impl SystemManager<'static> {
                 RTC_COMMAND.signal(RtcCommand::SetTime { year, month, day, hour, minute, second });
                 self.needs_redraw = true;
             }
-            Action::BuzzStart { on_ms, off_ms } => {
+            Action::StartBuzz { on_ms, off_ms } => {
                 self.buzz = Some(BuzzPattern {
                     on_ms: on_ms as u64,
                     off_ms: off_ms as u64,
@@ -873,9 +918,41 @@ impl SystemManager<'static> {
                 });
                 self.power.buzz();
             }
-            Action::BuzzStop => {
+            Action::StopBuzz => {
                 self.buzz = None;
                 self.power.buzz_stop();
+                self.needs_redraw = true;
+            }
+            Action::DismissAlarm => {
+                self.buzz = None;
+                self.power.buzz_stop();
+                let target = self.nav_stack.pop().unwrap_or(ScreenId::Clock);
+                self.screen.switch_to(target, &self.cached_data);
+                self.needs_redraw = true;
+            }
+            Action::SnoozeAlarm => {
+                // Stop buzz.
+                self.buzz = None;
+                self.power.buzz_stop();
+                // Set snoozed guard.
+                self.cached_data.alarms.snoozed = true;
+                // Program RTC with now + 10 minutes.
+                let t = &self.cached_data.time;
+                let snooze_min = (t.minute + 10) % 60;
+                let snooze_hour = if t.minute + 10 >= 60 {
+                    (t.hour + 1) % 24
+                } else {
+                    t.hour
+                };
+                RTC_COMMAND.signal(RtcCommand::SetAlarm {
+                    hour: snooze_hour,
+                    minute: snooze_min,
+                    weekday: None,
+                });
+                // Navigate back to previous screen.
+                let target = self.nav_stack.pop().unwrap_or(ScreenId::Clock);
+                self.screen.switch_to(target, &self.cached_data);
+                self.needs_redraw = true;
             }
         }
     }

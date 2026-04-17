@@ -234,23 +234,27 @@ impl SettingsScreen {
                     .contains(Point::new(*x as i32, *y as i32))
                 {
                     // Open time numpad, pre-fill with current time.
-                    self.numpad.clear();
                     let t = &data.time;
-                    push_two_digits(&mut self.numpad.digits, t.hour);
-                    push_two_digits(&mut self.numpad.digits, t.minute);
-                    push_two_digits(&mut self.numpad.digits, t.second);
+                    self.numpad = Numpad::new(6);
+                    self.numpad.prefill(&[
+                        t.hour / 10, t.hour % 10,
+                        t.minute / 10, t.minute % 10,
+                        t.second / 10, t.second % 10,
+                    ]);
                     self.view = SettingsView::TimeEntry;
                     Action::Redraw
                 } else if layout::content_card_rect(1)
                     .contains(Point::new(*x as i32, *y as i32))
                 {
                     // Open date numpad, pre-fill with current date.
-                    self.numpad = Numpad::new(8);
-                    self.numpad.clear();
                     let t = &data.time;
-                    push_two_digits(&mut self.numpad.digits, t.day);
-                    push_two_digits(&mut self.numpad.digits, t.month);
-                    push_four_digits(&mut self.numpad.digits, t.year);
+                    self.numpad = Numpad::new(8);
+                    self.numpad.prefill(&[
+                        t.day / 10, t.day % 10,
+                        t.month / 10, t.month % 10,
+                        (t.year / 1000) as u8, ((t.year / 100) % 10) as u8,
+                        ((t.year / 10) % 10) as u8, (t.year % 10) as u8,
+                    ]);
                     self.view = SettingsView::DateEntry;
                     Action::Redraw
                 } else {
@@ -496,19 +500,6 @@ fn pad_digits(digits: &[u8], len: usize) -> [u8; MAX_DIGITS] {
     p
 }
 
-/// Push a two-digit value (0-99) as individual digits.
-fn push_two_digits(digits: &mut heapless::Vec<u8, MAX_DIGITS>, val: u8) {
-    let _ = digits.push(val / 10);
-    let _ = digits.push(val % 10);
-}
-
-/// Push a four-digit value (0-9999) as individual digits.
-fn push_four_digits(digits: &mut heapless::Vec<u8, MAX_DIGITS>, val: u16) {
-    let _ = digits.push((val / 1000) as u8);
-    let _ = digits.push(((val / 100) % 10) as u8);
-    let _ = digits.push(((val / 10) % 10) as u8);
-    let _ = digits.push((val % 10) as u8);
-}
 
 fn format_result(
     result: &SelfTestResult,

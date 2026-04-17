@@ -33,7 +33,7 @@ use crate::events::SystemEvent;
 use crate::ui::{fonts, glyphs, layout, primitives, theme};
 use crate::ui::types::{Action, Screen, SystemData, TimerState};
 use crate::system::tasks::rtc::TimeData;
-use crate::ui::widgets::{header_bar, icon_button, HeaderIcon, Numpad, NumpadAction, MAX_DIGITS};
+use crate::ui::widgets::{header_bar, icon_button, HeaderIcon, Numpad, NumpadAction};
 
 // -- Constants ---------------------------------------------------------------
 
@@ -159,7 +159,7 @@ impl Screen for TimerScreen {
         if matches!(event, SystemEvent::TimerExpired) {
             self.alerting = true;
             self.view = TimerView::Main;
-            return Action::BuzzStart { on_ms: 200, off_ms: 100 };
+            return Action::StartBuzz { on_ms: 200, off_ms: 100 };
         }
 
         // While alerting: tick the flash, dismiss on tap.
@@ -167,7 +167,7 @@ impl Screen for TimerScreen {
             if matches!(event, SystemEvent::Tap { .. }) {
                 self.alerting = false;
                 self.alert_ticks = 0;
-                return Action::BuzzStop;
+                return Action::StopBuzz;
             }
             if matches!(event, SystemEvent::MotionUpdated { .. }) {
                 let old_phase = self.alert_ticks / FLASH_PHASE_TICKS;
@@ -291,8 +291,8 @@ impl TimerScreen {
                 if !data.timer.is_running()
                     && layout::hero_pill_hit(*x, *y) =>
             {
-                self.numpad.clear();
-                duration_to_digits(data.timer.remaining(), &mut self.numpad.digits);
+                let rem = data.timer.remaining();
+                self.numpad.prefill(&duration_to_raw(rem));
                 self.view = TimerView::Numpad;
                 Action::Redraw
             }
@@ -402,8 +402,7 @@ impl TimerScreen {
                             if dur.as_secs() > MAX_TIMER_SECS {
                                 let capped = Duration::from_secs(MAX_TIMER_SECS);
                                 data.timer = TimerState::Idle { duration: capped };
-                                self.numpad.clear();
-                                duration_to_digits(capped, &mut self.numpad.digits);
+                                self.numpad.prefill(&duration_to_raw(capped));
                                 self.flash_ticks = FLASH_TOTAL_TICKS;
                                 return Action::Redraw;
                             }
@@ -454,24 +453,15 @@ fn digits_to_duration(digits: &[u8]) -> Duration {
     Duration::from_secs(h * 3600 + m * 60 + s)
 }
 
-/// Convert a Duration into digits for populating the numpad buffer.
-/// Strips leading zeros.
-fn duration_to_digits(d: Duration, digits: &mut heapless::Vec<u8, MAX_DIGITS>) {
-    digits.clear();
+/// Convert a Duration into raw digit array [HH, MM, SS].
+fn duration_to_raw(d: Duration) -> [u8; 6] {
     let total_secs = d.as_secs();
     let h = (total_secs / 3600).min(99);
     let m = (total_secs / 60) % 60;
     let s = total_secs % 60;
-    let raw = [
+    [
         (h / 10) as u8, (h % 10) as u8,
         (m / 10) as u8, (m % 10) as u8,
         (s / 10) as u8, (s % 10) as u8,
-    ];
-    let mut started = false;
-    for &d in &raw {
-        if d != 0 { started = true; }
-        if started {
-            let _ = digits.push(d);
-        }
-    }
+    ]
 }

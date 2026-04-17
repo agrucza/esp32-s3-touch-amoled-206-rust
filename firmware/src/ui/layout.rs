@@ -187,6 +187,5 @@ pub fn header_icon_hit(x: u16, y: u16) -> bool {
     let py = y as i32;
     px >= h.top_left.x
         && px < h.top_left.x + crate::ui::widgets::HEADER_ICON_HIT_WIDTH
-        && py >= h.top_left.y
         && py < h.top_left.y + h.size.height as i32
 }
