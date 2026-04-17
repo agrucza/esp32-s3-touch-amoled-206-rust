@@ -97,6 +97,8 @@ pub enum Action {
     /// Cancel a set RTC alarm.
     #[allow(dead_code)]
     CancelAlarm,
+    /// Set the RTC date and time.
+    SetTime { year: u16, month: u8, day: u8, hour: u8, minute: u8, second: u8 },
     /// Start a repeating haptic buzz pattern. The manager buzzes
     /// `on_ms` on, `off_ms` off, repeated until `BuzzStop` is sent.
     BuzzStart { on_ms: u16, off_ms: u16 },

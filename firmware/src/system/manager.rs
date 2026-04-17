@@ -860,6 +860,10 @@ impl SystemManager<'static> {
                 RTC_COMMAND.signal(RtcCommand::CancelAlarm);
                 self.needs_redraw = true;
             }
+            Action::SetTime { year, month, day, hour, minute, second } => {
+                RTC_COMMAND.signal(RtcCommand::SetTime { year, month, day, hour, minute, second });
+                self.needs_redraw = true;
+            }
             Action::BuzzStart { on_ms, off_ms } => {
                 self.buzz = Some(BuzzPattern {
                     on_ms: on_ms as u64,

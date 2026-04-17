@@ -58,11 +58,14 @@ pub enum NumpadAction {
 
 // -- Numpad struct -----------------------------------------------------------
 
+/// Maximum number of digits the buffer can hold.
+pub const MAX_DIGITS: usize = 8;
+
 /// Reusable numeric keypad with a digit buffer.
 pub struct Numpad {
     /// Entered digits, left-to-right. Interpreted right-to-left
     /// (calculator style) by the caller.
-    pub digits: heapless::Vec<u8, 6>,
+    pub digits: heapless::Vec<u8, MAX_DIGITS>,
     /// Maximum number of digits accepted.
     max_digits: usize,
 }
@@ -72,7 +75,7 @@ impl Numpad {
     pub fn new(max_digits: usize) -> Self {
         Self {
             digits: heapless::Vec::new(),
-            max_digits: max_digits.min(6),
+            max_digits: max_digits.min(MAX_DIGITS),
         }
     }
 
@@ -161,12 +164,12 @@ impl Numpad {
         }
     }
 
-    /// Pad the digit buffer to 6 digits (right-aligned) and return
-    /// as an array. E.g. digits [1, 3, 0] -> [0, 0, 0, 1, 3, 0].
+    /// Pad the digit buffer to `max_digits` width (right-aligned)
+    /// and return as an array.
     #[allow(dead_code)]
-    pub fn padded(&self) -> [u8; 6] {
-        let mut p = [0u8; 6];
-        let offset = 6 - self.digits.len();
+    pub fn padded(&self) -> [u8; MAX_DIGITS] {
+        let mut p = [0u8; MAX_DIGITS];
+        let offset = self.max_digits.saturating_sub(self.digits.len());
         for (i, &d) in self.digits.iter().enumerate() {
             p[offset + i] = d;
         }

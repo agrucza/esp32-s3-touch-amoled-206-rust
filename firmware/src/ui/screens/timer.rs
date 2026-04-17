@@ -33,7 +33,7 @@ use crate::events::SystemEvent;
 use crate::ui::{fonts, glyphs, layout, primitives, theme};
 use crate::ui::types::{Action, Screen, SystemData, TimerState};
 use crate::system::tasks::rtc::TimeData;
-use crate::ui::widgets::{header_bar, icon_button, HeaderIcon, Numpad, NumpadAction};
+use crate::ui::widgets::{header_bar, icon_button, HeaderIcon, Numpad, NumpadAction, MAX_DIGITS};
 
 // -- Constants ---------------------------------------------------------------
 
@@ -456,7 +456,7 @@ fn digits_to_duration(digits: &[u8]) -> Duration {
 
 /// Convert a Duration into digits for populating the numpad buffer.
 /// Strips leading zeros.
-fn duration_to_digits(d: Duration, digits: &mut heapless::Vec<u8, 6>) {
+fn duration_to_digits(d: Duration, digits: &mut heapless::Vec<u8, MAX_DIGITS>) {
     digits.clear();
     let total_secs = d.as_secs();
     let h = (total_secs / 3600).min(99);

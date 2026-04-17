@@ -146,7 +146,8 @@ impl<'d> RtcTaskState<'d> {
 
                 if needs_set {
                     log::warn!("RTC: time invalid - setting default");
-                    let default_time = RtcDateTime::new(2026, 3, 30, 0, 12, 0, 0);
+                    // Y2K midnight - the PCF85063's epoch.
+                    let default_time = RtcDateTime::new(2000, 1, 1, 0, 0, 0, 0);
                     if rtc.set(i2c, &default_time).is_err() {
                         log::error!("RTC: failed to set time");
                     }
