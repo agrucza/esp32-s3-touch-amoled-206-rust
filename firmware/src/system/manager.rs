@@ -38,6 +38,39 @@ struct BuzzPattern {
     motor_on: bool,
 }
 
+// -- CPU frequency scaling ---------------------------------------------------
+
+/// CPU frequency levels for dynamic scaling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CpuFreq {
+    /// 80 MHz - baseline for idle/low-power operation.
+    Mhz80,
+    /// 160 MHz - mid-range for moderate workloads.
+    Mhz160,
+    /// 240 MHz - full speed for rendering and heavy computation.
+    Mhz240,
+}
+
+/// Switch CPU frequency at runtime. APB stays at 80 MHz for all
+/// settings so peripheral clocks (I2C, SPI) are unaffected.
+/// Embassy timers use the XTAL-based systimer and are also unaffected.
+fn set_cpu_freq(freq: CpuFreq) {
+    use esp_hal::peripherals::SYSTEM;
+
+    let (period_sel, freq_mhz) = match freq {
+        CpuFreq::Mhz80 => (0u8, 80u32),
+        CpuFreq::Mhz160 => (1u8, 160u32),
+        CpuFreq::Mhz240 => (2u8, 240u32),
+    };
+
+    SYSTEM::regs().cpu_per_conf().modify(|_, w| unsafe {
+        w.pll_freq_sel().set_bit();
+        w.cpuperiod_sel().bits(period_sel)
+    });
+
+    esp_hal::rom::ets_update_cpu_frequency_rom(freq_mhz);
+}
+
 // Type aliases for complex generic types. `Display<'d>` lives in
 // `system::display` since it's fundamentally a display concern.
 pub type AudioTx<'d> = I2sWriteDmaTransferAsync<'d, &'static mut [u8]>;
@@ -445,6 +478,10 @@ impl SystemManager<'static> {
             imu: imu_state,
             power: power_state,
         };
+
+        // Drop to 80 MHz baseline after init. Render boosts
+        // to 160 MHz temporarily for frame throughput.
+        set_cpu_freq(CpuFreq::Mhz80);
 
         (manager, bundle)
     }
@@ -979,7 +1016,9 @@ impl SystemManager<'static> {
         self.tick_buzz();
 
         if !self.sleeping && self.needs_redraw {
+            set_cpu_freq(CpuFreq::Mhz160);
             self.render().await;
+            set_cpu_freq(CpuFreq::Mhz80);
         }
 
         self.log_diagnostics();
@@ -990,6 +1029,7 @@ impl SystemManager<'static> {
     /// Render the active screen with dirty-row flushing. Only runs
     /// when awake and `needs_redraw` is set.
     async fn render(&mut self) {
+        let render_start = Instant::now();
         // Copy the cache so we can freely borrow `&mut self.display`
         // below. `SystemData` is `Copy`, so this is cheap.
         let data = self.cached_data;
@@ -1022,6 +1062,10 @@ impl SystemManager<'static> {
             self.display.flush_rows(y0, max_y + 1).await;
         }
         self.needs_redraw = false;
+        let render_ms = render_start.elapsed().as_millis();
+        if render_ms > 10 {
+            log::info!("render: {}ms", render_ms);
+        }
     }
 
     /// Log heap watermark every ~2000 loop iterations. Useful
