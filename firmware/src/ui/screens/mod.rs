@@ -96,7 +96,7 @@ impl ActiveScreen {
         }
     }
 
-    pub fn on_event(&mut self, event: &SystemEvent, data: &SystemData) -> Action {
+    pub fn on_event(&mut self, event: &SystemEvent, data: &mut SystemData) -> Action {
         match self {
             Self::Clock(s) => s.on_event(event, data),
             Self::Status(s) => s.on_event(event, data),

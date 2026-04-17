@@ -92,9 +92,93 @@ pub enum Action {
     /// Set an RTC alarm at the given time. Optionally restrict to
     /// a single weekday (0=Sunday..6=Saturday). Fires
     /// `SystemEvent::AlarmFired` when matched.
+    #[allow(dead_code)]
     SetAlarm { hour: u8, minute: u8, weekday: Option<u8> },
     /// Cancel a set RTC alarm.
+    #[allow(dead_code)]
     CancelAlarm,
+    /// Start a repeating haptic buzz pattern. The manager buzzes
+    /// `on_ms` on, `off_ms` off, repeated until `BuzzStop` is sent.
+    BuzzStart { on_ms: u16, off_ms: u16 },
+    /// Stop an active buzz pattern.
+    BuzzStop,
+}
+
+// -- Persistent app state ----------------------------------------------------
+
+use embassy_time::{Duration, Instant};
+
+/// Stopwatch run state, persisted across screen switches.
+#[derive(Debug, Clone, Copy)]
+pub enum StopwatchState {
+    Idle,
+    Running { start: Instant, accumulated: Duration },
+    Paused { accumulated: Duration },
+}
+
+impl StopwatchState {
+    /// Total elapsed duration regardless of current state.
+    pub fn elapsed(&self) -> Duration {
+        match self {
+            Self::Idle => Duration::from_ticks(0),
+            Self::Running { start, accumulated } => {
+                *accumulated + Instant::now().duration_since(*start)
+            }
+            Self::Paused { accumulated } => *accumulated,
+        }
+    }
+
+    /// True if the stopwatch is actively counting.
+    pub fn is_running(&self) -> bool {
+        matches!(self, Self::Running { .. })
+    }
+}
+
+impl Default for StopwatchState {
+    fn default() -> Self { Self::Idle }
+}
+
+/// Timer run state, persisted across screen switches.
+#[derive(Debug, Clone, Copy)]
+pub enum TimerState {
+    /// Idle with a set duration (may be zero).
+    Idle { duration: Duration },
+    /// Counting down toward a deadline. The embassy Instant is
+    /// resynced from RTC time on every TimeUpdated event.
+    /// `target_secs` is the absolute target in seconds-since-midnight,
+    /// used for the RTC resync calculation.
+    Running { deadline: Instant, target_secs: u32 },
+    /// Paused with time remaining.
+    Paused { remaining: Duration },
+}
+
+impl TimerState {
+    /// Remaining time, clamped to zero.
+    pub fn remaining(&self) -> Duration {
+        match self {
+            Self::Idle { duration } => *duration,
+            Self::Running { deadline, .. } => {
+                let now = Instant::now();
+                if now >= *deadline {
+                    Duration::from_ticks(0)
+                } else {
+                    deadline.duration_since(now)
+                }
+            }
+            Self::Paused { remaining } => *remaining,
+        }
+    }
+
+    /// True if the timer is actively counting down.
+    pub fn is_running(&self) -> bool {
+        matches!(self, Self::Running { .. })
+    }
+}
+
+impl Default for TimerState {
+    fn default() -> Self {
+        Self::Idle { duration: Duration::from_ticks(0) }
+    }
 }
 
 // -- System data snapshot ----------------------------------------------------
@@ -109,12 +193,11 @@ pub use crate::system::tasks::power::PowerData;
 pub use crate::system::tasks::rtc::TimeData;
 pub use crate::system::tasks::touch::TouchData;
 
-/// Read-only snapshot of system state, passed to screens each frame.
+/// System state, passed to screens on render and events.
 ///
-/// Organised by source peripheral so each task owns exactly one
-/// sub-struct. Adding a new field means extending one group and
-/// teaching one event handler to keep it up to date - no changes
-/// to the screen trait, no unrelated refactors.
+/// Peripheral snapshots are updated by the manager's event handler.
+/// App state (stopwatch, timer) is mutated directly by screens
+/// via `&mut SystemData` in `on_event`.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct SystemData {
     pub time: TimeData,
@@ -122,6 +205,8 @@ pub struct SystemData {
     pub motion: MotionData,
     pub touch: TouchData,
     pub tick_count: u32,
+    pub stopwatch: StopwatchState,
+    pub timer: TimerState,
     /// Per-test latest result, indexed by [`SelfTestId`] cast to
     /// `usize`. Updated by the main loop whenever a
     /// [`SystemEvent::SelfTestUpdated`] arrives.
@@ -171,5 +256,7 @@ pub trait Screen {
     fn render<D: DrawTarget<Color = Rgb565>>(&self, display: &mut D, data: &SystemData);
 
     /// Handle a system event. Return an Action to tell the manager what to do.
-    fn on_event(&mut self, event: &SystemEvent, data: &SystemData) -> Action;
+    /// `data` is mutable so screens can update shared persistent state
+    /// (stopwatch, timer) directly.
+    fn on_event(&mut self, event: &SystemEvent, data: &mut SystemData) -> Action;
 }

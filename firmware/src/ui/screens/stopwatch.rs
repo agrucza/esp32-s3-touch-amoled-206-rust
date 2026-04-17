@@ -37,51 +37,24 @@ use embedded_graphics::{
 
 use crate::events::SystemEvent;
 use crate::ui::{fonts, glyphs, layout, primitives, theme};
-use crate::ui::types::{Action, Screen, SystemData};
+use crate::ui::types::{Action, Screen, StopwatchState, SystemData};
 use crate::ui::widgets::{header_bar, icon_button, HeaderIcon};
-
-// -- State machine ----------------------------------------------------------
-
-/// Stopwatch run state. `Idle` shows 00:00:00 frozen. `Running`
-/// holds the instant the current run segment started plus any
-/// `accumulated` duration from prior runs we've paused and resumed
-/// from. `Paused` freezes a total elapsed duration.
-#[derive(Debug, Clone, Copy)]
-enum RunState {
-    Idle,
-    Running { start: Instant, accumulated: Duration },
-    Paused  { accumulated: Duration },
-}
-
-impl RunState {
-    /// Total elapsed duration regardless of current state.
-    fn elapsed(&self) -> Duration {
-        match self {
-            Self::Idle => Duration::from_ticks(0),
-            Self::Running { start, accumulated } => {
-                *accumulated + Instant::now().duration_since(*start)
-            }
-            Self::Paused { accumulated } => *accumulated,
-        }
-    }
-}
 
 // -- Screen -----------------------------------------------------------------
 
 pub struct StopwatchScreen {
-    state: RunState,
     /// Last displayed elapsed second, to avoid redundant redraws.
     last_rendered_sec: u64,
 }
 
 impl StopwatchScreen {
     pub fn new() -> Self {
-        Self { state: RunState::Idle, last_rendered_sec: 0 }
+        Self { last_rendered_sec: 0 }
     }
 }
 
 impl Screen for StopwatchScreen {
-    fn render<D: DrawTarget<Color = Rgb565>>(&self, display: &mut D, _data: &SystemData) {
+    fn render<D: DrawTarget<Color = Rgb565>>(&self, display: &mut D, data: &SystemData) {
         // -- Header bar (X close left, title right) -----------------------
         header_bar(
             display,
@@ -98,7 +71,7 @@ impl Screen for StopwatchScreen {
             layout::HERO_PILL_W, layout::HERO_PILL_H,
             theme::AMBER,
         );
-        let elapsed = self.state.elapsed();
+        let elapsed = data.stopwatch.elapsed();
         let total_secs = elapsed.as_secs();
         let hours   = (total_secs / 3600).min(99);
         let minutes = (total_secs / 60) % 60;
@@ -112,15 +85,15 @@ impl Screen for StopwatchScreen {
         );
 
         // -- Left circle: Start/Pause toggle ------------------------------
-        match self.state {
-            RunState::Running { .. } => icon_button(
+        match data.stopwatch {
+            StopwatchState::Running { .. } => icon_button(
                 display,
                 layout::LEFT_CIRCLE_CX, layout::CIRCLE_CY,
                 theme::PANEL_BG,
                 glyphs::pause, theme::TEXT_WHITE,
                 "PAUSE", theme::TEXT_DIM,
             ),
-            RunState::Idle | RunState::Paused { .. } => icon_button(
+            StopwatchState::Idle | StopwatchState::Paused { .. } => icon_button(
                 display,
                 layout::LEFT_CIRCLE_CX, layout::CIRCLE_CY,
                 theme::PANEL_BG,
@@ -139,15 +112,15 @@ impl Screen for StopwatchScreen {
         );
     }
 
-    fn on_event(&mut self, event: &SystemEvent, _data: &SystemData) -> Action {
+    fn on_event(&mut self, event: &SystemEvent, data: &mut SystemData) -> Action {
         match event {
             SystemEvent::PowerButtonLong => Action::Shutdown,
 
             // 20 Hz tick: redraw only when the displayed second changes.
             SystemEvent::MotionUpdated { .. }
-                if matches!(self.state, RunState::Running { .. }) =>
+                if data.stopwatch.is_running() =>
             {
-                let sec = self.state.elapsed().as_secs();
+                let sec = data.stopwatch.elapsed().as_secs();
                 if sec != self.last_rendered_sec {
                     self.last_rendered_sec = sec;
                     Action::Redraw
@@ -163,22 +136,22 @@ impl Screen for StopwatchScreen {
 
             SystemEvent::Tap { x, y } => {
                 if layout::left_circle_hit(*x, *y) {
-                    self.state = match self.state {
-                        RunState::Idle => RunState::Running {
+                    data.stopwatch = match data.stopwatch {
+                        StopwatchState::Idle => StopwatchState::Running {
                             start: Instant::now(),
                             accumulated: Duration::from_ticks(0),
                         },
-                        RunState::Running { start, accumulated } => RunState::Paused {
+                        StopwatchState::Running { start, accumulated } => StopwatchState::Paused {
                             accumulated: accumulated + Instant::now().duration_since(start),
                         },
-                        RunState::Paused { accumulated } => RunState::Running {
+                        StopwatchState::Paused { accumulated } => StopwatchState::Running {
                             start: Instant::now(),
                             accumulated,
                         },
                     };
                     Action::Redraw
                 } else if layout::right_circle_hit(*x, *y) {
-                    self.state = RunState::Idle;
+                    data.stopwatch = StopwatchState::Idle;
                     Action::Redraw
                 } else {
                     Action::None

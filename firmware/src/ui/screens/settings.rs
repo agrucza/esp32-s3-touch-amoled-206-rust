@@ -119,7 +119,7 @@ impl Screen for SettingsScreen {
         }
     }
 
-    fn on_event(&mut self, event: &SystemEvent, _data: &SystemData) -> Action {
+    fn on_event(&mut self, event: &SystemEvent, _data: &mut SystemData) -> Action {
         if matches!(event, SystemEvent::PowerButtonLong) {
             return Action::Shutdown;
         }

@@ -119,9 +119,10 @@ impl Screen for ClockScreen {
         .ok();
     }
 
-    fn on_event(&mut self, event: &SystemEvent, _data: &SystemData) -> Action {
+    fn on_event(&mut self, event: &SystemEvent, _data: &mut SystemData) -> Action {
         match event {
             SystemEvent::PowerButtonLong => Action::Shutdown,
+            SystemEvent::TimeUpdated { .. } => Action::Redraw,
             SystemEvent::Tap { x, y } if layout::left_circle_hit(*x, *y) => {
                 Action::SwitchScreen(ScreenId::Timer)
             }

@@ -27,6 +27,17 @@ use esp_hal::{
     time::Rate,
 };
 
+/// Active buzz pattern state. The manager toggles the motor on
+/// each tick based on elapsed time.
+struct BuzzPattern {
+    on_ms: u64,
+    off_ms: u64,
+    /// When the current phase (on or off) started.
+    phase_start: Instant,
+    /// True when the motor is currently on.
+    motor_on: bool,
+}
+
 // Type aliases for complex generic types. `Display<'d>` lives in
 // `system::display` since it's fundamentally a display concern.
 pub type AudioTx<'d> = I2sWriteDmaTransferAsync<'d, &'static mut [u8]>;
@@ -164,6 +175,10 @@ pub struct SystemManager<'d> {
     // Wall-clock timestamp of the last user-input event. Used by the
     // display state machine to decide when to dim / blank the panel.
     last_activity: Instant,
+
+    // Buzz pattern state. When active, the motor toggles on/off
+    // each tick based on elapsed time since the last toggle.
+    buzz: Option<BuzzPattern>,
 
     // System-wide sleep flag. When `true`, the display is forced
     // Off and the IMU is in WoM mode regardless of idle time.
@@ -388,6 +403,8 @@ impl SystemManager<'static> {
             // during its first iteration, so this is only visible to
             // whatever runs before that (currently nothing).
             self_tests: [crate::events::SelfTestResult::NotRun; crate::events::NUM_SELF_TESTS],
+            stopwatch: Default::default(),
+            timer: Default::default(),
         };
 
         // Build the initial screen and fire its `on_mount` hook so
@@ -417,6 +434,7 @@ impl SystemManager<'static> {
             last_activity: Instant::now(),
             sleeping: false,
             cached_data,
+            buzz: None,
         };
 
         let bundle = TaskBundle {
@@ -604,6 +622,32 @@ impl SystemManager<'static> {
         }
     }
 
+    /// Toggle the haptic motor based on the active buzz pattern.
+    fn tick_buzz(&mut self) {
+        let pattern = match &self.buzz {
+            Some(p) => p,
+            None => return,
+        };
+        let elapsed = Instant::now().duration_since(pattern.phase_start).as_millis();
+        let phase_duration = if pattern.motor_on {
+            pattern.on_ms
+        } else {
+            pattern.off_ms
+        };
+        if elapsed >= phase_duration {
+            // Toggle phase.
+            if let Some(ref mut p) = self.buzz {
+                p.motor_on = !p.motor_on;
+                p.phase_start = Instant::now();
+                if p.motor_on {
+                    self.power.buzz();
+                } else {
+                    self.power.buzz_stop();
+                }
+            }
+        }
+    }
+
     // ================= Event loop ================================================
 
     /// Handle a single event received from the global event channel.
@@ -621,8 +665,8 @@ impl SystemManager<'static> {
         match &event {
             SystemEvent::TimeUpdated { data } => {
                 self.cached_data.time = *data;
-                self.needs_redraw = true;
-                return;
+                // Don't early-return - forward to the screen so it
+                // can resync timer deadlines from RTC time.
             }
             SystemEvent::PowerUpdated { data } => {
                 self.cached_data.power = *data;
@@ -640,6 +684,19 @@ impl SystemManager<'static> {
                 // Don't early-return - forward to the screen so it
                 // can decide whether to redraw (e.g. stopwatch/timer
                 // tick, status live motion display, flash animations).
+            }
+            SystemEvent::TimerExpired => {
+                // Reset timer state.
+                self.cached_data.timer = crate::ui::types::TimerState::Idle {
+                    duration: embassy_time::Duration::from_ticks(0),
+                };
+                // Navigate to timer screen to handle the notification.
+                if !matches!(self.screen.id(), ScreenId::Timer) {
+                    let _ = self.nav_stack.push(self.screen.id());
+                    self.screen.switch_to(ScreenId::Timer, &self.cached_data);
+                }
+                self.needs_redraw = true;
+                // Forward to the timer screen so it can buzz/alert.
             }
             SystemEvent::SelfTestUpdated { id, result } => {
                 // Stash the latest result under its id and let the
@@ -723,7 +780,7 @@ impl SystemManager<'static> {
         }
 
         // Forward to the active screen.
-        match self.screen.on_event(&event, &self.cached_data) {
+        match self.screen.on_event(&event, &mut self.cached_data) {
             Action::None => {
                 // Home-row nav fallback: content L/R swipes cycle
                 // through home-row apps.
@@ -803,6 +860,19 @@ impl SystemManager<'static> {
                 RTC_COMMAND.signal(RtcCommand::CancelAlarm);
                 self.needs_redraw = true;
             }
+            Action::BuzzStart { on_ms, off_ms } => {
+                self.buzz = Some(BuzzPattern {
+                    on_ms: on_ms as u64,
+                    off_ms: off_ms as u64,
+                    phase_start: Instant::now(),
+                    motor_on: true,
+                });
+                self.power.buzz();
+            }
+            Action::BuzzStop => {
+                self.buzz = None;
+                self.power.buzz_stop();
+            }
         }
     }
 
@@ -825,6 +895,7 @@ impl SystemManager<'static> {
 
         self.apply_dim_state().await;
         self.check_idle_sleep().await;
+        self.tick_buzz();
 
         if !self.sleeping && self.needs_redraw {
             self.render().await;

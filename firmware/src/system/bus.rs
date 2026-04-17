@@ -123,7 +123,12 @@ pub enum RtcCommand {
     /// Cancel a set alarm.
     CancelAlarm,
     /// Set the RTC date and time. Used by the settings time screen.
+    #[allow(dead_code)]
     SetTime { year: u16, month: u8, day: u8, hour: u8, minute: u8, second: u8 },
+    /// Change the time poll interval (in seconds). Affects how often
+    /// `TimeUpdated` events are emitted. Configurable from settings.
+    #[allow(dead_code)]
+    SetTimePollInterval { seconds: u8 },
 }
 
 /// Main-to-RTC command signal.

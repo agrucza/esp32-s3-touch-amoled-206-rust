@@ -31,7 +31,9 @@
 pub mod containers;
 pub mod bodies;
 pub mod chrome;
+pub mod numpad;
 
 pub use containers::{card, CardStyle};
 pub use bodies::{icon_button, value_body};
 pub use chrome::{header_bar, page_scrollbar, HeaderIcon, HEADER_ICON_HIT_WIDTH};
+pub use numpad::{Numpad, NumpadAction};

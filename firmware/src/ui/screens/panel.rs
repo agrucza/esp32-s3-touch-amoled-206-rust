@@ -223,7 +223,7 @@ impl Screen for PanelScreen {
         );
     }
 
-    fn on_event(&mut self, event: &SystemEvent, _data: &SystemData) -> Action {
+    fn on_event(&mut self, event: &SystemEvent, _data: &mut SystemData) -> Action {
         match event {
             SystemEvent::PowerButtonLong => Action::Shutdown,
             // Swipe up from anywhere: close the panel and go back.

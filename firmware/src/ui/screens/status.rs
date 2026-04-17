@@ -64,7 +64,7 @@ impl Screen for StatusScreen {
         page_scrollbar(display, PAGE_COUNT as usize, self.page as usize);
     }
 
-    fn on_event(&mut self, event: &SystemEvent, _data: &SystemData) -> Action {
+    fn on_event(&mut self, event: &SystemEvent, _data: &mut SystemData) -> Action {
         match event {
             SystemEvent::PowerButtonLong => Action::Shutdown,
 

@@ -34,19 +34,28 @@
 use crate::events::SystemEvent;
 use crate::system::bus::{EVENTS, RTC_COMMAND, RtcCommand, SharedI2c};
 use drivers::rtc::{Alarm, Rtc, Config as RtcConfig, DateTime as RtcDateTime, TimerClock, TimerOutput};
-use embassy_futures::select::{select, Either};
+use embassy_futures::select::{select3, Either3};
+use embassy_time::{Duration, Timer};
 use embedded_hal::i2c::I2c as I2cTrait;
 use esp_hal::gpio::Input;
 
 /// RTC task: wait on INT#, classify the source (HMI / alarm /
 /// timer), emit the matching event and a fresh `TimeUpdated`
 /// snapshot so the main loop's cached time stays current.
+/// Default time poll interval in seconds.
+const DEFAULT_TIME_POLL_SECS: u64 = 1;
+
 #[embassy_executor::task]
 pub async fn rtc_task(bus: &'static SharedI2c, mut state: RtcTaskState<'static>) {
     loop {
-        match select(state.wait_for_int(), RTC_COMMAND.wait()).await {
-            Either::First(()) => {
-                // INT# fired - classify and emit events.
+        let poll = Duration::from_secs(state.poll_secs);
+        match select3(
+            state.wait_for_int(),
+            RTC_COMMAND.wait(),
+            Timer::after(poll),
+        ).await {
+            Either3::First(()) => {
+                // INT# fired (timer expiry or alarm).
                 let (event, time) = {
                     let mut i2c = bus.lock().await;
                     let event = state.classify_interrupt(&mut *i2c);
@@ -58,9 +67,17 @@ pub async fn rtc_task(bus: &'static SharedI2c, mut state: RtcTaskState<'static>)
                     EVENTS.send(ev).await;
                 }
             }
-            Either::Second(cmd) => {
+            Either3::Second(cmd) => {
                 let mut i2c = bus.lock().await;
                 state.handle_command(&mut *i2c, cmd);
+            }
+            Either3::Third(()) => {
+                // Software poll: read RTC time and send update.
+                let time = {
+                    let mut i2c = bus.lock().await;
+                    state.snapshot(&mut *i2c)
+                };
+                EVENTS.send(SystemEvent::TimeUpdated { data: time }).await;
             }
         }
     }
@@ -102,6 +119,8 @@ impl From<&RtcDateTime> for TimeData {
 pub struct RtcTaskState<'d> {
     pub rtc: Rtc,
     int_pin: Input<'d>,
+    /// How often to poll the RTC for time updates (in seconds).
+    poll_secs: u64,
 }
 
 impl<'d> RtcTaskState<'d> {
@@ -141,11 +160,10 @@ impl<'d> RtcTaskState<'d> {
             }
         }
 
-        if rtc.enable_half_minute_interrupt(i2c).is_err() {
-            log::warn!("RTC: failed to enable half-minute interrupt");
-        }
+        // No HMI/MI - we use a software poll for time updates
+        // to avoid INT# conflicts with the hardware countdown timer.
 
-        Self { rtc, int_pin }
+        Self { rtc, int_pin, poll_secs: DEFAULT_TIME_POLL_SECS }
     }
 
     /// Read the current date/time from the RTC. Called by the
@@ -163,22 +181,20 @@ impl<'d> RtcTaskState<'d> {
     }
 
     /// Handle a command from the main loop.
-    pub fn handle_command(&self, i2c: &mut impl I2cTrait, cmd: RtcCommand) {
+    pub fn handle_command(&mut self, i2c: &mut impl I2cTrait, cmd: RtcCommand) {
         match cmd {
             RtcCommand::StartTimer { seconds } => {
                 if seconds == 0 {
                     log::warn!("RTC: timer request with 0 seconds, ignoring");
                     return;
                 }
-                // Hz1: 1-255 seconds. Per60: 256-15300 seconds.
-                // UI caps input at 15300s so we don't exceed hw range.
                 let (clock, value) = if seconds <= 255 {
                     (TimerClock::Hz1, seconds as u8)
                 } else {
                     let ticks = ((seconds + 59) / 60).min(255) as u8;
                     (TimerClock::Per60, ticks)
                 };
-                match self.rtc.set_timer(i2c, value, clock, TimerOutput::Interrupt) {
+                match self.rtc.set_timer(i2c, value, clock, TimerOutput::Pulse) {
                     Ok(()) => log::info!("RTC: timer started, value={} clock={:?}", value, clock),
                     Err(_) => log::error!("RTC: failed to start timer"),
                 }
@@ -216,6 +232,10 @@ impl<'d> RtcTaskState<'d> {
                     Err(_) => log::error!("RTC: failed to set time"),
                 }
             }
+            RtcCommand::SetTimePollInterval { seconds } => {
+                self.poll_secs = seconds.max(1) as u64;
+                log::info!("RTC: poll interval set to {}s", self.poll_secs);
+            }
         }
     }
 
@@ -242,9 +262,9 @@ impl<'d> RtcTaskState<'d> {
             Some(SystemEvent::AlarmFired)
         } else if status.timer_flag {
             let _ = self.rtc.clear_timer_flag(i2c);
+            let _ = self.rtc.disable_timer(i2c);
             Some(SystemEvent::TimerExpired)
         } else {
-            // Unlatched HMI pulse - second=0 or second=30.
             Some(SystemEvent::HalfMinuteChanged)
         }
     }

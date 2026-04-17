@@ -53,6 +53,7 @@ pub const CONTENT_H: i32 = CONTENT_BOTTOM - CONTENT_TOP;
 #[allow(dead_code)]
 pub const MARGIN: i32 = 8;
 /// Default corner radius for rounded panels and cards.
+#[allow(dead_code)]
 pub const CARD_RADIUS: u32 = 16;
 
 /// Depth (in pixels) of the system-gesture edge zone at the top and
