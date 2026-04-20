@@ -27,16 +27,9 @@ use esp_hal::{
     time::Rate,
 };
 
-/// Active buzz pattern state. The manager toggles the motor on
-/// each tick based on elapsed time.
-struct BuzzPattern {
-    on_ms: u64,
-    off_ms: u64,
-    /// When the current phase (on or off) started.
-    phase_start: Instant,
-    /// True when the motor is currently on.
-    motor_on: bool,
-}
+// Buzz pattern state machine lives in `app_core::buzz` so it can
+// be host-tested. See `BuzzPattern` / `BuzzAction`.
+use app_core::buzz::{BuzzAction, BuzzPattern};
 
 // -- CPU frequency scaling ---------------------------------------------------
 
@@ -580,32 +573,8 @@ impl SystemManager<'static> {
 
     // ================= Sleep / wake API ==========================================
 
-    /// Returns `true` if the event should count as user activity
-    /// (resets idle timer; wakes from sleep).
-    fn is_user_activity(event: &SystemEvent) -> bool {
-        matches!(
-            event,
-            SystemEvent::TouchPressed { .. }
-                | SystemEvent::TouchReleased
-                | SystemEvent::Tap { .. }
-                | SystemEvent::Swipe { .. }
-                | SystemEvent::BootButtonPressed
-                | SystemEvent::PowerButtonShort
-        )
-    }
-
-    /// Returns `true` if the event is a non-user wake source -
-    /// something that should bring the device out of sleep even
-    /// though no one touched it. Covers IMU wake-on-motion and
-    /// RTC alarm / countdown-timer expiries.
-    fn is_wake_source(event: &SystemEvent) -> bool {
-        matches!(
-            event,
-            SystemEvent::WakeOnMotion
-                | SystemEvent::AlarmFired
-                | SystemEvent::TimerExpired
-        )
-    }
+    // `is_user_activity` and `is_wake_source` live in
+    // `app_core::events` as free functions and are host-tested.
 
     /// Enter low-power sleep. Idempotent.
     ///
@@ -689,57 +658,38 @@ impl SystemManager<'static> {
         }
     }
 
-    /// Toggle the haptic motor based on the active buzz pattern.
+    /// Advance the active buzz pattern and drive the motor GPIO
+    /// when the pattern says to flip.
     fn tick_buzz(&mut self) {
-        let pattern = match &self.buzz {
-            Some(p) => p,
-            None => return,
+        let Some(pattern) = self.buzz.as_mut() else {
+            return;
         };
-        let elapsed = Instant::now().duration_since(pattern.phase_start).as_millis();
-        let phase_duration = if pattern.motor_on {
-            pattern.on_ms
-        } else {
-            pattern.off_ms
-        };
-        if elapsed >= phase_duration {
-            // Toggle phase.
-            if let Some(ref mut p) = self.buzz {
-                p.motor_on = !p.motor_on;
-                p.phase_start = Instant::now();
-                if p.motor_on {
-                    self.power.buzz();
-                } else {
-                    self.power.buzz_stop();
-                }
-            }
+        match pattern.tick(Instant::now()) {
+            BuzzAction::None => {}
+            BuzzAction::TurnOn => self.power.buzz(),
+            BuzzAction::TurnOff => self.power.buzz_stop(),
         }
     }
 
-    /// Check if the next-to-fire alarm differs from what's programmed
-    /// in the RTC. If so, reprogram. Called on every TimeUpdated.
+    /// Check if the next-to-fire alarm differs from what's
+    /// programmed in the RTC and reprogram if so. Pure decision
+    /// logic lives on `AlarmState::plan_reprogram` (app-core);
+    /// this function is just the signal-emission side.
     fn check_alarm_reprogram(&mut self) {
-        // Don't reprogram while snoozing - the snooze time is in the RTC.
-        if self.cached_data.alarms.snoozed {
-            return;
-        }
+        use crate::ui::types::AlarmReprogram;
 
-        let d = &self.cached_data;
+        let d = &mut self.cached_data;
         let weekday = crate::ui::screens::alarm::day_of_week(
             d.time.year as i32,
             d.time.month as i32,
             d.time.day as i32,
         );
-        let next = d.alarms.next_alarm(d.time.hour, d.time.minute, weekday);
-        if next != self.cached_data.alarms.active_hw {
-            self.cached_data.alarms.active_hw = next;
-            if let Some(idx) = next {
-                let entry = &self.cached_data.alarms.entries[idx];
-                RTC_COMMAND.signal(RtcCommand::SetAlarm {
-                    hour: entry.hour,
-                    minute: entry.minute,
-                    weekday: None,
-                });
-            } else {
+        match d.alarms.plan_reprogram(d.time.hour, d.time.minute, weekday) {
+            None => {}
+            Some(AlarmReprogram::SetAlarm { hour, minute }) => {
+                RTC_COMMAND.signal(RtcCommand::SetAlarm { hour, minute, weekday: None });
+            }
+            Some(AlarmReprogram::CancelAlarm) => {
                 RTC_COMMAND.signal(RtcCommand::CancelAlarm);
             }
         }
@@ -921,7 +871,7 @@ impl SystemManager<'static> {
 
         // Non-user wake sources: wake the device first, then let
         // the event continue through to screen dispatch.
-        if self.sleeping && Self::is_wake_source(&event) {
+        if self.sleeping && crate::events::is_wake_source(&event) {
             let reason = match event {
                 SystemEvent::WakeOnMotion => "IMU motion",
                 SystemEvent::AlarmFired => "RTC alarm",
@@ -938,7 +888,7 @@ impl SystemManager<'static> {
         }
 
         // Sleep/wake transitions on user activity.
-        if Self::is_user_activity(&event) {
+        if crate::events::is_user_activity(&event) {
             self.last_activity = Instant::now();
             if self.sleeping {
                 // Waking from sleep: consume this event so it
@@ -1066,12 +1016,11 @@ impl SystemManager<'static> {
                 self.needs_redraw = true;
             }
             Action::StartBuzz { on_ms, off_ms } => {
-                self.buzz = Some(BuzzPattern {
-                    on_ms: on_ms as u64,
-                    off_ms: off_ms as u64,
-                    phase_start: Instant::now(),
-                    motor_on: true,
-                });
+                self.buzz = Some(BuzzPattern::start(
+                    on_ms as u64,
+                    off_ms as u64,
+                    Instant::now(),
+                ));
                 self.power.buzz();
             }
             Action::StopBuzz => {

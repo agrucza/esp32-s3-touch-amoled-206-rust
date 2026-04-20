@@ -212,3 +212,74 @@ pub enum SwipeRegion {
     /// Gesture started in the central content band.
     Content,
 }
+
+// ============================================================================
+// Event classifiers
+// ============================================================================
+
+/// Returns `true` if the event should count as user activity: it
+/// resets the idle timer and, if the system is sleeping, brings
+/// it out of sleep. These are events produced by direct human
+/// interaction with the device (touch, buttons).
+pub fn is_user_activity(event: &SystemEvent) -> bool {
+    matches!(
+        event,
+        SystemEvent::TouchPressed { .. }
+            | SystemEvent::TouchReleased
+            | SystemEvent::Tap { .. }
+            | SystemEvent::Swipe { .. }
+            | SystemEvent::BootButtonPressed
+            | SystemEvent::PowerButtonShort
+    )
+}
+
+/// Returns `true` if the event is a non-user wake source:
+/// something that should bring the device out of sleep even
+/// though no one touched it. Covers IMU wake-on-motion and RTC
+/// alarm / countdown-timer expiries.
+pub fn is_wake_source(event: &SystemEvent) -> bool {
+    matches!(
+        event,
+        SystemEvent::WakeOnMotion
+            | SystemEvent::AlarmFired
+            | SystemEvent::TimerExpired
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn touch_press_counts_as_user_activity() {
+        assert!(is_user_activity(&SystemEvent::TouchPressed { x: 10, y: 20 }));
+        assert!(is_user_activity(&SystemEvent::TouchReleased));
+        assert!(is_user_activity(&SystemEvent::Tap { x: 0, y: 0 }));
+        assert!(is_user_activity(&SystemEvent::BootButtonPressed));
+    }
+
+    #[test]
+    fn wake_on_motion_is_not_user_activity() {
+        // WoM wakes the system but doesn't count as a user tap -
+        // we don't want to reset the idle timer just because the
+        // device got moved on a table.
+        assert!(!is_user_activity(&SystemEvent::WakeOnMotion));
+        assert!(is_wake_source(&SystemEvent::WakeOnMotion));
+    }
+
+    #[test]
+    fn alarm_and_timer_are_wake_sources_not_activity() {
+        assert!(!is_user_activity(&SystemEvent::AlarmFired));
+        assert!(!is_user_activity(&SystemEvent::TimerExpired));
+        assert!(is_wake_source(&SystemEvent::AlarmFired));
+        assert!(is_wake_source(&SystemEvent::TimerExpired));
+    }
+
+    #[test]
+    fn power_button_long_is_neither() {
+        // PowerButtonLong is a shutdown request, not a wake or
+        // activity event.
+        assert!(!is_user_activity(&SystemEvent::PowerButtonLong));
+        assert!(!is_wake_source(&SystemEvent::PowerButtonLong));
+    }
+}

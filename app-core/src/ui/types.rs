@@ -294,6 +294,98 @@ impl AlarmState {
         }
         best.map(|(i, _)| i)
     }
+
+    /// Decide what the RTC should be programmed to based on the
+    /// current time and the list of enabled alarms. Mutates
+    /// `active_hw` to the new target (so subsequent ticks with
+    /// the same inputs return `None`) and returns the command
+    /// the caller should forward to the RTC driver.
+    ///
+    /// Returns `None` when snoozed (the snooze alarm is already
+    /// in the RTC and must not be overwritten) or when nothing
+    /// changed since the last call.
+    pub fn plan_reprogram(
+        &mut self,
+        hour: u8,
+        minute: u8,
+        weekday: u8,
+    ) -> Option<AlarmReprogram> {
+        if self.snoozed {
+            return None;
+        }
+        let next = self.next_alarm(hour, minute, weekday);
+        if next == self.active_hw {
+            return None;
+        }
+        self.active_hw = next;
+        Some(match next {
+            Some(idx) => {
+                let e = &self.entries[idx];
+                AlarmReprogram::SetAlarm { hour: e.hour, minute: e.minute }
+            }
+            None => AlarmReprogram::CancelAlarm,
+        })
+    }
+}
+
+/// Result of [`AlarmState::plan_reprogram`]: what the caller
+/// should command the RTC driver to do now. Opaque to `app-core`
+/// beyond being the enum; `firmware` translates this into the
+/// concrete `RtcCommand` channel messages.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AlarmReprogram {
+    /// Program the RTC to fire at the given hour:minute.
+    SetAlarm { hour: u8, minute: u8 },
+    /// Clear the RTC alarm (no enabled alarms).
+    CancelAlarm,
+}
+
+#[cfg(test)]
+mod alarm_tests {
+    use super::*;
+
+    fn state_with(entries: &[(u8, u8, u8 /* days mask */, bool /* enabled */)]) -> AlarmState {
+        let mut s = AlarmState::default();
+        for (i, &(h, m, days, enabled)) in entries.iter().enumerate() {
+            s.entries[i] = AlarmEntry { hour: h, minute: m, days, enabled };
+        }
+        s
+    }
+
+    #[test]
+    fn snoozed_blocks_reprogram() {
+        let mut s = state_with(&[(7, 0, 0b0111_1111, true)]);
+        s.snoozed = true;
+        assert_eq!(s.plan_reprogram(6, 0, 0), None);
+    }
+
+    #[test]
+    fn fresh_alarm_produces_set_command() {
+        let mut s = state_with(&[(7, 30, 0b0111_1111, true)]);
+        assert_eq!(
+            s.plan_reprogram(6, 0, 0),
+            Some(AlarmReprogram::SetAlarm { hour: 7, minute: 30 }),
+        );
+        assert_eq!(s.active_hw, Some(0));
+    }
+
+    #[test]
+    fn idempotent_when_nothing_changed() {
+        let mut s = state_with(&[(7, 30, 0b0111_1111, true)]);
+        assert!(s.plan_reprogram(6, 0, 0).is_some());
+        // Subsequent call with no change returns None.
+        assert_eq!(s.plan_reprogram(6, 0, 0), None);
+    }
+
+    #[test]
+    fn disabling_all_alarms_produces_cancel() {
+        let mut s = state_with(&[(7, 30, 0b0111_1111, true)]);
+        assert!(s.plan_reprogram(6, 0, 0).is_some());
+        // Disable the alarm.
+        s.entries[0].enabled = false;
+        assert_eq!(s.plan_reprogram(6, 0, 0), Some(AlarmReprogram::CancelAlarm));
+        assert_eq!(s.active_hw, None);
+    }
 }
 
 // -- System data snapshot ----------------------------------------------------
