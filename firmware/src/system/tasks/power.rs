@@ -61,9 +61,7 @@
 
 use crate::events::SystemEvent;
 use crate::system::bus::{EVENTS, SLEEP_WATCH, SharedI2c, SleepState};
-use drivers::pmu::{
-    ChargeVoltage, ChargerPhase, CurrentDirection, InputCurrentLimit, InterruptSource, Pmu,
-};
+use drivers::pmu::{InterruptSource, Pmu};
 use embassy_futures::select::{select, Either};
 use embassy_time::{Duration, Timer};
 use embedded_hal::i2c::I2c as I2cTrait;
@@ -172,48 +170,10 @@ pub const SLEEP_POLL_INTERVAL_MS: u64 = 5_000;
 /// read that can fail are `Option<_>`; status flags default to
 /// their inactive state when the read fails (screens treat that
 /// as "nothing is happening").
-#[derive(Debug, Clone, Copy, Default)]
-#[allow(dead_code)]
-pub struct PowerData {
-    // --- Battery ---
-    pub battery_percent: Option<u8>,
-    pub battery_voltage_mv: Option<u16>,
-
-    // --- Power path (from PMU status register 1) ---
-    /// VBUS is present and above the VBUS good threshold.
-    pub vbus_good: bool,
-    /// BATFET is on (battery connected to the power path).
-    pub batfet_active: bool,
-    /// Battery is detected by the charger.
-    pub battery_present: bool,
-    /// Battery is in active (non-sleep) mode.
-    pub battery_active: bool,
-    /// Die is in thermal regulation (charging current reduced).
-    pub thermal_active: bool,
-    /// Input current limit regulation is active.
-    pub current_limit_active: bool,
-
-    // --- Charger state (from PMU status register 2) ---
-    /// Battery current direction (standby / charging / discharging).
-    pub current_direction: CurrentDirection,
-    /// Charger phase (tri-charge / pre-charge / CC / CV / done / not charging).
-    pub charger_phase: ChargerPhase,
-    /// System is powered on (always true while we're running).
-    pub system_on: bool,
-    /// VINDPM regulation is active (input voltage at limit).
-    pub vindpm_active: bool,
-
-    // --- ADC readings ---
-    pub vbus_voltage_mv: Option<u16>,
-    pub system_voltage_mv: Option<u16>,
-    pub die_temperature_raw: Option<u16>,
-
-    // --- Charger config (typically static, read once to verify) ---
-    pub charge_current_ma: Option<u16>,
-    pub charge_voltage: Option<ChargeVoltage>,
-    pub input_current_limit: Option<InputCurrentLimit>,
-    pub input_voltage_limit_mv: Option<u16>,
-}
+// `PowerData` struct lives in `app_core::data`. Re-exported so
+// existing `crate::system::tasks::power::PowerData` imports keep
+// resolving; the snapshot() below constructs and returns it.
+pub use app_core::data::PowerData;
 
 pub struct PowerTaskState {
     pub pmu: Pmu,

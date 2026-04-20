@@ -4,9 +4,7 @@
 extern crate alloc;
 
 mod board;
-mod config;
 mod display_hal;
-mod events;
 mod sdcard_hal;
 // Audio stack is fully implemented and stays in the tree but is not
 // wired into SystemManager by default - the I2S DMA, DAC, ADC, and
@@ -26,7 +24,12 @@ mod sdcard_hal;
 mod audio_hal;
 mod system;
 mod tasks;
-mod ui;
+
+// `config`, `events`, and `ui` now live in the `app-core` crate so
+// they can be host-tested. Re-export them at the crate root so the
+// rest of `firmware/` can continue writing `crate::config::...`
+// etc. without touching every import site.
+pub use app_core::{config, events, ui};
 
 use system::manager::{SystemManager, Peripherals};
 use system::tasks::{

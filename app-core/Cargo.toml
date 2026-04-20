@@ -11,6 +11,25 @@ std     = []
 [dependencies]
 defmt                  = { workspace = true, optional = true }
 embedded-graphics-core = { workspace = true }
+embedded-graphics      = "0.8.2"
+
+# Time value types (Duration, Instant) used by UI timer/stopwatch
+# logic. Calling `Instant::now()` requires a hardware time driver,
+# so app-core code should accept time as a parameter rather than
+# fetch it, keeping logic host-testable.
+embassy-time = "0.5.1"
+
+# Static collections used by UI nav stack / screen state.
+heapless = "0.9.2"
+
+# U8g2 font wrapper for embedded-graphics. UI renders use this.
+u8g2-fonts = "0.7.2"
+
+# Driver-side value types carried inside system events and snapshot
+# structs (e.g. `ChargerPhase`, `RtcDateTime`, `ImuData`). `defmt`
+# default is disabled so optional logging doesn't leak into host
+# builds.
+drivers = { path = "../drivers", default-features = false, features = ["pmu", "rtc", "imu", "touch"] }
 
 [dev-dependencies]
 # nothing extra - `cargo test` on host uses std automatically via the test harness

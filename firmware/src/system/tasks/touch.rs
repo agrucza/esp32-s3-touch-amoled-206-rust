@@ -126,14 +126,9 @@ pub async fn touch_task(bus: &'static SharedI2c, mut state: TouchTaskState<'stat
 /// Minimum travel distance on the dominant axis to count as a swipe (pixels).
 const SWIPE_THRESHOLD: i32 = 60;
 
-/// Current touch point. Both fields are `None` when no finger is
-/// down. Updated incrementally from `TouchPressed` / `TouchReleased`
-/// events by the main event handler - no I2C reads required.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct TouchData {
-    pub x: Option<u16>,
-    pub y: Option<u16>,
-}
+// `TouchData` struct lives in `app_core::data`. Re-exported so
+// `crate::system::tasks::touch::TouchData` imports keep resolving.
+pub use app_core::data::TouchData;
 
 pub struct TouchTaskState<'d> {
     touch: FT3168<Output<'d>>,

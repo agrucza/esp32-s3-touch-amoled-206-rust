@@ -48,6 +48,10 @@ pub enum CpuFreq {
     /// 160 MHz - mid-range for moderate workloads.
     Mhz160,
     /// 240 MHz - full speed for rendering and heavy computation.
+    /// Not currently used at runtime (we boost to 160 MHz for
+    /// render which is enough); kept for future codepaths that
+    /// need absolute max clock.
+    #[allow(dead_code)]
     Mhz240,
 }
 

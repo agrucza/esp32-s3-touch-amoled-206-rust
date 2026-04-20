@@ -166,36 +166,10 @@ const WOM_BLANKING_SAMPLES: u8 = 63;
 #[allow(dead_code)]
 const GYRO_BIAS_SAMPLES: u8 = 64;
 
-/// Motion state (accel + gyro + IMU temperature) consumed by
-/// screens that render raw sensor values. Raw signed 16-bit
-/// values; convert to physical units using the configured
-/// full-scale range from `ImuConfig`.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct MotionData {
-    pub accel_x: i16,
-    pub accel_y: i16,
-    pub accel_z: i16,
-    pub gyro_x: i16,
-    pub gyro_y: i16,
-    pub gyro_z: i16,
-    /// Raw temperature reading from the IMU die; divide by 256
-    /// for degrees Celsius.
-    pub temp_raw: i16,
-}
-
-impl From<&ImuData> for MotionData {
-    fn from(d: &ImuData) -> Self {
-        Self {
-            accel_x: d.accel_x,
-            accel_y: d.accel_y,
-            accel_z: d.accel_z,
-            gyro_x: d.gyro_x,
-            gyro_y: d.gyro_y,
-            gyro_z: d.gyro_z,
-            temp_raw: d.temp_raw,
-        }
-    }
-}
+// `MotionData` (struct + Default + From<&ImuData>) lives in
+// `app_core::data`. Re-exported so `crate::system::tasks::imu::
+// MotionData` imports in firmware keep resolving.
+pub use app_core::data::MotionData;
 
 pub struct ImuTaskState<'d> {
     pub imu: Qmi8658,

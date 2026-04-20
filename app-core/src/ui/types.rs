@@ -298,15 +298,10 @@ impl AlarmState {
 
 // -- System data snapshot ----------------------------------------------------
 
-// The per-peripheral data structs live alongside the task that
-// produces them, so each task module is a self-contained unit
-// (hardware state + emitted data type). We just re-export them
-// here so screens can `use crate::ui::types::{TimeData, PowerData,
-// MotionData, TouchData, SystemData}` from one place.
-pub use crate::system::tasks::imu::MotionData;
-pub use crate::system::tasks::power::PowerData;
-pub use crate::system::tasks::rtc::TimeData;
-pub use crate::system::tasks::touch::TouchData;
+// Per-peripheral snapshot data structs live in `app-core::data`.
+// Re-exported here so screens can `use crate::ui::types::{TimeData,
+// PowerData, MotionData, TouchData, SystemData}` from one place.
+pub use crate::data::{MotionData, PowerData, TimeData, TouchData};
 
 /// System state, passed to screens on render and events.
 ///

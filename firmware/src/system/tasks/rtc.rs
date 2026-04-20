@@ -83,38 +83,10 @@ pub async fn rtc_task(bus: &'static SharedI2c, mut state: RtcTaskState<'static>)
     }
 }
 
-/// Calendar time of day, consumed by clock-style screens.
-/// Defaults to an arbitrary recent date so screens have
-/// something reasonable to render before the first RTC read.
-#[derive(Debug, Clone, Copy)]
-#[allow(dead_code)] // `second` is read by future screens (e.g. a seconds face)
-pub struct TimeData {
-    pub hour: u8,
-    pub minute: u8,
-    pub second: u8,
-    pub year: u16,
-    pub month: u8,
-    pub day: u8,
-}
-
-impl Default for TimeData {
-    fn default() -> Self {
-        Self { hour: 0, minute: 0, second: 0, year: 2026, month: 1, day: 1 }
-    }
-}
-
-impl From<&RtcDateTime> for TimeData {
-    fn from(dt: &RtcDateTime) -> Self {
-        Self {
-            hour: dt.hour,
-            minute: dt.minute,
-            second: dt.second,
-            year: dt.year,
-            month: dt.month,
-            day: dt.day,
-        }
-    }
-}
+// `TimeData` (struct + Default + From<&RtcDateTime>) lives in
+// `app_core::data`. Re-exported so existing `crate::system::tasks::
+// rtc::TimeData` imports in firmware keep resolving.
+pub use app_core::data::TimeData;
 
 pub struct RtcTaskState<'d> {
     pub rtc: Rtc,

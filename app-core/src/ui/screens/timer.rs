@@ -32,7 +32,7 @@ use embedded_graphics::{
 use crate::events::SystemEvent;
 use crate::ui::{fonts, glyphs, layout, primitives, theme};
 use crate::ui::types::{Action, Screen, SystemData, TimerState};
-use crate::system::tasks::rtc::TimeData;
+use crate::data::TimeData;
 use crate::ui::widgets::{header_bar, icon_button, HeaderIcon, Numpad, NumpadAction};
 
 // -- Constants ---------------------------------------------------------------
