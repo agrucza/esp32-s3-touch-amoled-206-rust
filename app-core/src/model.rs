@@ -19,10 +19,11 @@ use embassy_time::{Duration, Instant};
 use heapless::Vec;
 
 use crate::buzz::{BuzzAction, BuzzPattern};
+use crate::commands::{ImuCommand, RtcCommand, SleepState};
 use crate::config::Config;
 use crate::data::TouchData;
 use crate::events::{
-    self, SelfTestId, SwipeDir, SwipeRegion, SystemEvent, NUM_SELF_TESTS,
+    self, SwipeDir, SwipeRegion, SystemEvent, NUM_SELF_TESTS,
 };
 use crate::nav::NavStack;
 use crate::ui::screens::{self, ActiveScreen};
@@ -39,46 +40,32 @@ pub type Effects = Vec<Effect, MAX_EFFECTS_PER_CALL>;
 
 /// What the caller should do to hardware after a `Model` call.
 ///
-/// Carries primitive payload fields rather than firmware-side enum
-/// types so `app-core` doesn't need to know how the manager wires
-/// each effect to its concrete channel / GPIO / driver call.
+/// Each variant maps 1:1 to a concrete hardware action on the
+/// manager side. Channel-delivered commands (`RtcCommand`,
+/// `ImuCommand`) are carried verbatim so the manager's dispatch
+/// is a direct pass-through.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Effect {
     /// Transition the display between two power states (async on
     /// the manager side - issues DCS commands over SPI).
     TransitionDisplay { from: DisplayState, to: DisplayState },
 
-    /// Broadcast that the system has entered sleep. Subscribers
-    /// (touch/IMU/power tasks) switch to their low-power modes.
-    BroadcastSleeping,
-    /// Broadcast that the system has exited sleep.
-    BroadcastAwake,
-    /// Halt the CPU in hardware light sleep. Manager returns from
-    /// the `rtc.sleep()` call when a wake source fires.
-    EnterLightSleep,
+    /// Broadcast a sleep-state change on `SLEEP_WATCH` for
+    /// subscribers (touch/IMU/power tasks) to react.
+    BroadcastSleep(SleepState),
 
     /// Motor GPIO on / off (one-shot edge).
     MotorOn,
     MotorOff,
-    /// Short pulse: motor on, blocking-delay `duration_ms`, motor off.
-    /// Used for the BOOT-press "going to sleep" haptic.
+    /// Short pulse: motor on, blocking-delay `duration_ms`, motor
+    /// off. Used for the BOOT-press "going to sleep" haptic.
     MotorPulse { duration_ms: u32 },
 
-    /// Send `RtcCommand::SetAlarm { hour, minute, weekday }`.
-    SetAlarm { hour: u8, minute: u8, weekday: Option<u8> },
-    /// Send `RtcCommand::CancelAlarm`.
-    CancelAlarm,
-    /// Send `RtcCommand::StartTimer { seconds }`.
-    StartTimer { seconds: u32 },
-    /// Send `RtcCommand::CancelTimer`.
-    CancelTimer,
-    /// Send `RtcCommand::SetTime { ... }`.
-    SetTime { year: u16, month: u8, day: u8, hour: u8, minute: u8, second: u8 },
+    /// Forward a command to the RTC task via `RTC_COMMAND`.
+    RtcCommand(RtcCommand),
 
-    /// Route a self-test to its owning hardware task's command
-    /// channel. Today every id is IMU-owned; SD/PMU/RTC tests will
-    /// add more routes at the manager.
-    RunSelfTest(SelfTestId),
+    /// Forward a command to the IMU task via `IMU_COMMAND`.
+    ImuCommand(ImuCommand),
 
     /// Immediate shutdown request (Action::Shutdown from a screen).
     Shutdown,
@@ -86,43 +73,20 @@ pub enum Effect {
 
 /// Application state machine.
 ///
-/// Fields are `pub` for host tests to poke at; the firmware side
-/// only reads via the explicit accessors and mutates via
-/// [`Self::handle_event`] / [`Self::tick`] / [`Self::clear_redraw`].
+/// Fields are private. External mutation happens only through
+/// [`Self::handle_event`], [`Self::tick`], and a small set of
+/// explicit setters below. Read access goes through the named
+/// accessors (`sleeping`, `needs_redraw`, `cached_data`, ...).
 pub struct Model {
-    /// Cached system snapshot. Event handlers update individual
-    /// fields as snapshot events arrive; the render path reads
-    /// this cache.
-    pub cached_data: SystemData,
-
-    /// The active screen.
-    pub screen: ActiveScreen,
-
-    /// LIFO nav stack for `Action::Back`.
-    pub nav_stack: NavStack,
-
-    /// Current display state - tracked in step with the hardware
-    /// by the manager's effect executor.
-    pub display_state: DisplayState,
-
-    /// Wall-clock timestamp of the last user-input event. Used by
-    /// the display state machine to decide when to dim / blank
-    /// the panel.
-    pub last_activity: Instant,
-
-    /// System-wide sleep flag. When `true`, the display is forced
-    /// Off and the IMU is in WoM mode regardless of idle time.
-    pub sleeping: bool,
-
-    /// Flag set by event handlers that visually matter. Consumed
-    /// by the render path and cleared via [`Self::clear_redraw`].
-    pub needs_redraw: bool,
-
-    /// Runtime configuration (display dim/off timeouts, etc).
-    pub config: Config,
-
-    /// Active buzz pattern state, if any.
-    pub buzz: Option<BuzzPattern>,
+    cached_data: SystemData,
+    screen: ActiveScreen,
+    nav_stack: NavStack,
+    display_state: DisplayState,
+    last_activity: Instant,
+    sleeping: bool,
+    needs_redraw: bool,
+    config: Config,
+    buzz: Option<BuzzPattern>,
 }
 
 impl Model {
@@ -146,14 +110,52 @@ impl Model {
         }
     }
 
-    /// Current render-needed flag.
+    // --- accessors -----------------------------------------------------------
+
+    /// Current render-needed flag. Set internally by event
+    /// handlers that mutate visible state.
     pub fn needs_redraw(&self) -> bool {
         self.needs_redraw
     }
 
-    /// Reset the redraw flag. Called after a successful render.
+    /// Reset the redraw flag. Called by the manager after a
+    /// successful render.
     pub fn clear_redraw(&mut self) {
         self.needs_redraw = false;
+    }
+
+    /// Whether the system is in the sleep state (display Off,
+    /// subscriber tasks in low-power mode). The manager's tick
+    /// loop reads this to decide whether to enter hardware
+    /// light sleep.
+    pub fn sleeping(&self) -> bool {
+        self.sleeping
+    }
+
+    /// Read-only view of the cached system snapshot. Screens
+    /// render against this, the manager's render path reads it
+    /// to decide whether to draw the battery-warning frame.
+    pub fn cached_data(&self) -> &SystemData {
+        &self.cached_data
+    }
+
+    /// Mutable handle to the active screen. Only the render path
+    /// and `handle_event` need this; expose `&mut` so the caller
+    /// can call `render(...)` on the screen.
+    pub fn screen_mut(&mut self) -> &mut ActiveScreen {
+        &mut self.screen
+    }
+
+    /// Read-only view of runtime config. The manager passes
+    /// `config().display` to display transitions.
+    pub fn config(&self) -> &Config {
+        &self.config
+    }
+
+    /// Update the loop-iteration counter (diagnostics only).
+    /// Owned by the manager's tick loop.
+    pub fn set_tick_count(&mut self, count: u32) {
+        self.cached_data.tick_count = count;
     }
 
     /// Fold one event into state and return effects for the
@@ -242,10 +244,10 @@ impl Model {
                 match self.cached_data.alarms.plan_reprogram(t.hour, t.minute, weekday) {
                     None => {}
                     Some(AlarmReprogram::SetAlarm { hour, minute }) => {
-                        let _ = out.push(Effect::SetAlarm { hour, minute, weekday: None });
+                        let _ = out.push(Effect::RtcCommand(RtcCommand::SetAlarm { hour, minute, weekday: None }));
                     }
                     Some(AlarmReprogram::CancelAlarm) => {
-                        let _ = out.push(Effect::CancelAlarm);
+                        let _ = out.push(Effect::RtcCommand(RtcCommand::CancelAlarm));
                     }
                 }
             }
@@ -335,27 +337,29 @@ impl Model {
                 let _ = out.push(Effect::Shutdown);
             }
             Action::RunSelfTest(id) => {
-                let _ = out.push(Effect::RunSelfTest(id));
+                let _ = out.push(Effect::ImuCommand(ImuCommand::RunSelfTest(id)));
                 self.needs_redraw = true;
             }
             Action::StartTimer { seconds } => {
-                let _ = out.push(Effect::StartTimer { seconds });
+                let _ = out.push(Effect::RtcCommand(RtcCommand::StartTimer { seconds }));
                 self.needs_redraw = true;
             }
             Action::CancelTimer => {
-                let _ = out.push(Effect::CancelTimer);
+                let _ = out.push(Effect::RtcCommand(RtcCommand::CancelTimer));
                 self.needs_redraw = true;
             }
             Action::SetAlarm { hour, minute, weekday } => {
-                let _ = out.push(Effect::SetAlarm { hour, minute, weekday });
+                let _ = out.push(Effect::RtcCommand(RtcCommand::SetAlarm { hour, minute, weekday }));
                 self.needs_redraw = true;
             }
             Action::CancelAlarm => {
-                let _ = out.push(Effect::CancelAlarm);
+                let _ = out.push(Effect::RtcCommand(RtcCommand::CancelAlarm));
                 self.needs_redraw = true;
             }
             Action::SetTime { year, month, day, hour, minute, second } => {
-                let _ = out.push(Effect::SetTime { year, month, day, hour, minute, second });
+                let _ = out.push(Effect::RtcCommand(RtcCommand::SetTime {
+                    year, month, day, hour, minute, second,
+                }));
                 self.needs_redraw = true;
             }
             Action::StartBuzz { on_ms, off_ms } => {
@@ -386,7 +390,7 @@ impl Model {
                 self.cached_data.alarms.snoozed = true;
                 let t = &self.cached_data.time;
                 let (hour, minute) = AlarmState::compute_snooze(t.hour, t.minute, 10);
-                let _ = out.push(Effect::SetAlarm { hour, minute, weekday: None });
+                let _ = out.push(Effect::RtcCommand(RtcCommand::SetAlarm { hour, minute, weekday: None }));
                 let target = self.nav_stack.pop_or_home();
                 self.screen.switch_to(target, &self.cached_data);
                 self.needs_redraw = true;
@@ -395,15 +399,15 @@ impl Model {
     }
 
     /// Enter low-power sleep. Idempotent. Queues the display-Off
-    /// transition + SLEEP_WATCH broadcast; the main loop picks
-    /// these up and the *next* tick enters hardware light sleep
-    /// via [`Self::tick`] -> [`Effect::EnterLightSleep`].
+    /// transition + SLEEP_WATCH broadcast; the manager then
+    /// enters hardware light sleep on the next tick loop when it
+    /// sees `sleeping = true`.
     fn sleep(&mut self, out: &mut Effects) {
         if self.sleeping {
             return;
         }
         self.sleeping = true;
-        let _ = out.push(Effect::BroadcastSleeping);
+        let _ = out.push(Effect::BroadcastSleep(SleepState::Sleeping));
         let _ = out.push(Effect::TransitionDisplay {
             from: self.display_state,
             to: DisplayState::Off,
@@ -418,7 +422,7 @@ impl Model {
         }
         self.sleeping = false;
         self.last_activity = now;
-        let _ = out.push(Effect::BroadcastAwake);
+        let _ = out.push(Effect::BroadcastSleep(SleepState::Awake));
         let _ = out.push(Effect::TransitionDisplay {
             from: self.display_state,
             to: DisplayState::Active,
@@ -495,7 +499,7 @@ mod tests {
         // First effect: the BOOT haptic pulse.
         assert_eq!(fx[0], Effect::MotorPulse { duration_ms: 100 });
         // Then the sleep transitions.
-        assert!(fx.contains(&Effect::BroadcastSleeping));
+        assert!(fx.contains(&Effect::BroadcastSleep(SleepState::Sleeping)));
         assert!(fx.iter().any(|e| matches!(
             e,
             Effect::TransitionDisplay { to: DisplayState::Off, .. }
@@ -515,7 +519,7 @@ mod tests {
             Instant::from_millis(5_000),
         );
         assert!(!m.sleeping);
-        assert!(fx.contains(&Effect::BroadcastAwake));
+        assert!(fx.contains(&Effect::BroadcastSleep(SleepState::Awake)));
         assert!(fx.iter().any(|e| matches!(
             e,
             Effect::TransitionDisplay { to: DisplayState::Active, .. }
@@ -539,7 +543,9 @@ mod tests {
         let mut out: Effects = Vec::new();
         m.dispatch_action(&SystemEvent::BootButtonPressed, Action::SnoozeAlarm, &mut out);
         assert!(out.contains(&Effect::MotorOff));
-        assert!(out.contains(&Effect::SetAlarm { hour: 8, minute: 5, weekday: None }));
+        assert!(out.contains(&Effect::RtcCommand(
+            RtcCommand::SetAlarm { hour: 8, minute: 5, weekday: None }
+        )));
         assert!(m.cached_data.alarms.snoozed);
     }
 
@@ -562,6 +568,6 @@ mod tests {
         let off_timeout = m.config.display.off_timeout_s;
         let fx = m.tick(Instant::from_millis((off_timeout as u64 + 1) * 1000));
         assert!(m.sleeping);
-        assert!(fx.contains(&Effect::BroadcastSleeping));
+        assert!(fx.contains(&Effect::BroadcastSleep(SleepState::Sleeping)));
     }
 }

@@ -14,6 +14,7 @@
 #![cfg_attr(not(test), no_std)]
 
 pub mod buzz;
+pub mod commands;
 pub mod config;
 pub mod data;
 pub mod events;

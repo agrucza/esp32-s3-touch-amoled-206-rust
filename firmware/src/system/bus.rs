@@ -18,7 +18,7 @@
 //! by tasks via `&'static` references, so lifetimes work out for
 //! `#[embassy_executor::task]` definitions.
 
-use crate::events::{SelfTestId, SystemEvent};
+use crate::events::SystemEvent;
 use embassy_sync::{
     blocking_mutex::raw::CriticalSectionRawMutex,
     channel::Channel,
@@ -28,6 +28,12 @@ use embassy_sync::{
 };
 use esp_hal::{i2c::master::I2c, Blocking};
 use static_cell::StaticCell;
+
+// Command / broadcast payload enums live in `app_core::commands`
+// so `Effect` can carry them. The `Signal` and `Watch` statics
+// below still live here - they're hardware-coupled (task wakers,
+// interrupt-safe mutexes).
+pub use app_core::commands::{ImuCommand, RtcCommand, SleepState};
 
 /// Size of the system event channel. Should be large enough to
 /// buffer a burst of events without blocking producers but small
@@ -40,17 +46,6 @@ pub const EVENT_CHANNEL_SIZE: usize = 32;
 /// The main loop drains it via `EVENTS.receive().await`.
 pub static EVENTS: Channel<CriticalSectionRawMutex, SystemEvent, EVENT_CHANNEL_SIZE> =
     Channel::new();
-
-/// Current system sleep state, used to coordinate peripheral tasks
-/// with the main loop's sleep/wake transitions.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SleepState {
-    /// System is awake - full sensor polling, display active.
-    Awake,
-    /// System is sleeping - peripherals should switch to their
-    /// lowest-power modes (e.g. IMU into WoM, idle tick stopped).
-    Sleeping,
-}
 
 /// Maximum number of tasks that can subscribe to [`SLEEP_WATCH`] at
 /// once. Bump this when adding a new subscriber beyond the current
@@ -77,23 +72,6 @@ pub const SLEEP_WATCH_SUBSCRIBERS: usize = 4;
 pub static SLEEP_WATCH: Watch<CriticalSectionRawMutex, SleepState, SLEEP_WATCH_SUBSCRIBERS> =
     Watch::new();
 
-/// Command sent from the main loop to the IMU task.
-///
-/// Wraps imperative actions the task can't initiate on its own -
-/// typically because the request originates from UI input that the
-/// main loop receives first. The enum exists (rather than the signal
-/// carrying a primitive payload directly) because more commands are
-/// expected: recalibrate gyro bias on demand, force a WoM re-arm,
-/// switch scale/ODR at runtime, etc. Adding a new command is just a
-/// new variant plus a match arm in the IMU task's command handler.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ImuCommand {
-    /// Run one specific hardware self-test, identified by its
-    /// [`SelfTestId`]. Only IMU-owned test ids make sense here;
-    /// unrecognised variants are logged and ignored by the task.
-    RunSelfTest(SelfTestId),
-}
-
 /// Main-to-IMU command signal.
 ///
 /// The main loop publishes an [`ImuCommand`] here when a UI screen
@@ -104,32 +82,6 @@ pub enum ImuCommand {
 ///
 /// Single-consumer: only the IMU task should call `wait()` on this.
 pub static IMU_COMMAND: Signal<CriticalSectionRawMutex, ImuCommand> = Signal::new();
-
-/// Command sent from the main loop to the RTC task.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RtcCommand {
-    /// Start the hardware countdown timer. The RTC task picks the
-    /// best clock source (Hz1 for <= 255s, Per60 for longer) and
-    /// calls `Rtc::set_timer`. When the countdown expires, the
-    /// task emits `SystemEvent::TimerExpired`.
-    StartTimer { seconds: u32 },
-    /// Cancel a running hardware countdown timer.
-    CancelTimer,
-    /// Set an alarm at the given hour and minute. Optionally restrict
-    /// to a single weekday (0=Sunday..6=Saturday); `None` fires every
-    /// day. The RTC task calls `Rtc::set_alarm` with second=0.
-    /// When the alarm fires, the task emits `SystemEvent::AlarmFired`.
-    SetAlarm { hour: u8, minute: u8, weekday: Option<u8> },
-    /// Cancel a set alarm.
-    CancelAlarm,
-    /// Set the RTC date and time. Used by the settings time screen.
-    #[allow(dead_code)]
-    SetTime { year: u16, month: u8, day: u8, hour: u8, minute: u8, second: u8 },
-    /// Change the time poll interval (in seconds). Affects how often
-    /// `TimeUpdated` events are emitted. Configurable from settings.
-    #[allow(dead_code)]
-    SetTimePollInterval { seconds: u8 },
-}
 
 /// Main-to-RTC command signal.
 ///

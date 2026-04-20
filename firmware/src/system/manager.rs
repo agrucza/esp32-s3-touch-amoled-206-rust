@@ -2,10 +2,10 @@ extern crate alloc;
 
 use crate::config::Config;
 use crate::display_hal::{self, WIDTH, HEIGHT};
-use crate::events::{SelfTestId, SystemEvent};
+use crate::events::SystemEvent;
 use crate::sdcard_hal::EspVolumeManager;
 use crate::system::audio::AudioSystem;
-use crate::system::bus::{EVENTS, IMU_COMMAND, ImuCommand, RTC_COMMAND, RtcCommand, SLEEP_WATCH, SleepState};
+use crate::system::bus::{EVENTS, IMU_COMMAND, RTC_COMMAND, SLEEP_WATCH, SleepState};
 use crate::system::display::Display;
 use crate::system::power::PowerControls;
 use crate::system::tasks::boot_button::BootButtonTaskState;
@@ -527,20 +527,18 @@ impl SystemManager<'static> {
                         &mut self.display,
                         from,
                         to,
-                        &self.model.config.display,
+                        &self.model.config().display,
                     ).await;
                 }
-                Effect::BroadcastSleeping => {
-                    SLEEP_WATCH.sender().send(SleepState::Sleeping);
-                    log::info!("system: sleep");
-                }
-                Effect::BroadcastAwake => {
-                    SLEEP_WATCH.sender().send(SleepState::Awake);
-                    self.row_hashes.fill(0); // force full redraw next frame
-                    log::info!("system: wake");
-                }
-                Effect::EnterLightSleep => {
-                    self.enter_light_sleep();
+                Effect::BroadcastSleep(state) => {
+                    SLEEP_WATCH.sender().send(state);
+                    match state {
+                        SleepState::Sleeping => log::info!("system: sleep"),
+                        SleepState::Awake => {
+                            self.row_hashes.fill(0); // force full redraw next frame
+                            log::info!("system: wake");
+                        }
+                    }
                 }
                 Effect::MotorOn => self.power.buzz(),
                 Effect::MotorOff => self.power.buzz_stop(),
@@ -549,26 +547,8 @@ impl SystemManager<'static> {
                     Timer::after(Duration::from_millis(duration_ms as u64)).await;
                     self.power.buzz_stop();
                 }
-                Effect::SetAlarm { hour, minute, weekday } => {
-                    RTC_COMMAND.signal(RtcCommand::SetAlarm { hour, minute, weekday });
-                }
-                Effect::CancelAlarm => RTC_COMMAND.signal(RtcCommand::CancelAlarm),
-                Effect::StartTimer { seconds } => {
-                    RTC_COMMAND.signal(RtcCommand::StartTimer { seconds });
-                }
-                Effect::CancelTimer => RTC_COMMAND.signal(RtcCommand::CancelTimer),
-                Effect::SetTime { year, month, day, hour, minute, second } => {
-                    RTC_COMMAND.signal(RtcCommand::SetTime {
-                        year, month, day, hour, minute, second,
-                    });
-                }
-                Effect::RunSelfTest(id) => {
-                    match id {
-                        SelfTestId::ImuAccel | SelfTestId::ImuGyro => {
-                            IMU_COMMAND.signal(ImuCommand::RunSelfTest(id));
-                        }
-                    }
-                }
+                Effect::RtcCommand(cmd) => RTC_COMMAND.signal(cmd),
+                Effect::ImuCommand(cmd) => IMU_COMMAND.signal(cmd),
                 Effect::Shutdown => {
                     log::info!("System: shutdown requested");
                     self.power.shutdown();
@@ -702,10 +682,10 @@ impl SystemManager<'static> {
     pub async fn tick(&mut self) {
         // Sleeping path: drain any pending events first, then halt
         // the CPU in hardware light sleep until a wake source fires.
-        if self.model.sleeping {
+        if self.model.sleeping() {
             while let Ok(event) = EVENTS.try_receive() {
                 self.handle_event(event).await;
-                if !self.model.sleeping {
+                if !self.model.sleeping() {
                     return;
                 }
             }
@@ -744,7 +724,7 @@ impl SystemManager<'static> {
         let effects = self.model.tick(Instant::now());
         self.execute_effects(effects).await;
 
-        if !self.model.sleeping && self.model.needs_redraw() {
+        if !self.model.sleeping() && self.model.needs_redraw() {
             set_cpu_freq(CpuFreq::Mhz160);
             self.render().await;
             set_cpu_freq(CpuFreq::Mhz80);
@@ -752,7 +732,7 @@ impl SystemManager<'static> {
 
         self.log_diagnostics();
         self.tick_count = self.tick_count.wrapping_add(1);
-        self.model.cached_data.tick_count = self.tick_count;
+        self.model.set_tick_count(self.tick_count);
     }
 
     /// Render the active screen with dirty-row flushing. Only runs
@@ -761,9 +741,9 @@ impl SystemManager<'static> {
         let render_start = Instant::now();
         // Copy the cache so we can freely borrow `&mut self.display`
         // below. `SystemData` is `Copy`, so this is cheap.
-        let data = self.model.cached_data;
+        let data = *self.model.cached_data();
         self.display.clear(crate::ui::theme::BG).ok();
-        self.model.screen.render(&mut self.display, &data);
+        self.model.screen_mut().render(&mut self.display, &data);
         if let Some(pct) = data.power.battery_percent {
             primitives::battery_warning_frame(&mut self.display, pct);
         }
