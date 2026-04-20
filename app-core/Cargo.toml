@@ -7,9 +7,14 @@ edition = "2021"
 [features]
 default = []
 std     = []
+# Opt-in serde derives on value types the firmware persists to
+# flash via `postcard`. Off by default so pure host tests stay
+# dep-free.
+serde = ["dep:serde"]
 
 [dependencies]
 defmt                  = { workspace = true, optional = true }
+serde                  = { version = "1", default-features = false, features = ["derive"], optional = true }
 embedded-graphics-core = { workspace = true }
 embedded-graphics      = "0.8.2"
 

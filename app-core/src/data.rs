@@ -145,3 +145,27 @@ pub struct TouchData {
     pub x: Option<u16>,
     pub y: Option<u16>,
 }
+
+// ============================================================================
+// NvsUsage - flash-backed config-store occupancy, for the settings screen.
+// ============================================================================
+
+/// Summary of the firmware's flash-backed config store. Updated
+/// at boot and after every save via
+/// [`crate::events::SystemEvent::NvsUsageUpdated`].
+///
+/// `total_bytes` is the size of the region reserved for config
+/// (64 KB by default, defined by
+/// `firmware::system::nvs::FLASH_REGION_SIZE`). `records` is the
+/// number of live (latest-per-key) entries.
+///
+/// Exact on-flash byte usage isn't tracked - sequential-storage
+/// doesn't expose record sizes through the public iterator API,
+/// and append-only wear-leveling makes "bytes used" a fuzzy
+/// number anyway. Record count is what a user actually cares
+/// about ("am I running out?").
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct NvsUsage {
+    pub records: u32,
+    pub total_bytes: u32,
+}

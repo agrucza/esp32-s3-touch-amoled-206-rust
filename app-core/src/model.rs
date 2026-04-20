@@ -69,6 +69,12 @@ pub enum Effect {
 
     /// Immediate shutdown request (Action::Shutdown from a screen).
     Shutdown,
+
+    /// Erase the entire flash-backed config store. Manager calls
+    /// `Nvs::erase_all()` then re-summarises usage and emits a
+    /// fresh `SystemEvent::NvsUsageUpdated` (change-detected
+    /// against the last known value).
+    EraseNvs,
 }
 
 /// Application state machine.
@@ -279,6 +285,10 @@ impl Model {
                 }
                 self.needs_redraw = true;
             }
+            SystemEvent::NvsUsageUpdated { usage } => {
+                self.cached_data.nvs = *usage;
+                self.needs_redraw = true;
+            }
             SystemEvent::TouchPressed { x, y } => {
                 self.cached_data.touch = TouchData { x: Some(*x), y: Some(*y) };
             }
@@ -393,6 +403,10 @@ impl Model {
                 let _ = out.push(Effect::RtcCommand(RtcCommand::SetAlarm { hour, minute, weekday: None }));
                 let target = self.nav_stack.pop_or_home();
                 self.screen.switch_to(target, &self.cached_data);
+                self.needs_redraw = true;
+            }
+            Action::EraseNvs => {
+                let _ = out.push(Effect::EraseNvs);
                 self.needs_redraw = true;
             }
         }

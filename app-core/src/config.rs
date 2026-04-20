@@ -14,6 +14,7 @@
 
 /// Display power-management parameters.
 #[derive(Debug, Clone, Copy)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct DisplayConfig {
     /// Seconds of no user activity before the display dims.
     pub dim_timeout_s: u64,
@@ -34,6 +35,7 @@ pub struct DisplayConfig {
 
 /// Top-level runtime config. Sub-structs group related settings.
 #[derive(Debug, Clone, Copy)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Config {
     pub display: DisplayConfig,
 }

@@ -109,6 +109,7 @@ async fn main(spawner: embassy_executor::Spawner) {
         audio_din: p.GPIO42,
         audio_pa: p.GPIO46,
         lpwr: p.LPWR,
+        flash: p.FLASH,
         tx_buffer,
         rx_buffer,
         tx_descriptors,

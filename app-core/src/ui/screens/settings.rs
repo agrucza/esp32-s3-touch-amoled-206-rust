@@ -35,6 +35,7 @@ enum SettingsView {
     Clock,
     TimeEntry,
     DateEntry,
+    Storage,
 }
 
 // -- Index row metadata ------------------------------------------------------
@@ -57,6 +58,17 @@ fn imu_value(_data: &SystemData) -> String<20> {
     buf
 }
 
+fn storage_value(data: &SystemData) -> String<20> {
+    let mut buf = String::new();
+    let _ = write!(
+        buf,
+        "{} / {}K",
+        data.nvs.records,
+        data.nvs.total_bytes / 1024,
+    );
+    buf
+}
+
 const INDEX_ROWS: &[IndexRow] = &[
     IndexRow {
         label: "CLOCK",
@@ -67,6 +79,11 @@ const INDEX_ROWS: &[IndexRow] = &[
         label: "6-AXIS IMU",
         value_fn: imu_value,
         target: SettingsView::Imu,
+    },
+    IndexRow {
+        label: "STORAGE",
+        value_fn: storage_value,
+        target: SettingsView::Storage,
     },
 ];
 
@@ -121,6 +138,7 @@ impl Screen for SettingsScreen {
             SettingsView::Clock => self.render_clock(display, data),
             SettingsView::TimeEntry => self.render_time_entry(display, data),
             SettingsView::DateEntry => self.render_date_entry(display, data),
+            SettingsView::Storage => self.render_storage(display, data),
         }
     }
 
@@ -135,6 +153,7 @@ impl Screen for SettingsScreen {
             SettingsView::Clock => self.clock_event(event, data),
             SettingsView::TimeEntry => self.time_entry_event(event, data),
             SettingsView::DateEntry => self.date_entry_event(event, data),
+            SettingsView::Storage => self.storage_event(event),
         }
     }
 }
@@ -481,6 +500,86 @@ impl SettingsScreen {
                 Action::None
             }
             SystemEvent::SelfTestUpdated { .. } => Action::Redraw,
+            _ => Action::None,
+        }
+    }
+}
+
+// -- Storage sub-view --------------------------------------------------------
+
+impl SettingsScreen {
+    fn render_storage<D: DrawTarget<Color = Rgb565>>(
+        &self,
+        display: &mut D,
+        data: &SystemData,
+    ) {
+        header_bar(
+            display,
+            layout::header_rect(),
+            HeaderIcon::Back,
+            "STORAGE",
+            theme::AMBER,
+        );
+
+        // Card 0: current usage. Read-only info.
+        let usage_rect = layout::content_card_rect(0);
+        card(display, usage_rect, CardStyle::DEFAULT);
+        let mut usage_buf: String<32> = String::new();
+        let _ = write!(
+            usage_buf,
+            "{} KEYS / {} KB",
+            data.nvs.records,
+            data.nvs.total_bytes / 1024,
+        );
+        value_body(
+            display,
+            usage_rect,
+            "FLASH CONFIG STORE",
+            usage_buf.as_str(),
+            theme::TEXT_WHITE,
+        );
+
+        // Card 1: destructive erase button. Red status dot cues
+        // that this is an irreversible action.
+        let erase_rect = layout::content_card_rect(1);
+        let erase_style = CardStyle::DEFAULT.with_status_dot(theme::RED);
+        card(display, erase_rect, erase_style);
+        value_body(
+            display,
+            erase_rect,
+            "ERASE ALL",
+            "TAP TO WIPE",
+            theme::RED,
+        );
+    }
+
+    fn storage_event(&mut self, event: &SystemEvent) -> Action {
+        match event {
+            SystemEvent::Tap { x, y } if layout::header_icon_hit(*x, *y) => {
+                self.view = SettingsView::Index;
+                Action::Redraw
+            }
+            SystemEvent::Swipe {
+                dir: crate::events::SwipeDir::Right,
+                region: crate::events::SwipeRegion::Content,
+            } => {
+                self.view = SettingsView::Index;
+                Action::Redraw
+            }
+            SystemEvent::Tap { x, y } => {
+                let pt = Point::new(*x as i32, *y as i32);
+                // Tap on the "ERASE ALL" card (index 1) wipes
+                // flash. The model reacts to the returned action
+                // by emitting Effect::EraseNvs; the manager runs
+                // the erase and pushes a fresh
+                // `NvsUsageUpdated` event so the index view
+                // reflects the zeroed count on next render.
+                if layout::content_card_rect(1).contains(pt) {
+                    return Action::EraseNvs;
+                }
+                Action::None
+            }
+            SystemEvent::NvsUsageUpdated { .. } => Action::Redraw,
             _ => Action::None,
         }
     }

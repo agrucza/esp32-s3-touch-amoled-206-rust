@@ -104,6 +104,15 @@ pub enum SystemEvent {
         id: SelfTestId,
         result: SelfTestResult,
     },
+
+    // -- Flash-backed config store --
+    /// Fresh NVS usage snapshot. Emitted by the manager once at
+    /// boot (after the initial load), and after every save
+    /// operation. The main loop caches the result in
+    /// `cached_data.nvs` for the settings screen to render.
+    NvsUsageUpdated {
+        usage: crate::data::NvsUsage,
+    },
 }
 
 // -- Self-tests -----------------------------------------------------------

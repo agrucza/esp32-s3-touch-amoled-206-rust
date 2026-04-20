@@ -132,6 +132,11 @@ pub enum Action {
     /// Dismiss the active alarm. The manager stops the buzz and
     /// navigates back to the previous screen.
     DismissAlarm,
+    /// Erase the entire flash-backed config store. The manager
+    /// calls `Nvs::erase_all()`, re-summarises usage, and emits
+    /// a fresh `SystemEvent::NvsUsageUpdated`. Irrecoverable -
+    /// wrap in a confirmation dialog on the UI side.
+    EraseNvs,
 }
 
 // -- Persistent app state ----------------------------------------------------
@@ -218,6 +223,7 @@ pub const MAX_ALARMS: usize = 8;
 
 /// One alarm entry.
 #[derive(Debug, Clone, Copy)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct AlarmEntry {
     pub hour: u8,
     pub minute: u8,
@@ -242,17 +248,29 @@ impl AlarmEntry {
 }
 
 /// Persistent alarm list. Screens mutate this directly.
+///
+/// When serialised (via the `serde` feature) only `entries` is
+/// written - `active_hw` / `alerting` / `snoozed` are transient
+/// runtime flags that must NOT persist across a reboot, so they
+/// are `#[serde(skip)]` and reset to `Default` on load.
 #[derive(Debug, Clone, Copy)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct AlarmState {
     pub entries: [AlarmEntry; MAX_ALARMS],
-    /// Index of the alarm currently programmed into the RTC hardware,
-    /// or None if no alarm is active.
+    /// Index of the alarm currently programmed into the RTC
+    /// hardware, or None if no alarm is active. Recomputed on
+    /// boot by `plan_reprogram` from current time + entries.
+    #[cfg_attr(feature = "serde", serde(skip))]
     pub active_hw: Option<usize>,
-    /// True when an alarm has fired and the user hasn't dismissed it.
+    /// True when an alarm has fired and the user hasn't dismissed
+    /// it. Not persisted: a mid-alarm reboot should not resume
+    /// ringing.
+    #[cfg_attr(feature = "serde", serde(skip))]
     pub alerting: bool,
     /// True when a snooze is active. The manager skips regular
     /// reprogramming while this is set. Cleared when the snooze
-    /// alarm fires.
+    /// alarm fires. Not persisted: mid-snooze reboot cancels it.
+    #[cfg_attr(feature = "serde", serde(skip))]
     pub snoozed: bool,
 }
 
@@ -447,8 +465,9 @@ mod alarm_tests {
 
 // Per-peripheral snapshot data structs live in `app-core::data`.
 // Re-exported here so screens can `use crate::ui::types::{TimeData,
-// PowerData, MotionData, TouchData, SystemData}` from one place.
-pub use crate::data::{MotionData, PowerData, TimeData, TouchData};
+// PowerData, MotionData, TouchData, NvsUsage, SystemData}` from one
+// place.
+pub use crate::data::{MotionData, NvsUsage, PowerData, TimeData, TouchData};
 
 /// System state, passed to screens on render and events.
 ///
@@ -461,6 +480,9 @@ pub struct SystemData {
     pub power: PowerData,
     pub motion: MotionData,
     pub touch: TouchData,
+    /// Flash config-store occupancy. Updated at boot and after
+    /// every save via `SystemEvent::NvsUsageUpdated`.
+    pub nvs: NvsUsage,
     pub tick_count: u32,
     pub stopwatch: StopwatchState,
     pub timer: TimerState,

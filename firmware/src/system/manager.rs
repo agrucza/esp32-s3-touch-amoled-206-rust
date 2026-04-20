@@ -194,6 +194,16 @@ pub struct SystemManager<'d> {
     // RTC controller, used to enter/exit hardware light sleep.
     rtc: esp_hal::rtc_cntl::Rtc<'d>,
 
+    // Flash-backed persistent config store. Owned by the manager
+    // so saves / loads run on-demand without locking.
+    nvs: crate::system::nvs::Nvs<'d>,
+
+    // Last NVS usage pushed into the event channel. Compared
+    // against a fresh summary after each save / boot; we only
+    // emit `SystemEvent::NvsUsageUpdated` when the value
+    // actually differs. Keeps the fire-hose out of the event
+    // pipeline.
+    last_nvs_usage: app_core::data::NvsUsage,
 }
 
 // `NAV_STACK_DEPTH` and the `NavStack` type live in
@@ -253,6 +263,9 @@ pub struct Peripherals<'d> {
 
     // RTC controller (for light sleep)
     pub lpwr: esp_hal::peripherals::LPWR<'d>,
+
+    // Flash controller (for esp-storage / NVS).
+    pub flash: esp_hal::peripherals::FLASH<'d>,
 
     // Audio DMA buffers (from dma_circular_buffers! macro in main)
     pub tx_buffer: &'static mut [u8],
@@ -400,17 +413,36 @@ impl SystemManager<'static> {
         let i2c_bus: &'static crate::system::bus::SharedI2c = crate::system::bus::I2C_BUS
             .init(embassy_sync::mutex::Mutex::new(i2c));
 
+        // Bring up flash-backed persistence and load any stored
+        // Config / AlarmState. Falls back to `::default()` for any
+        // key that's missing, has a version mismatch, or fails to
+        // deserialise.
+        let mut nvs = crate::system::nvs::Nvs::new(p.flash);
+        let stored_config = nvs.load_config().await;
+        let stored_alarms = nvs.load_alarms().await;
+        let config_source = if stored_config.is_some() { "loaded" } else { "default" };
+        let alarms_source = if stored_alarms.is_some() { "loaded" } else { "default" };
+        let loaded_config = stored_config.unwrap_or_else(Config::default);
+        let loaded_alarms = stored_alarms.unwrap_or_default();
+        let initial_nvs = nvs.usage_summary().await;
+        log::info!(
+            "NVS: config={} alarms={} records={}/64KB",
+            config_source, alarms_source, initial_nvs.records,
+        );
+
         // Seed the initial cached-data snapshot so the first frame
         // renders against sensible values before any task events
         // arrive. Default-initialize everything else.
         let mut cached_data = SystemData::default();
         cached_data.time = initial_time;
         cached_data.power = initial_power;
+        cached_data.alarms = loaded_alarms;
+        cached_data.nvs = initial_nvs;
 
         // Construct the Model (UI + cached state + dispatch).
         let model = app_core::model::Model::new(
             cached_data,
-            Config::default(),
+            loaded_config,
             Instant::now(),
         );
 
@@ -432,6 +464,8 @@ impl SystemManager<'static> {
             mic_drain_buf: alloc::vec![0u8; MIC_DRAIN_BUF_SIZE].into_boxed_slice(),
             row_hashes: alloc::vec![0u32; HEIGHT as usize].into_boxed_slice(),
             rtc,
+            nvs,
+            last_nvs_usage: initial_nvs,
         };
 
         let bundle = TaskBundle {
@@ -553,7 +587,24 @@ impl SystemManager<'static> {
                     log::info!("System: shutdown requested");
                     self.power.shutdown();
                 }
+                Effect::EraseNvs => {
+                    log::info!("NVS: erasing all stored records");
+                    self.nvs.erase_all().await;
+                    self.refresh_nvs_usage().await;
+                }
             }
+        }
+    }
+
+    /// Recompute NVS usage and push a `NvsUsageUpdated` event if
+    /// the value actually changed. Called after any operation
+    /// that could affect the store (save/erase/boot). Keeps the
+    /// event channel quiet when nothing visibly changed.
+    async fn refresh_nvs_usage(&mut self) {
+        let fresh = self.nvs.usage_summary().await;
+        if fresh != self.last_nvs_usage {
+            self.last_nvs_usage = fresh;
+            EVENTS.send(SystemEvent::NvsUsageUpdated { usage: fresh }).await;
         }
     }
 
