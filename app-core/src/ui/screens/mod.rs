@@ -164,3 +164,48 @@ impl ActiveScreen {
         self.mount(data);
     }
 }
+
+#[cfg(test)]
+mod cycle_tests {
+    use super::*;
+
+    // HOME_APPS today is a 2-entry carousel: [Clock, Status]. All
+    // cycle tests are written against that length rather than
+    // hard-coded pairs so adding a new home-row entry later doesn't
+    // silently break these expectations.
+
+    #[test]
+    fn forward_moves_to_next_home_app() {
+        // Clock (idx 0) -> Status (idx 1).
+        assert_eq!(cycle_home_app(HOME_APPS[0], true), HOME_APPS[1]);
+    }
+
+    #[test]
+    fn backward_moves_to_previous_home_app() {
+        // Status (idx 1) -> Clock (idx 0).
+        assert_eq!(cycle_home_app(HOME_APPS[1], false), HOME_APPS[0]);
+    }
+
+    #[test]
+    fn forward_wraps_at_end() {
+        // Last home app cycles back to the first.
+        let last = *HOME_APPS.last().unwrap();
+        assert_eq!(cycle_home_app(last, true), HOME_APPS[0]);
+    }
+
+    #[test]
+    fn backward_wraps_at_start() {
+        // First home app cycles to the last.
+        assert_eq!(cycle_home_app(HOME_APPS[0], false), *HOME_APPS.last().unwrap());
+    }
+
+    #[test]
+    fn non_home_screen_returns_unchanged() {
+        // Screens that aren't in HOME_APPS (Stopwatch, Timer, Alarm,
+        // Settings, Panel) don't participate in L/R cycling - the
+        // function returns them unchanged.
+        assert_eq!(cycle_home_app(ScreenId::Stopwatch, true), ScreenId::Stopwatch);
+        assert_eq!(cycle_home_app(ScreenId::Settings, false), ScreenId::Settings);
+        assert_eq!(cycle_home_app(ScreenId::Panel, true), ScreenId::Panel);
+    }
+}

@@ -188,7 +188,7 @@ pub struct SystemManager<'d> {
     /// [`Action::Back`]. The Panel modal is never pushed - it
     /// replaces the current screen on launch-an-app and the
     /// pre-panel screen already sits below it on the stack.
-    nav_stack: heapless::Vec<ScreenId, NAV_STACK_DEPTH>,
+    nav_stack: app_core::nav::NavStack,
     tick_count: u32,
     needs_redraw: bool,
 
@@ -235,13 +235,9 @@ pub struct SystemManager<'d> {
     cached_data: SystemData,
 }
 
-/// Maximum depth of the navigation stack. Realistically the
-/// deepest chain today is `Clock -> Panel -> App -> Panel ->
-/// App`, but the panel replaces-top so the stack never actually
-/// contains more than one "real" entry per visited screen. Four
-/// slots leaves generous headroom; push failures beyond this
-/// degrade gracefully to "Back returns to Clock".
-const NAV_STACK_DEPTH: usize = 4;
+// `NAV_STACK_DEPTH` and the `NavStack` type live in
+// `app_core::nav` so the stack's push/pop semantics are
+// host-testable.
 
 /// All peripheral tokens needed by the system manager.
 ///
@@ -479,7 +475,7 @@ impl SystemManager<'static> {
             rx_transfer: None,
             pending_audio,
             screen,
-            nav_stack: heapless::Vec::new(),
+            nav_stack: app_core::nav::NavStack::new(),
             tick_count: 0,
             needs_redraw: true, // first frame always draws
             mic_drain_buf: alloc::vec![0u8; MIC_DRAIN_BUF_SIZE].into_boxed_slice(),
@@ -831,7 +827,7 @@ impl SystemManager<'static> {
                 };
                 // Navigate to timer screen to handle the notification.
                 if !matches!(self.screen.id(), ScreenId::Timer) {
-                    let _ = self.nav_stack.push(self.screen.id());
+                    self.nav_stack.push(self.screen.id());
                     self.screen.switch_to(ScreenId::Timer, &self.cached_data);
                 }
                 self.needs_redraw = true;
@@ -840,7 +836,7 @@ impl SystemManager<'static> {
             SystemEvent::AlarmFired => {
                 // Navigate to alarm screen to handle the notification.
                 if !matches!(self.screen.id(), ScreenId::Alarm) {
-                    let _ = self.nav_stack.push(self.screen.id());
+                    self.nav_stack.push(self.screen.id());
                     self.screen.switch_to(ScreenId::Alarm, &self.cached_data);
                 }
                 self.needs_redraw = true;
@@ -923,7 +919,7 @@ impl SystemManager<'static> {
         if !matches!(self.screen.id(), ScreenId::Panel) {
             if let SystemEvent::Swipe { dir: SwipeDir::Down, region: SwipeRegion::Top } = &event {
                 let previous = self.screen.id();
-                let _ = self.nav_stack.push(previous);
+                self.nav_stack.push(previous);
                 self.screen.open_panel(previous, &self.cached_data);
                 self.needs_redraw = true;
                 return;
@@ -962,7 +958,7 @@ impl SystemManager<'static> {
                 // Every other transition is a real "into" nav and
                 // pushes so `Back` can find its way home.
                 if !matches!(self.screen.id(), ScreenId::Panel) {
-                    let _ = self.nav_stack.push(self.screen.id());
+                    self.nav_stack.push(self.screen.id());
                 }
                 self.screen.switch_to(id, &self.cached_data);
                 self.needs_redraw = true;
@@ -972,7 +968,7 @@ impl SystemManager<'static> {
                 // stack is empty (first screen on boot, overflow, or
                 // a screen that returned Back without anyone having
                 // pushed anything). Clock is always a safe landing.
-                let target = self.nav_stack.pop().unwrap_or(ScreenId::Clock);
+                let target = self.nav_stack.pop_or_home();
                 self.screen.switch_to(target, &self.cached_data);
                 self.needs_redraw = true;
             }
@@ -1031,7 +1027,7 @@ impl SystemManager<'static> {
             Action::DismissAlarm => {
                 self.buzz = None;
                 self.power.buzz_stop();
-                let target = self.nav_stack.pop().unwrap_or(ScreenId::Clock);
+                let target = self.nav_stack.pop_or_home();
                 self.screen.switch_to(target, &self.cached_data);
                 self.needs_redraw = true;
             }
@@ -1043,19 +1039,15 @@ impl SystemManager<'static> {
                 self.cached_data.alarms.snoozed = true;
                 // Program RTC with now + 10 minutes.
                 let t = &self.cached_data.time;
-                let snooze_min = (t.minute + 10) % 60;
-                let snooze_hour = if t.minute + 10 >= 60 {
-                    (t.hour + 1) % 24
-                } else {
-                    t.hour
-                };
+                let (snooze_hour, snooze_minute) =
+                    crate::ui::types::AlarmState::compute_snooze(t.hour, t.minute, 10);
                 RTC_COMMAND.signal(RtcCommand::SetAlarm {
                     hour: snooze_hour,
-                    minute: snooze_min,
+                    minute: snooze_minute,
                     weekday: None,
                 });
                 // Navigate back to previous screen.
-                let target = self.nav_stack.pop().unwrap_or(ScreenId::Clock);
+                let target = self.nav_stack.pop_or_home();
                 self.screen.switch_to(target, &self.cached_data);
                 self.needs_redraw = true;
             }

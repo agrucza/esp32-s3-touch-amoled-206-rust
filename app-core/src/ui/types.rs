@@ -295,6 +295,20 @@ impl AlarmState {
         best.map(|(i, _)| i)
     }
 
+    /// Compute the clock-time (hour, minute) for a snooze alarm
+    /// firing `minutes_from_now` minutes after the given
+    /// `hour`:`minute`. Handles hour and midnight wraparound.
+    ///
+    /// Associated function (no `self`) so the snooze duration is
+    /// decided by the caller and the calculation is easy to host-test.
+    pub fn compute_snooze(hour: u8, minute: u8, minutes_from_now: u8) -> (u8, u8) {
+        let total = minute as u16 + minutes_from_now as u16;
+        let snooze_minute = (total % 60) as u8;
+        let hours_added = (total / 60) as u8;
+        let snooze_hour = (hour + hours_added) % 24;
+        (snooze_hour, snooze_minute)
+    }
+
     /// Decide what the RTC should be programmed to based on the
     /// current time and the list of enabled alarms. Mutates
     /// `active_hw` to the new target (so subsequent ticks with
@@ -375,6 +389,28 @@ mod alarm_tests {
         assert!(s.plan_reprogram(6, 0, 0).is_some());
         // Subsequent call with no change returns None.
         assert_eq!(s.plan_reprogram(6, 0, 0), None);
+    }
+
+    #[test]
+    fn snooze_adds_minutes_no_wrap() {
+        assert_eq!(AlarmState::compute_snooze(7, 30, 10), (7, 40));
+    }
+
+    #[test]
+    fn snooze_wraps_minutes_into_next_hour() {
+        assert_eq!(AlarmState::compute_snooze(7, 55, 10), (8, 5));
+    }
+
+    #[test]
+    fn snooze_wraps_past_midnight() {
+        // 23:55 + 10 min = 00:05
+        assert_eq!(AlarmState::compute_snooze(23, 55, 10), (0, 5));
+    }
+
+    #[test]
+    fn snooze_with_larger_delay_spans_multiple_hours() {
+        // 22:00 + 180 min = 01:00 next day
+        assert_eq!(AlarmState::compute_snooze(22, 0, 180), (1, 0));
     }
 
     #[test]
