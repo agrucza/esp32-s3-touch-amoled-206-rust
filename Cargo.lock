@@ -21,6 +21,7 @@ checksum = "c583acf993cf4245c4acb0a2cc2ab1f9cc097de73411bb6d3647ff6af2b1013d"
 name = "app-core"
 version = "0.1.0"
 dependencies = [
+ "critical-section",
  "defmt 0.3.100",
  "drivers",
  "embassy-time",
@@ -450,6 +451,7 @@ dependencies = [
  "critical-section",
  "document-features",
  "embassy-time-driver",
+ "embassy-time-queue-utils",
  "embedded-hal 0.2.7",
  "embedded-hal 1.0.0",
  "embedded-hal-async",

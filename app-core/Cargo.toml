@@ -32,4 +32,12 @@ u8g2-fonts = "0.7.2"
 drivers = { path = "../drivers", default-features = false, features = ["pmu", "rtc", "imu", "touch"] }
 
 [dev-dependencies]
-# nothing extra - `cargo test` on host uses std automatically via the test harness
+# Register a mock time driver so host tests that exercise code
+# paths reaching `Instant::now()` (screens' on_event handlers,
+# Model::handle_event dispatch) can link. Without this the test
+# binary hits `_embassy_time_now` as an unresolved symbol.
+embassy-time = { version = "0.5.1", features = ["mock-driver"] }
+# `critical-section`'s std backend provides
+# `_critical_section_*` implementations for host builds - the
+# mock time driver takes locks internally.
+critical-section = { version = "1.2", features = ["std"] }

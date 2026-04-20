@@ -13,22 +13,10 @@ use esp_hal::{
 /// at init time in the manager.
 pub type Display<'d> = CO5300<'static, EspQspi<'d>, Output<'d>>;
 
-/// Display power-management state. Transitions are driven by idle
-/// time since the last user-input event (touch / swipe / button).
-///
-/// * `Active`: normal running state at full brightness.
-/// * `Dim`: brightness register dropped, rendering continues normally.
-///   This is the first-stage power save and is the cheapest to enter
-///   and leave (single DCS command over SPI).
-/// * `Off`: `DISPOFF` issued, the entire render path is skipped until
-///   a user event wakes the display again. Deepest power save short
-///   of a full light-sleep.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DisplayState {
-    Active,
-    Dim,
-    Off,
-}
+// `DisplayState` lives in `app_core::ui::types` so Model / UI can
+// reason about display power state without touching hardware.
+// Re-exported here so existing firmware imports keep working.
+pub use app_core::ui::types::DisplayState;
 
 /// Perform the full display hardware init sequence.
 ///

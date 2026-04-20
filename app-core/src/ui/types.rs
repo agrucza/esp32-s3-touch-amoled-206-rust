@@ -10,6 +10,25 @@ pub use crate::events::{
     NUM_SELF_TESTS, SelfTestId, SelfTestResult, SystemEvent,
 };
 
+// -- Display power-management state ------------------------------------------
+
+/// Display power-management state. Transitions are driven by idle
+/// time since the last user-input event (touch / swipe / button).
+///
+/// * `Active`: normal running state at full brightness.
+/// * `Dim`: brightness register dropped, rendering continues normally.
+///   This is the first-stage power save and is the cheapest to enter
+///   and leave (single DCS command over SPI).
+/// * `Off`: `DISPOFF` issued, the entire render path is skipped until
+///   a user event wakes the display again. Deepest power save short
+///   of a full light-sleep.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DisplayState {
+    Active,
+    Dim,
+    Off,
+}
+
 // -- Screen IDs --------------------------------------------------------------
 
 /// Identifies which screen to switch to.

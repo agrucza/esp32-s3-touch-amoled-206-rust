@@ -2,20 +2,19 @@ extern crate alloc;
 
 use crate::config::Config;
 use crate::display_hal::{self, WIDTH, HEIGHT};
-use crate::events::{SelfTestId, SwipeDir, SwipeRegion, SystemEvent};
+use crate::events::{SelfTestId, SystemEvent};
 use crate::sdcard_hal::EspVolumeManager;
 use crate::system::audio::AudioSystem;
 use crate::system::bus::{EVENTS, IMU_COMMAND, ImuCommand, RTC_COMMAND, RtcCommand, SLEEP_WATCH, SleepState};
-use crate::system::display::{Display, DisplayState};
+use crate::system::display::Display;
 use crate::system::power::PowerControls;
 use crate::system::tasks::boot_button::BootButtonTaskState;
 use crate::system::tasks::imu::ImuTaskState;
 use crate::system::tasks::power::PowerTaskState;
 use crate::system::tasks::rtc::RtcTaskState;
-use crate::system::tasks::touch::{TouchData, TouchTaskState};
+use crate::system::tasks::touch::TouchTaskState;
 use crate::ui::primitives;
-use crate::ui::screens::{self, ActiveScreen};
-use crate::ui::types::{Action, ScreenId, SystemData};
+use crate::ui::types::SystemData;
 use embedded_graphics::draw_target::DrawTarget;
 use embassy_futures::select::{select, Either};
 use embassy_time::{Duration, Instant, Timer, with_timeout};
@@ -26,10 +25,6 @@ use esp_hal::{
     i2s::master::asynch::{I2sReadDmaTransferAsync, I2sWriteDmaTransferAsync},
     time::Rate,
 };
-
-// Buzz pattern state machine lives in `app_core::buzz` so it can
-// be host-tested. See `BuzzPattern` / `BuzzAction`.
-use app_core::buzz::{BuzzAction, BuzzPattern};
 
 // -- CPU frequency scaling ---------------------------------------------------
 
@@ -179,18 +174,14 @@ pub struct SystemManager<'d> {
     // `start_audio`. `None` after audio has been started once.
     pending_audio: Option<PendingAudio<'d>>,
 
-    // UI
-    screen: ActiveScreen,
-    /// LIFO nav stack for `Action::Back`. Each entry is a screen
-    /// the user can return to. Pushed when the user navigates
-    /// *into* a new screen (tapping a panel app, opening the
-    /// pull-down panel) and popped when a screen returns
-    /// [`Action::Back`]. The Panel modal is never pushed - it
-    /// replaces the current screen on launch-an-app and the
-    /// pre-panel screen already sits below it on the stack.
-    nav_stack: app_core::nav::NavStack,
+    // UI + app state: screen, nav stack, sleep flag, display
+    // state, cached snapshots, dim/idle timers, buzz pattern,
+    // config. All moved into `app_core::model::Model` where the
+    // event->effect dispatch is host-testable.
+    model: app_core::model::Model,
+
+    // Periodic loop counter (diagnostics).
     tick_count: u32,
-    needs_redraw: bool,
 
     // Pre-allocated drain buffer for the mic RX DMA ring.
     mic_drain_buf: alloc::boxed::Box<[u8]>,
@@ -200,39 +191,9 @@ pub struct SystemManager<'d> {
     // only the dirty horizontal band is pushed over QSPI.
     row_hashes: alloc::boxed::Box<[u32]>,
 
-    // Runtime configuration (display dim/off timeouts, brightness,
-    // ...). Read-only for the current pass, mutable by future settings
-    // code. See `crate::config` for the backing types.
-    config: Config,
-
-    // Display power-management state. Driven by idle time against
-    // `last_activity`; transitions are applied via
-    // `system::display::transition`.
-    display_state: DisplayState,
-
-    // Wall-clock timestamp of the last user-input event. Used by the
-    // display state machine to decide when to dim / blank the panel.
-    last_activity: Instant,
-
-    // Buzz pattern state. When active, the motor toggles on/off
-    // each tick based on elapsed time since the last toggle.
-    buzz: Option<BuzzPattern>,
-
     // RTC controller, used to enter/exit hardware light sleep.
     rtc: esp_hal::rtc_cntl::Rtc<'d>,
 
-    // System-wide sleep flag. When `true`, the display is forced
-    // Off and the IMU is in WoM mode regardless of idle time.
-    // Set by user request (BOOT button while Active/Dim), cleared
-    // by any user-input wake event. Will grow later to also drive
-    // CPU frequency scaling and other peripheral power-down.
-    sleeping: bool,
-
-    // Cached snapshot of all system data (time, battery, IMU,
-    // touch, ...). Event handlers update individual fields as
-    // events arrive; the render path just reads this cache.
-    // Fully refreshed at boot and on wake-from-sleep.
-    cached_data: SystemData,
 }
 
 // `NAV_STACK_DEPTH` and the `NavStack` type live in
@@ -439,30 +400,22 @@ impl SystemManager<'static> {
         let i2c_bus: &'static crate::system::bus::SharedI2c = crate::system::bus::I2C_BUS
             .init(embassy_sync::mutex::Mutex::new(i2c));
 
-        let cached_data = SystemData {
-            time: initial_time,
-            power: initial_power,
-            motion: Default::default(),
-            touch: TouchData::default(),
-            tick_count: 0,
-            // Every slot starts in `NotRun`; the IMU task replays the
-            // boot-time self-test results as `SelfTestUpdated` events
-            // during its first iteration, so this is only visible to
-            // whatever runs before that (currently nothing).
-            self_tests: [crate::events::SelfTestResult::NotRun; crate::events::NUM_SELF_TESTS],
-            stopwatch: Default::default(),
-            timer: Default::default(),
-            alarms: Default::default(),
-        };
+        // Seed the initial cached-data snapshot so the first frame
+        // renders against sensible values before any task events
+        // arrive. Default-initialize everything else.
+        let mut cached_data = SystemData::default();
+        cached_data.time = initial_time;
+        cached_data.power = initial_power;
+
+        // Construct the Model (UI + cached state + dispatch).
+        let model = app_core::model::Model::new(
+            cached_data,
+            Config::default(),
+            Instant::now(),
+        );
 
         // Construct the RTC controller for hardware light sleep.
         let rtc = esp_hal::rtc_cntl::Rtc::new(p.lpwr);
-
-        // Build the initial screen and fire its `on_mount` hook so
-        // any state it wants to seed from `cached_data` is ready
-        // before the first render.
-        let mut screen = ActiveScreen::new(ScreenId::Clock);
-        screen.mount(&cached_data);
 
         let manager = Self {
             i2c_bus,
@@ -474,18 +427,10 @@ impl SystemManager<'static> {
             tx_transfer: None,
             rx_transfer: None,
             pending_audio,
-            screen,
-            nav_stack: app_core::nav::NavStack::new(),
+            model,
             tick_count: 0,
-            needs_redraw: true, // first frame always draws
             mic_drain_buf: alloc::vec![0u8; MIC_DRAIN_BUF_SIZE].into_boxed_slice(),
             row_hashes: alloc::vec![0u32; HEIGHT as usize].into_boxed_slice(),
-            config: Config::default(),
-            display_state: DisplayState::Active,
-            last_activity: Instant::now(),
-            sleeping: false,
-            cached_data,
-            buzz: None,
             rtc,
         };
 
@@ -567,129 +512,83 @@ impl SystemManager<'static> {
         self.rx_transfer = Some(rx_transfer);
     }
 
-    // ================= Sleep / wake API ==========================================
+    // ================= Effect executor ===========================================
 
-    // `is_user_activity` and `is_wake_source` live in
-    // `app_core::events` as free functions and are host-tested.
-
-    /// Enter low-power sleep. Idempotent.
-    ///
-    /// Broadcasts the sleep state on [`SLEEP_WATCH`] so every
-    /// subscriber task can apply its own low-power adjustments
-    /// (IMU -> WoM, touch -> Monitor, power task -> slow poll),
-    /// blanks the display, and sets the `sleeping` flag.
-    async fn sleep(&mut self) {
-        if self.sleeping {
-            return;
-        }
-        log::info!("system: sleep");
-        self.sleeping = true;
-        SLEEP_WATCH.sender().send(SleepState::Sleeping);
-        let _ = crate::system::display::transition(
-            &mut self.display,
-            self.display_state,
-            DisplayState::Off,
-            &self.config.display,
-        ).await;
-        self.display_state = DisplayState::Off;
-    }
-
-    /// Exit low-power sleep. Idempotent.
-    ///
-    /// Broadcasts the awake state so subscriber tasks restore
-    /// their normal config, turns the display back on at full
-    /// brightness, resets the idle timer, and forces a full
-    /// redraw so the first frame after wake is current.
-    async fn wake(&mut self) {
-        if !self.sleeping {
-            return;
-        }
-        log::info!("system: wake");
-        self.sleeping = false;
-        self.last_activity = Instant::now();
-        SLEEP_WATCH.sender().send(SleepState::Awake);
-        let _ = crate::system::display::transition(
-            &mut self.display,
-            self.display_state,
-            DisplayState::Active,
-            &self.config.display,
-        ).await;
-        self.display_state = DisplayState::Active;
-        self.row_hashes.fill(0);
-        self.needs_redraw = true;
-    }
-
-    /// Apply the Active <-> Dim transition when awake. No-op when
-    /// sleeping (the display is Off and `sleep`/`wake` handle that).
-    async fn apply_dim_state(&mut self) {
-        if self.sleeping {
-            return;
-        }
-        let idle = Instant::now().duration_since(self.last_activity);
-        let target = if idle >= Duration::from_secs(self.config.display.dim_timeout_s) {
-            DisplayState::Dim
-        } else {
-            DisplayState::Active
-        };
-        if target != self.display_state {
-            let _ = crate::system::display::transition(
-                &mut self.display,
-                self.display_state,
-                target,
-                &self.config.display,
-            ).await;
-            self.display_state = target;
-        }
-    }
-
-    /// Trigger sleep if the idle timer has expired. No-op if
-    /// already sleeping.
-    async fn check_idle_sleep(&mut self) {
-        if self.sleeping {
-            return;
-        }
-        let idle = Instant::now().duration_since(self.last_activity);
-        if idle >= Duration::from_secs(self.config.display.off_timeout_s) {
-            self.sleep().await;
-        }
-    }
-
-    /// Advance the active buzz pattern and drive the motor GPIO
-    /// when the pattern says to flip.
-    fn tick_buzz(&mut self) {
-        let Some(pattern) = self.buzz.as_mut() else {
-            return;
-        };
-        match pattern.tick(Instant::now()) {
-            BuzzAction::None => {}
-            BuzzAction::TurnOn => self.power.buzz(),
-            BuzzAction::TurnOff => self.power.buzz_stop(),
-        }
-    }
-
-    /// Check if the next-to-fire alarm differs from what's
-    /// programmed in the RTC and reprogram if so. Pure decision
-    /// logic lives on `AlarmState::plan_reprogram` (app-core);
-    /// this function is just the signal-emission side.
-    fn check_alarm_reprogram(&mut self) {
-        use crate::ui::types::AlarmReprogram;
-
-        let d = &mut self.cached_data;
-        let weekday = crate::ui::screens::alarm::day_of_week(
-            d.time.year as i32,
-            d.time.month as i32,
-            d.time.day as i32,
-        );
-        match d.alarms.plan_reprogram(d.time.hour, d.time.minute, weekday) {
-            None => {}
-            Some(AlarmReprogram::SetAlarm { hour, minute }) => {
-                RTC_COMMAND.signal(RtcCommand::SetAlarm { hour, minute, weekday: None });
-            }
-            Some(AlarmReprogram::CancelAlarm) => {
-                RTC_COMMAND.signal(RtcCommand::CancelAlarm);
+    /// Apply the effects emitted by `Model::handle_event` /
+    /// `Model::tick`. Each variant maps to the concrete hardware
+    /// path (signal channel, async display transition, GPIO
+    /// toggle, shutdown).
+    async fn execute_effects(&mut self, effects: app_core::model::Effects) {
+        use app_core::model::Effect;
+        for effect in effects {
+            match effect {
+                Effect::TransitionDisplay { from, to } => {
+                    let _ = crate::system::display::transition(
+                        &mut self.display,
+                        from,
+                        to,
+                        &self.model.config.display,
+                    ).await;
+                }
+                Effect::BroadcastSleeping => {
+                    SLEEP_WATCH.sender().send(SleepState::Sleeping);
+                    log::info!("system: sleep");
+                }
+                Effect::BroadcastAwake => {
+                    SLEEP_WATCH.sender().send(SleepState::Awake);
+                    self.row_hashes.fill(0); // force full redraw next frame
+                    log::info!("system: wake");
+                }
+                Effect::EnterLightSleep => {
+                    self.enter_light_sleep();
+                }
+                Effect::MotorOn => self.power.buzz(),
+                Effect::MotorOff => self.power.buzz_stop(),
+                Effect::MotorPulse { duration_ms } => {
+                    self.power.buzz();
+                    Timer::after(Duration::from_millis(duration_ms as u64)).await;
+                    self.power.buzz_stop();
+                }
+                Effect::SetAlarm { hour, minute, weekday } => {
+                    RTC_COMMAND.signal(RtcCommand::SetAlarm { hour, minute, weekday });
+                }
+                Effect::CancelAlarm => RTC_COMMAND.signal(RtcCommand::CancelAlarm),
+                Effect::StartTimer { seconds } => {
+                    RTC_COMMAND.signal(RtcCommand::StartTimer { seconds });
+                }
+                Effect::CancelTimer => RTC_COMMAND.signal(RtcCommand::CancelTimer),
+                Effect::SetTime { year, month, day, hour, minute, second } => {
+                    RTC_COMMAND.signal(RtcCommand::SetTime {
+                        year, month, day, hour, minute, second,
+                    });
+                }
+                Effect::RunSelfTest(id) => {
+                    match id {
+                        SelfTestId::ImuAccel | SelfTestId::ImuGyro => {
+                            IMU_COMMAND.signal(ImuCommand::RunSelfTest(id));
+                        }
+                    }
+                }
+                Effect::Shutdown => {
+                    log::info!("System: shutdown requested");
+                    self.power.shutdown();
+                }
             }
         }
     }
+
+    /// The old sleep/wake docs preserved for reference.
+    ///
+    /// Sleep broadcasts [`SLEEP_WATCH`] so subscribers can enter
+    /// low-power modes (IMU -> WoM, touch -> Monitor, power task
+    /// -> slow poll), blanks the display, and sets Model's
+    /// `sleeping` flag. Wake reverses it. All of that now lives
+    /// in `app_core::model::Model::{sleep, wake}` emitting
+    /// effects that `execute_effects` applies here.
+    // `sleep`, `wake`, `apply_dim_state`, `check_idle_sleep`,
+    // `tick_buzz`, `check_alarm_reprogram` all live on
+    // `app_core::model::Model` now. The manager's role shrinks to
+    // `execute_effects` (above) plus the tick/render loop (below).
 
     // ================= Light sleep ================================================
 
@@ -785,273 +684,13 @@ impl SystemManager<'static> {
 
     /// Handle a single event received from the global event channel.
     ///
-    /// Responsibilities:
-    ///   * Update `cached_data` from snapshot events
-    ///     (`TimeUpdated` / `PowerUpdated` / `MotionUpdated`, touch
-    ///     position from `TouchPressed` / `TouchReleased`).
-    ///   * Drive sleep/wake transitions on user activity and WoM.
-    ///   * Flag `needs_redraw` for events that visually matter.
-    ///   * Forward screen-level events to the active screen and
-    ///     act on the returned `Action`.
+    /// The pure logic lives on `app_core::model::Model::handle_event`
+    /// (snapshot caching, sleep/wake decisions, screen dispatch,
+    /// action interpretation). This wrapper hands the event to the
+    /// model and executes the returned effects on hardware.
     async fn handle_event(&mut self, event: SystemEvent) {
-        // Snapshot events: just refresh the cache and mark redraw.
-        match &event {
-            SystemEvent::TimeUpdated { data } => {
-                self.cached_data.time = *data;
-                // Check if the next alarm needs reprogramming.
-                self.check_alarm_reprogram();
-                // Don't early-return - forward to the screen so it
-                // can resync timer deadlines from RTC time.
-            }
-            SystemEvent::PowerUpdated { data } => {
-                self.cached_data.power = *data;
-                // Power snapshots arrive every 500 ms. Only flag
-                // redraw when a visible field actually moved - we
-                // don't want a full frame every half second just
-                // because VBUS mV wobbled. For now the battery % is
-                // the main visible field, and `BatteryChanged` is
-                // emitted separately when it moves, so skip the
-                // redraw here.
-                return;
-            }
-            SystemEvent::MotionUpdated { data } => {
-                self.cached_data.motion = *data;
-                // Don't early-return - forward to the screen so it
-                // can decide whether to redraw (e.g. stopwatch/timer
-                // tick, status live motion display, flash animations).
-            }
-            SystemEvent::TimerExpired => {
-                // Reset timer state.
-                self.cached_data.timer = crate::ui::types::TimerState::Idle {
-                    duration: embassy_time::Duration::from_ticks(0),
-                };
-                // Navigate to timer screen to handle the notification.
-                if !matches!(self.screen.id(), ScreenId::Timer) {
-                    self.nav_stack.push(self.screen.id());
-                    self.screen.switch_to(ScreenId::Timer, &self.cached_data);
-                }
-                self.needs_redraw = true;
-                // Forward to the timer screen so it can buzz/alert.
-            }
-            SystemEvent::AlarmFired => {
-                // Navigate to alarm screen to handle the notification.
-                if !matches!(self.screen.id(), ScreenId::Alarm) {
-                    self.nav_stack.push(self.screen.id());
-                    self.screen.switch_to(ScreenId::Alarm, &self.cached_data);
-                }
-                self.needs_redraw = true;
-                // Forward to the alarm screen so it can buzz/alert.
-            }
-            SystemEvent::SelfTestUpdated { id, result } => {
-                // Stash the latest result under its id and let the
-                // current screen decide whether it cares. Most don't -
-                // only the IMU sub-view of Settings renders this data
-                // today - so we still forward the event below instead
-                // of early-returning, giving the screen a chance to
-                // redraw for a Running → Pass/Fail transition.
-                self.cached_data.self_tests[*id as usize] = *result;
-                self.needs_redraw = true;
-            }
-            SystemEvent::TouchPressed { x, y } => {
-                self.cached_data.touch = TouchData { x: Some(*x), y: Some(*y) };
-            }
-            SystemEvent::TouchReleased => {
-                self.cached_data.touch = TouchData::default();
-            }
-            SystemEvent::HalfMinuteChanged
-            | SystemEvent::BatteryChanged { .. } => {
-                self.needs_redraw = true;
-            }
-            _ => {}
-        }
-
-        // Non-user wake sources: wake the device first, then let
-        // the event continue through to screen dispatch.
-        if self.sleeping && crate::events::is_wake_source(&event) {
-            let reason = match event {
-                SystemEvent::WakeOnMotion => "IMU motion",
-                SystemEvent::AlarmFired => "RTC alarm",
-                SystemEvent::TimerExpired => "RTC timer",
-                _ => "unknown",
-            };
-            log::info!("wake: {}", reason);
-            self.wake().await;
-            // WakeOnMotion just wakes - no screen needs the event.
-            // AlarmFired and TimerExpired need to reach the screen.
-            if matches!(event, SystemEvent::WakeOnMotion) {
-                return;
-            }
-        }
-
-        // Sleep/wake transitions on user activity.
-        if crate::events::is_user_activity(&event) {
-            self.last_activity = Instant::now();
-            if self.sleeping {
-                // Waking from sleep: consume this event so it
-                // doesn't dispatch to the screen (avoids accidental
-                // taps/swipes on wake).
-                self.wake().await;
-                return;
-            }
-            if matches!(event, SystemEvent::BootButtonPressed) {
-                // BOOT while awake = "sleep now" shortcut.
-                self.power.buzz();
-                Timer::after(Duration::from_millis(100)).await;
-                self.power.buzz_stop();
-                self.sleep().await;
-                return;
-            }
-        }
-
-        // From here on we only dispatch to the screen when awake.
-        if self.sleeping {
-            return;
-        }
-
-        // Log swipes for debugging.
-        if let SystemEvent::Swipe { dir, region } = &event {
-            log::info!("Swipe: {:?} in {:?}", dir, region);
-        }
-
-        // System-level gesture: swipe-down-from-top opens panel.
-        // Push the pre-panel screen so `Action::Back` from an app
-        // launched via the panel returns here, not to hardcoded Clock.
-        if !matches!(self.screen.id(), ScreenId::Panel) {
-            if let SystemEvent::Swipe { dir: SwipeDir::Down, region: SwipeRegion::Top } = &event {
-                let previous = self.screen.id();
-                self.nav_stack.push(previous);
-                self.screen.open_panel(previous, &self.cached_data);
-                self.needs_redraw = true;
-                return;
-            }
-        }
-
-        // Forward to the active screen.
-        match self.screen.on_event(&event, &mut self.cached_data) {
-            Action::None => {
-                // Home-row nav fallback: content L/R swipes cycle
-                // through home-row apps.
-                if !matches!(self.screen.id(), ScreenId::Panel) {
-                    if let SystemEvent::Swipe { dir, region: SwipeRegion::Content } = &event {
-                        match dir {
-                            SwipeDir::Right => {
-                                let next = screens::cycle_home_app(self.screen.id(), true);
-                                self.screen.switch_to(next, &self.cached_data);
-                                self.needs_redraw = true;
-                            }
-                            SwipeDir::Left => {
-                                let prev = screens::cycle_home_app(self.screen.id(), false);
-                                self.screen.switch_to(prev, &self.cached_data);
-                                self.needs_redraw = true;
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-            }
-            Action::Redraw => self.needs_redraw = true,
-            Action::SwitchScreen(id) => {
-                // Modal replace-top: when leaving Panel (e.g. the
-                // user tapped an app icon), the pre-panel screen
-                // is already at the top of the nav stack from when
-                // the panel was opened, so don't push Panel itself.
-                // Every other transition is a real "into" nav and
-                // pushes so `Back` can find its way home.
-                if !matches!(self.screen.id(), ScreenId::Panel) {
-                    self.nav_stack.push(self.screen.id());
-                }
-                self.screen.switch_to(id, &self.cached_data);
-                self.needs_redraw = true;
-            }
-            Action::Back => {
-                // Pop the previous screen; fall back to Clock if the
-                // stack is empty (first screen on boot, overflow, or
-                // a screen that returned Back without anyone having
-                // pushed anything). Clock is always a safe landing.
-                let target = self.nav_stack.pop_or_home();
-                self.screen.switch_to(target, &self.cached_data);
-                self.needs_redraw = true;
-            }
-            Action::Shutdown => {
-                log::info!("System: shutdown requested");
-                self.power.shutdown();
-            }
-            Action::RunSelfTest(id) => {
-                // Route to whichever task's command signal owns this
-                // test id. Today every id belongs to the IMU task;
-                // future SD-card / PMU / RTC tests will add match
-                // arms here that signal their own task channels.
-                match id {
-                    SelfTestId::ImuAccel | SelfTestId::ImuGyro => {
-                        IMU_COMMAND.signal(ImuCommand::RunSelfTest(id));
-                    }
-                }
-                // Optimistically flag a redraw so the screen can
-                // pick up the Running state emitted by the task as
-                // soon as it runs.
-                self.needs_redraw = true;
-            }
-            Action::StartTimer { seconds } => {
-                RTC_COMMAND.signal(RtcCommand::StartTimer { seconds });
-                self.needs_redraw = true;
-            }
-            Action::CancelTimer => {
-                RTC_COMMAND.signal(RtcCommand::CancelTimer);
-                self.needs_redraw = true;
-            }
-            Action::SetAlarm { hour, minute, weekday } => {
-                RTC_COMMAND.signal(RtcCommand::SetAlarm { hour, minute, weekday });
-                self.needs_redraw = true;
-            }
-            Action::CancelAlarm => {
-                RTC_COMMAND.signal(RtcCommand::CancelAlarm);
-                self.needs_redraw = true;
-            }
-            Action::SetTime { year, month, day, hour, minute, second } => {
-                RTC_COMMAND.signal(RtcCommand::SetTime { year, month, day, hour, minute, second });
-                self.needs_redraw = true;
-            }
-            Action::StartBuzz { on_ms, off_ms } => {
-                self.buzz = Some(BuzzPattern::start(
-                    on_ms as u64,
-                    off_ms as u64,
-                    Instant::now(),
-                ));
-                self.power.buzz();
-            }
-            Action::StopBuzz => {
-                self.buzz = None;
-                self.power.buzz_stop();
-                self.needs_redraw = true;
-            }
-            Action::DismissAlarm => {
-                self.buzz = None;
-                self.power.buzz_stop();
-                let target = self.nav_stack.pop_or_home();
-                self.screen.switch_to(target, &self.cached_data);
-                self.needs_redraw = true;
-            }
-            Action::SnoozeAlarm => {
-                // Stop buzz.
-                self.buzz = None;
-                self.power.buzz_stop();
-                // Set snoozed guard.
-                self.cached_data.alarms.snoozed = true;
-                // Program RTC with now + 10 minutes.
-                let t = &self.cached_data.time;
-                let (snooze_hour, snooze_minute) =
-                    crate::ui::types::AlarmState::compute_snooze(t.hour, t.minute, 10);
-                RTC_COMMAND.signal(RtcCommand::SetAlarm {
-                    hour: snooze_hour,
-                    minute: snooze_minute,
-                    weekday: None,
-                });
-                // Navigate back to previous screen.
-                let target = self.nav_stack.pop_or_home();
-                self.screen.switch_to(target, &self.cached_data);
-                self.needs_redraw = true;
-            }
-        }
+        let effects = self.model.handle_event(&event, Instant::now());
+        self.execute_effects(effects).await;
     }
 
     /// Run one iteration of the main event loop.
@@ -1061,25 +700,22 @@ impl SystemManager<'static> {
     /// flagged a redraw. The timeout gives the idle timer a heartbeat
     /// even when no events are arriving. `main` calls this in a loop.
     pub async fn tick(&mut self) {
-        // Sleeping path: drain any pending events first, then halt the
-        // CPU in hardware light sleep until a wake source fires.
-        if self.sleeping {
+        // Sleeping path: drain any pending events first, then halt
+        // the CPU in hardware light sleep until a wake source fires.
+        if self.model.sleeping {
             while let Ok(event) = EVENTS.try_receive() {
                 self.handle_event(event).await;
-                if !self.sleeping {
+                if !self.model.sleeping {
                     return;
                 }
             }
             self.enter_light_sleep();
 
-            // CPU just woke. The ISR for the wake source (e.g. touch
-            // INT) has only marked the owning task ready - it hasn't
-            // run yet. `try_receive` here would race ahead of the
-            // task and find no events, so wait with a short timeout
-            // for the task to emit its event. If the wake source was
-            // the 1 s heartbeat timer and nothing else happened, the
-            // timeout fires and we fall through to another sleep
-            // cycle on the next tick().
+            // CPU just woke. The wake-source ISR marked its owning
+            // task ready but the task hasn't run yet, so `try_receive`
+            // here would race ahead of it. Wait with a short timeout
+            // for the first event, then drain any follow-ups. Timer
+            // wake with nothing else happening just falls through.
             match select(
                 EVENTS.receive(),
                 Timer::after(Duration::from_millis(50)),
@@ -1094,21 +730,21 @@ impl SystemManager<'static> {
         }
 
         // Awake path: wait for events with an idle-tick heartbeat so
-        // the dim / sleep timers keep advancing even if nothing is
-        // happening. 1 s is plenty - the thresholds are in multi-
-        // second territory.
+        // the Model's dim / idle-sleep timers keep advancing even if
+        // nothing is happening. 1 s is plenty - thresholds are in
+        // multi-second territory.
         const IDLE_TICK: Duration = Duration::from_secs(1);
-
         match select(EVENTS.receive(), Timer::after(IDLE_TICK)).await {
             Either::First(event) => self.handle_event(event).await,
             Either::Second(_) => {} // idle heartbeat
         }
 
-        self.apply_dim_state().await;
-        self.check_idle_sleep().await;
-        self.tick_buzz();
+        // Advance time-driven Model state (buzz phase, dim/idle
+        // sleep transitions) and execute the resulting effects.
+        let effects = self.model.tick(Instant::now());
+        self.execute_effects(effects).await;
 
-        if !self.sleeping && self.needs_redraw {
+        if !self.model.sleeping && self.model.needs_redraw() {
             set_cpu_freq(CpuFreq::Mhz160);
             self.render().await;
             set_cpu_freq(CpuFreq::Mhz80);
@@ -1116,18 +752,18 @@ impl SystemManager<'static> {
 
         self.log_diagnostics();
         self.tick_count = self.tick_count.wrapping_add(1);
-        self.cached_data.tick_count = self.tick_count;
+        self.model.cached_data.tick_count = self.tick_count;
     }
 
     /// Render the active screen with dirty-row flushing. Only runs
-    /// when awake and `needs_redraw` is set.
+    /// when awake and `Model::needs_redraw()` is true.
     async fn render(&mut self) {
         let render_start = Instant::now();
         // Copy the cache so we can freely borrow `&mut self.display`
         // below. `SystemData` is `Copy`, so this is cheap.
-        let data = self.cached_data;
+        let data = self.model.cached_data;
         self.display.clear(crate::ui::theme::BG).ok();
-        self.screen.render(&mut self.display, &data);
+        self.model.screen.render(&mut self.display, &data);
         if let Some(pct) = data.power.battery_percent {
             primitives::battery_warning_frame(&mut self.display, pct);
         }
@@ -1154,7 +790,7 @@ impl SystemManager<'static> {
             ).await;
             self.display.flush_rows(y0, max_y + 1).await;
         }
-        self.needs_redraw = false;
+        self.model.clear_redraw();
         let render_ms = render_start.elapsed().as_millis();
         if render_ms > 10 {
             log::info!("render: {}ms", render_ms);
