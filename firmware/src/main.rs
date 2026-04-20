@@ -46,15 +46,24 @@ async fn main(spawner: embassy_executor::Spawner) {
     let p = esp_hal::init(
         esp_hal::Config::default()
             .with_cpu_clock(esp_hal::clock::CpuClock::max())
-            .with_psram(esp_hal::psram::PsramConfig {
-                ram_frequency: esp_hal::psram::SpiRamFreq::Freq80m,
-                core_clock: core::prelude::v1::Some(esp_hal::psram::SpiTimingConfigCoreClock::SpiTimingConfigCoreClock160m),
-                ..Default::default()
-            })
     );
 
+    // PSRAM configuration moved out of `esp_hal::Config` in
+    // esp-hal 1.1. The config is now passed to the allocator macro
+    // (which internally instantiates the `Psram` driver).
+    let psram_config = esp_hal::psram::PsramConfig {
+        mode: esp_hal::psram::PsramMode::OctalSpi,
+        ram_frequency: esp_hal::psram::SpiRamFreq::Freq80m,
+        core_clock: Some(esp_hal::psram::SpiTimingConfigCoreClock::SpiTimingConfigCoreClock160m),
+        ..Default::default()
+    };
+    esp_alloc::psram_allocator!(p.PSRAM, esp_hal::psram, psram_config);
+
     let timg0 = TimerGroup::new(p.TIMG0);
-    esp_rtos::start(timg0.timer0);
+    // esp-rtos 0.3 now takes a software interrupt alongside the
+    // system timer so it can run its async scheduler.
+    let sw_int = esp_hal::interrupt::software::SoftwareInterruptControl::new(p.SW_INTERRUPT);
+    esp_rtos::start(timg0.timer0, sw_int.software_interrupt0);
     esp_println::logger::init_logger(log::LevelFilter::Info);
     log::info!("--- ESP32-S3-Touch-AMOLED-2.06 booting ---");
 
@@ -66,7 +75,6 @@ async fn main(spawner: embassy_executor::Spawner) {
         i2c0: p.I2C0,
         i2c_sda: p.GPIO15,
         i2c_scl: p.GPIO14,
-        psram: p.PSRAM,
         sys_out_pin: p.GPIO10,
         motor_pin: p.GPIO18,
         spi2: p.SPI2,
@@ -103,7 +111,11 @@ async fn main(spawner: embassy_executor::Spawner) {
         rx_descriptors,
     }).await;
 
-    spawner.must_spawn(tasks::heartbeat::heartbeat());
+    // embassy-executor 0.10 moved the "fail on double-spawn" check
+    // from `must_spawn` to the task macro: the task fn now returns a
+    // `Result<SpawnToken, SpawnError>`. Each task is spawned exactly
+    // once at boot, so `.unwrap()` is the right "must succeed" shape.
+    spawner.spawn(tasks::heartbeat::heartbeat().unwrap());
 
     // Spawn one embassy task per peripheral. Each receives a
     // `&'static` reference to the shared I2C bus (four of the five
@@ -111,11 +123,11 @@ async fn main(spawner: embassy_executor::Spawner) {
     // struct out of the bundle. After this point the main loop only
     // drains events - it never touches a peripheral driver directly.
     let i2c_bus = manager.i2c_bus();
-    spawner.must_spawn(touch_task(i2c_bus, bundle.touch));
-    spawner.must_spawn(boot_button_task(bundle.boot_button));
-    spawner.must_spawn(rtc_task(i2c_bus, bundle.rtc));
-    spawner.must_spawn(imu_task(i2c_bus, bundle.imu));
-    spawner.must_spawn(power_task(i2c_bus, bundle.power));
+    spawner.spawn(touch_task(i2c_bus, bundle.touch).unwrap());
+    spawner.spawn(boot_button_task(bundle.boot_button).unwrap());
+    spawner.spawn(rtc_task(i2c_bus, bundle.rtc).unwrap());
+    spawner.spawn(imu_task(i2c_bus, bundle.imu).unwrap());
+    spawner.spawn(power_task(i2c_bus, bundle.power).unwrap());
 
     loop {
         manager.tick().await;

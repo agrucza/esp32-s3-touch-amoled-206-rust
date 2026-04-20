@@ -1,2 +1,1 @@
 [env]
-ESP_HAL_CONFIG_PSRAM_MODE = "octal"

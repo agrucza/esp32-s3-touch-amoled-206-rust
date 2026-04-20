@@ -3,7 +3,7 @@ use crate::display_hal::{self, CO5300, EspQspi};
 use embassy_time::{Duration, Timer};
 use esp_hal::{
     dma::DmaChannelFor,
-    gpio::{Output, interconnect::PeripheralOutput},
+    gpio::{Output, interconnect::{PeripheralInput, PeripheralOutput}},
     spi::master::AnySpi,
 };
 
@@ -37,10 +37,12 @@ pub enum DisplayState {
 pub async fn init_display<'d, 'fb>(
     spi: impl esp_hal::spi::master::Instance + 'd,
     sclk: impl PeripheralOutput<'d>,
-    sio0: impl PeripheralOutput<'d>,
-    sio1: impl PeripheralOutput<'d>,
-    sio2: impl PeripheralOutput<'d>,
-    sio3: impl PeripheralOutput<'d>,
+    // QSPI data lines are bidirectional in esp-hal 1.1's SPI API -
+    // PeripheralInput bound has to be propagated through the wrapper.
+    sio0: impl PeripheralInput<'d> + PeripheralOutput<'d>,
+    sio1: impl PeripheralInput<'d> + PeripheralOutput<'d>,
+    sio2: impl PeripheralInput<'d> + PeripheralOutput<'d>,
+    sio3: impl PeripheralInput<'d> + PeripheralOutput<'d>,
     cs: impl PeripheralOutput<'d>,
     dma: impl DmaChannelFor<AnySpi<'d>>,
     reset_pin: Output<'d>,

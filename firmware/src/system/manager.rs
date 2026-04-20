@@ -54,6 +54,14 @@ pub enum CpuFreq {
 /// Switch CPU frequency at runtime. APB stays at 80 MHz for all
 /// settings so peripheral clocks (I2C, SPI) are unaffected.
 /// Embassy timers use the XTAL-based systimer and are also unaffected.
+///
+/// Note: `esp_hal::clock::cpu_clock()` will keep reporting the
+/// init-time CPU clock (240 MHz with `CpuClock::max()`) regardless
+/// of what we write here. esp-hal caches that value in a static
+/// `Clocks` struct at init and never re-reads the register. The
+/// silicon is actually scaling correctly; only esp-hal's view is
+/// stale. Verified on esp-hal 1.1.0-rc.0 by reading cpu_per_conf
+/// back after each write.
 fn set_cpu_freq(freq: CpuFreq) {
     use esp_hal::peripherals::SYSTEM;
 
@@ -246,9 +254,6 @@ pub struct Peripherals<'d> {
     pub i2c_sda: esp_hal::peripherals::GPIO15<'d>,
     pub i2c_scl: esp_hal::peripherals::GPIO14<'d>,
 
-    // PSRAM
-    pub psram: esp_hal::peripherals::PSRAM<'d>,
-
     // Power
     pub sys_out_pin: esp_hal::peripherals::GPIO10<'d>,
     pub motor_pin: esp_hal::peripherals::GPIO18<'d>,
@@ -309,7 +314,8 @@ impl SystemManager<'static> {
     /// Init order is critical:
     /// 1. I2C bus (shared by PMU, touch, IMU, RTC, codecs)
     /// 2. Power (enables all rails, must be first peripheral)
-    /// 3. PSRAM allocator + framebuffer
+    /// 3. Framebuffer allocation (PSRAM heap is already set up
+    ///    by `main` before this function is called)
     /// 4. Display
     /// 5. Input (touch + buttons)
     /// 6. SD card
@@ -321,7 +327,7 @@ impl SystemManager<'static> {
     ///
     /// Returns `(SystemManager, TaskBundle)` - the bundle holds the
     /// per-device task state structs that `main` then passes to
-    /// `spawner.must_spawn()` to start the peripheral tasks.
+    /// `spawner.spawn()` to start the peripheral tasks.
     pub async fn init(p: Peripherals<'static>) -> (Self, TaskBundle) {
         // 1. I2C bus
         let mut i2c = I2c::new(p.i2c0, I2cConfig::default().with_frequency(Rate::from_khz(400)))
@@ -340,8 +346,7 @@ impl SystemManager<'static> {
         let power_state = PowerTaskState::new(pmu);
         Timer::after(Duration::from_millis(20)).await;
 
-        // 3. PSRAM allocator + framebuffer
-        esp_alloc::psram_allocator!(p.psram, esp_hal::psram);
+        // 3. Framebuffer (PSRAM heap already initialized in `main`)
         let fb: &'static mut [u8] = alloc::vec![0u8; display_hal::FB_BYTES].leak();
 
         // 4. Display

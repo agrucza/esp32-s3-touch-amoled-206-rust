@@ -21,7 +21,7 @@ use drivers::display::QspiWrite;
 use esp_hal::{
     Blocking,
     dma::{DmaChannelFor, DmaRxBuf, DmaTxBuf},
-    gpio::interconnect::PeripheralOutput,
+    gpio::interconnect::{PeripheralInput, PeripheralOutput},
     spi::master::{Address, AnySpi, Command, Config, DataMode, Spi, SpiDmaBus},
     spi::Mode,
     time::Rate,
@@ -111,10 +111,14 @@ impl<'d> QspiWrite for EspQspi<'d> {
 pub fn build_spi<'d>(
     spi:  impl esp_hal::spi::master::Instance + 'd,
     sck:  impl PeripheralOutput<'d>,
-    sio0: impl PeripheralOutput<'d>,
-    sio1: impl PeripheralOutput<'d>,
-    sio2: impl PeripheralOutput<'d>,
-    sio3: impl PeripheralOutput<'d>,
+    // esp-hal 1.1 tightened the SIO parameter bound to require both
+    // PeripheralInput + PeripheralOutput because QSPI data lines are
+    // bidirectional. We still only write from here, but the driver
+    // needs the input capability registered.
+    sio0: impl PeripheralInput<'d> + PeripheralOutput<'d>,
+    sio1: impl PeripheralInput<'d> + PeripheralOutput<'d>,
+    sio2: impl PeripheralInput<'d> + PeripheralOutput<'d>,
+    sio3: impl PeripheralInput<'d> + PeripheralOutput<'d>,
     cs:   impl PeripheralOutput<'d>,
     dma:  impl DmaChannelFor<AnySpi<'d>>,
 ) -> EspQspi<'d> {
