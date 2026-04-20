@@ -221,6 +221,9 @@ pub struct SystemManager<'d> {
     // each tick based on elapsed time since the last toggle.
     buzz: Option<BuzzPattern>,
 
+    // RTC controller, used to enter/exit hardware light sleep.
+    rtc: esp_hal::rtc_cntl::Rtc<'d>,
+
     // System-wide sleep flag. When `true`, the display is forced
     // Off and the IMU is in WoM mode regardless of idle time.
     // Set by user request (BOOT button while Active/Dim), cleared
@@ -293,6 +296,9 @@ pub struct Peripherals<'d> {
     pub audio_dout: esp_hal::peripherals::GPIO40<'d>,
     pub audio_din: esp_hal::peripherals::GPIO42<'d>,
     pub audio_pa: esp_hal::peripherals::GPIO46<'d>,
+
+    // RTC controller (for light sleep)
+    pub lpwr: esp_hal::peripherals::LPWR<'d>,
 
     // Audio DMA buffers (from dma_circular_buffers! macro in main)
     pub tx_buffer: &'static mut [u8],
@@ -367,14 +373,24 @@ impl SystemManager<'static> {
         // `TouchTaskState::init` does the FT3168 reset sequence,
         // reads the chip ID, and captures the INT# input. The BOOT
         // button is just an async GPIO wait.
+        //
+        // Arm RTC-wake on the touch INT, BOOT button, and PCF85063
+        // INT lines before handing them to the tasks. `wakeup_enable`
+        // sets a persistent hardware register bit; the async edge
+        // waits done by the tasks coexist with it.
+        let mut touch_int = Input::new(p.touch_int, InputConfig::default().with_pull(Pull::Up));
+        let mut boot_btn = Input::new(p.btn_boot, InputConfig::default().with_pull(Pull::Up));
+        let mut rtc_int = Input::new(p.rtc_int, InputConfig::default().with_pull(Pull::Up));
+        let _ = touch_int.wakeup_enable(true, esp_hal::gpio::WakeEvent::LowLevel);
+        let _ = boot_btn.wakeup_enable(true, esp_hal::gpio::WakeEvent::LowLevel);
+        let _ = rtc_int.wakeup_enable(true, esp_hal::gpio::WakeEvent::LowLevel);
+
         let touch_state = TouchTaskState::init(
             Output::new(p.touch_rst, Level::High, OutputConfig::default()),
-            Input::new(p.touch_int, InputConfig::default().with_pull(Pull::Up)),
+            touch_int,
             &mut i2c,
         ).await;
-        let boot_button_state = BootButtonTaskState::new(
-            Input::new(p.btn_boot, InputConfig::default().with_pull(Pull::Up)),
-        );
+        let boot_button_state = BootButtonTaskState::new(boot_btn);
 
         // 6. SD card
         let storage = crate::system::storage::init_sd(
@@ -388,7 +404,7 @@ impl SystemManager<'static> {
         // interrupt. `ImuTaskState::init` resets the QMI8658C and
         // collects ~512 ms of gyro-bias samples.
         let rtc_state = RtcTaskState::init(
-            Input::new(p.rtc_int, InputConfig::default().with_pull(Pull::Up)),
+            rtc_int,
             &mut i2c,
         );
         let imu_state = ImuTaskState::init(
@@ -446,6 +462,9 @@ impl SystemManager<'static> {
             alarms: Default::default(),
         };
 
+        // Construct the RTC controller for hardware light sleep.
+        let rtc = esp_hal::rtc_cntl::Rtc::new(p.lpwr);
+
         // Build the initial screen and fire its `on_mount` hook so
         // any state it wants to seed from `cached_data` is ready
         // before the first render.
@@ -474,6 +493,7 @@ impl SystemManager<'static> {
             sleeping: false,
             cached_data,
             buzz: None,
+            rtc,
         };
 
         let bundle = TaskBundle {
@@ -719,6 +739,96 @@ impl SystemManager<'static> {
                 RTC_COMMAND.signal(RtcCommand::CancelAlarm);
             }
         }
+    }
+
+    // ================= Light sleep ================================================
+
+    /// Enter hardware light sleep. Blocks until a configured wake
+    /// source (any of the three RTC-armed GPIO INTs, or the ~1 s
+    /// heartbeat timer) fires, then returns.
+    ///
+    /// The three INT pins are armed for RTC wake at init time via
+    /// `wakeup_enable(true, WakeEvent::LowLevel)`. The timer is
+    /// configured per-call here.
+    ///
+    /// Only a minimal config is used - defaults from esp-hal 1.1
+    /// pick up the BBPLL-force-pu fix that was missing in 1.0.0.
+    /// `light_slp_reject(false)` stops a pending interrupt (e.g.
+    /// a half-minute PCF85063 INT still latched) from silently
+    /// cancelling sleep entry.
+    fn enter_light_sleep(&mut self) {
+        use esp_hal::delay::Delay;
+        use esp_hal::peripherals::GPIO;
+        use esp_hal::rtc_cntl::sleep::{
+            GpioWakeupSource, RtcSleepConfig, TimerWakeupSource,
+        };
+
+        // Re-arm GPIO wake for touch_int(38), boot_btn(0), and
+        // rtc_int(39). The embassy async GPIO drivers used by
+        // those pins' tasks call `listen_with_options(...,
+        // wake_up_from_light_sleep=false)` on every wait, which
+        // clears the wakeup_enable bit we set at init. We have to
+        // set it back immediately before rtc.sleep(). int_type=4
+        // is LowLevel, which is what the INT lines drive when
+        // active (active-low on all three) and is the only type
+        // esp-hal allows for wake-from-light-sleep.
+        for &gpio_num in &[0u8, 38u8, 39u8] {
+            GPIO::regs().pin(gpio_num as usize).modify(|_, w| unsafe {
+                w.wakeup_enable().set_bit();
+                w.int_type().bits(4)
+            });
+        }
+
+        let gpio_wake = GpioWakeupSource::new();
+        // 5 s matches the power task's sleep-mode poll interval,
+        // so every wake cycle lines up with a real background poll
+        // (battery, VBUS, charging state). At ~150 ms active per
+        // wake this is ~3 % duty cycle - low overhead while still
+        // letting background tasks make forward progress during
+        // sleep. Touch/BOOT/RTC INT wake-from-sleep still fires
+        // immediately regardless of this timer.
+        let timer_wake = TimerWakeupSource::new(
+            core::time::Duration::from_secs(5),
+        );
+
+        // Config that reliably wakes on ESP32-S3 (validated via
+        // `bin/sleep_test.rs`). The critical bits:
+        // - `xtal_fpu(true)` keeps the main XTAL powered, without
+        //   which the CPU can't resume clocking on wake.
+        // - `rtc_regulator_fpu(true)` keeps the RTC regulator on
+        //   so the RTC domain stays functional during sleep.
+        // - `light_slp_reject(false)` tolerates pending interrupts
+        //   at sleep entry (e.g. a latched PCF85063 INT line).
+        let mut config = RtcSleepConfig::default();
+        config.set_rtc_regulator_fpu(true);
+        config.set_xtal_fpu(true);
+        config.set_light_slp_reject(false);
+
+        // Drop to 80 MHz before sleep. At CpuClock::max() (240 MHz)
+        // the slow-clock alarm programming in TimerWakeupSource
+        // can't latch before the CPU enters sleep, and timer wake
+        // never fires. See esp-hal issue #375 discussion thread.
+        set_cpu_freq(CpuFreq::Mhz80);
+
+        // Settle delay before sleep - lets the slow-clock alarm
+        // writes latch into the RTC domain before the CPU gates
+        // off. 100 ms matches the official esp-hal sleep_timer
+        // example; shorter values have been observed to miss wake.
+        let delay = Delay::new();
+        delay.delay_millis(100);
+
+        self.rtc.sleep(&config, &[&gpio_wake, &timer_wake]);
+
+        // Post-wake settle delay. USB-Serial-JTAG in particular
+        // loses the first ~tens of ms of output after light sleep
+        // wake because the USB host has to re-sync. Without this
+        // delay the first `log::info!` below gets partially eaten
+        // by the host and reads as a bare "INFO - " line. Costs a
+        // bit of idle power but makes on-device debugging usable;
+        // drop or shrink once we're confident this is shipping.
+        delay.delay_millis(100);
+
+        log::info!("light_sleep: woke");
     }
 
     // ================= Event loop ================================================
@@ -1006,9 +1116,42 @@ impl SystemManager<'static> {
     /// flagged a redraw. The timeout gives the idle timer a heartbeat
     /// even when no events are arriving. `main` calls this in a loop.
     pub async fn tick(&mut self) {
-        // How often to re-check idle/dim state when no events are
-        // flowing. 1 s is plenty - the idle thresholds are in
-        // multi-second territory.
+        // Sleeping path: drain any pending events first, then halt the
+        // CPU in hardware light sleep until a wake source fires.
+        if self.sleeping {
+            while let Ok(event) = EVENTS.try_receive() {
+                self.handle_event(event).await;
+                if !self.sleeping {
+                    return;
+                }
+            }
+            self.enter_light_sleep();
+
+            // CPU just woke. The ISR for the wake source (e.g. touch
+            // INT) has only marked the owning task ready - it hasn't
+            // run yet. `try_receive` here would race ahead of the
+            // task and find no events, so wait with a short timeout
+            // for the task to emit its event. If the wake source was
+            // the 1 s heartbeat timer and nothing else happened, the
+            // timeout fires and we fall through to another sleep
+            // cycle on the next tick().
+            match select(
+                EVENTS.receive(),
+                Timer::after(Duration::from_millis(50)),
+            ).await {
+                Either::First(event) => self.handle_event(event).await,
+                Either::Second(_) => {}
+            }
+            while let Ok(event) = EVENTS.try_receive() {
+                self.handle_event(event).await;
+            }
+            return;
+        }
+
+        // Awake path: wait for events with an idle-tick heartbeat so
+        // the dim / sleep timers keep advancing even if nothing is
+        // happening. 1 s is plenty - the thresholds are in multi-
+        // second territory.
         const IDLE_TICK: Duration = Duration::from_secs(1);
 
         match select(EVENTS.receive(), Timer::after(IDLE_TICK)).await {
