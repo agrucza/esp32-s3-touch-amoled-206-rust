@@ -84,6 +84,17 @@ pub enum Effect {
     /// `SystemEvent::StorageUsageUpdated` so the settings screen
     /// sees the new status.
     ProbeSd,
+
+    /// Persist the current `AlarmState` to
+    /// `/system/config/alarms.bin` on flash. Triggered when a
+    /// screen returns `Action::PersistAlarms` after mutating the
+    /// alarm list.
+    SaveAlarms,
+    /// Persist the current `Config` to `/system/config/config.bin`
+    /// on flash. Triggered by `Action::PersistConfig` after any
+    /// change to `cached_data.config`.
+    #[allow(dead_code)] // wired once a Config field becomes user-editable
+    SaveConfig,
 }
 
 /// Application state machine.
@@ -420,6 +431,14 @@ impl Model {
             }
             Action::InitSd => {
                 let _ = out.push(Effect::ProbeSd);
+                self.needs_redraw = true;
+            }
+            Action::PersistAlarms => {
+                let _ = out.push(Effect::SaveAlarms);
+                self.needs_redraw = true;
+            }
+            Action::PersistConfig => {
+                let _ = out.push(Effect::SaveConfig);
                 self.needs_redraw = true;
             }
         }

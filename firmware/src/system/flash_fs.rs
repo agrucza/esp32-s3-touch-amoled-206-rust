@@ -83,6 +83,7 @@ pub const FLASH_FS_START: u32 = 0x0081_0000;
 pub const FLASH_FS_SIZE: u32 = 0x017E_0000;
 
 /// End offset (exclusive).
+#[allow(dead_code)] // available for any future caller that needs the upper bound
 pub const FLASH_FS_END: u32 = FLASH_FS_START + FLASH_FS_SIZE;
 
 const BLOCK_SIZE:  u32 = 4096;
@@ -253,7 +254,7 @@ impl<'d> FlashFs<'d> {
 
     /// Append `bytes` to the file at `path`, creating it if missing.
     /// The caller is responsible for terminating lines with `\n`.
-    pub fn append_line(&self, path: &str, bytes: &[u8]) -> Result<(), LfsError> {
+    pub fn append_line(&mut self, path: &str, bytes: &[u8]) -> Result<(), LfsError> {
         let file = self.fs.open(
             path,
             OpenFlags::WRITE | OpenFlags::CREATE | OpenFlags::APPEND,
@@ -275,7 +276,7 @@ impl<'d> FlashFs<'d> {
     /// may return `ControlFlow::Break(())` to stop the scan early.
     /// If the file doesn't exist the scan returns `Ok(0)` - that's
     /// a legitimate state (no events logged yet), not an error.
-    pub fn for_each_line<F>(&self, path: &str, mut callback: F) -> Result<usize, LfsError>
+    pub fn for_each_line<F>(&mut self, path: &str, mut callback: F) -> Result<usize, LfsError>
     where
         F: FnMut(&str) -> ControlFlow<()>,
     {
@@ -328,7 +329,8 @@ impl<'d> FlashFs<'d> {
     /// Read the entire file at `path` into a `Vec`. Returns `None`
     /// on missing file; logs a warning and returns `None` on other
     /// I/O errors so callers can treat "read failed" uniformly.
-    pub fn read_file(&self, path: &str) -> Option<Vec<u8>> {
+    #[allow(dead_code)] // reachable only through `fs::Storage`; no direct caller yet
+    pub fn read_file(&mut self, path: &str) -> Option<Vec<u8>> {
         match self.fs.read_to_vec(path) {
             Ok(v) => Some(v),
             Err(LfsError::NoEntry) => None,
@@ -337,6 +339,14 @@ impl<'d> FlashFs<'d> {
                 None
             }
         }
+    }
+
+    /// Write `bytes` to `path`, creating or truncating the file.
+    /// Parent directories must already exist (mount_or_format
+    /// creates the `/system/` tree up front).
+    #[allow(dead_code)] // reachable only through `fs::Storage`; no direct caller yet
+    pub fn write_file(&mut self, path: &str, bytes: &[u8]) -> Result<(), LfsError> {
+        self.fs.write_file(path, bytes)
     }
 
     /// Directories whose contents get deleted by [`Self::reset_user_data`].
@@ -362,7 +372,7 @@ impl<'d> FlashFs<'d> {
     /// This is not a full reformat. If you need a true nuke, add a
     /// `reformat()` method that drives the filesystem through
     /// format + remount instead.
-    pub fn reset_user_data(&self) {
+    pub fn reset_user_data(&mut self) {
         for dir in Self::FLASH_RESET_DIRS {
             let Ok(entries) = self.fs.list_dir(dir) else { continue };
             for entry in entries {
@@ -395,4 +405,33 @@ impl<'d> FlashFs<'d> {
 pub struct FsUsage {
     pub files: u32,
     pub total_bytes: u32,
+}
+
+// -- Storage trait impl -----------------------------------------------------
+
+impl<'d> crate::system::fs::Storage for FlashFs<'d> {
+    type Error = LfsError;
+
+    fn append_line(&mut self, path: &str, bytes: &[u8]) -> Result<(), Self::Error> {
+        self.append_line(path, bytes)
+    }
+
+    fn for_each_line<F>(&mut self, path: &str, callback: F) -> Result<usize, Self::Error>
+    where
+        F: FnMut(&str) -> core::ops::ControlFlow<()>,
+    {
+        self.for_each_line(path, callback)
+    }
+
+    fn read_file(&mut self, path: &str) -> Option<Vec<u8>> {
+        self.read_file(path)
+    }
+
+    fn write_file(&mut self, path: &str, bytes: &[u8]) -> Result<(), Self::Error> {
+        self.write_file(path, bytes)
+    }
+
+    fn reset_user_data(&mut self) {
+        self.reset_user_data();
+    }
 }

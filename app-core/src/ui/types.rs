@@ -145,6 +145,17 @@ pub enum Action {
     /// `SystemEvent::StorageUsageUpdated` so the screen reflects
     /// the new status.
     InitSd,
+    /// Persist the current `AlarmState` to flash. Emitted by
+    /// screens after they mutate `data.alarms`. Subsumes Redraw -
+    /// returning this also triggers a redraw, so screens don't
+    /// need to emit both.
+    PersistAlarms,
+    /// Persist the current `Config` to flash. Same subsumes-Redraw
+    /// semantics as `PersistAlarms`. No current callers; wired so
+    /// the first display/theme setting that gains edit UI can just
+    /// return this.
+    #[allow(dead_code)] // wired once a Config field becomes user-editable
+    PersistConfig,
 }
 
 // -- Persistent app state ----------------------------------------------------

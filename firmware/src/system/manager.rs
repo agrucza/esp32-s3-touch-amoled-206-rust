@@ -3,7 +3,6 @@ extern crate alloc;
 use crate::config::Config;
 use crate::display_hal::{self, WIDTH, HEIGHT};
 use crate::events::SystemEvent;
-use crate::sdcard_hal::EspVolumeManager;
 use crate::system::audio::AudioSystem;
 use crate::system::bus::{EVENTS, IMU_COMMAND, RTC_COMMAND, SLEEP_WATCH, SleepState};
 use crate::system::display::Display;
@@ -79,6 +78,18 @@ pub type AudioRx<'d> = I2sReadDmaTransferAsync<'d, &'static mut [u8]>;
 /// Size of the per-tick mic RX drain buffer. Matches the I2S RX DMA
 /// buffer in `main.rs` so one `pop()` can empty a full buffer.
 const MIC_DRAIN_BUF_SIZE: usize = 16_384;
+
+// -- Persistence paths + versions -------------------------------------------
+//
+// Used by both the boot-time load (in `init()`) and the
+// save-on-change handlers (`Effect::SaveConfig` / `SaveAlarms`).
+// Bump a version whenever the on-disk shape of the value type
+// changes so old records get ignored rather than silently
+// misinterpreted.
+const CONFIG_PATH:    &str = "/system/config/config.bin";
+const ALARMS_PATH:    &str = "/system/config/alarms.bin";
+const CONFIG_VERSION: u8   = 1;
+const ALARMS_VERSION: u8   = 1;
 
 /// Peripheral tokens for the audio subsystem, stashed on
 /// `SystemManager` until `start_audio()` consumes them. Keeping the
@@ -159,11 +170,11 @@ pub struct SystemManager<'d> {
     // Peripherals
     pub display: Display<'d>,
     pub audio: Option<AudioSystem<'d>>,
-    /// SD-card volume manager. Constructed unconditionally at boot
-    /// (see `storage::init_sd`), so the SPI / CS hardware stays
-    /// available for user-triggered re-probes. Actual readability
-    /// is tracked by `event_log::SD_ONLINE`.
-    pub storage: EspVolumeManager<'d>,
+    /// SD-card filesystem. Constructed unconditionally at boot (see
+    /// `storage::init_sd`), so the SPI / CS hardware stays available
+    /// for user-triggered re-probes. Actual readability is tracked
+    /// by `event_log::SD_ONLINE`.
+    pub sd: crate::system::sd_fs::SdFs<'d>,
 
     // Tearing-effect line from the display. We wait for its rising
     // edge (vblank start) before pushing pixels so partial flushes
@@ -366,7 +377,7 @@ impl SystemManager<'static> {
         let boot_button_state = BootButtonTaskState::new(boot_btn);
 
         // 6. SD card
-        let mut storage = crate::system::storage::init_sd(
+        let mut sd = crate::system::storage::init_sd(
             p.spi3, p.sd_sck, p.sd_mosi, p.sd_miso,
             Output::new(p.sd_cs, Level::High, OutputConfig::default()),
         );
@@ -432,12 +443,7 @@ impl SystemManager<'static> {
         // Config / AlarmState from their files, falling back to
         // defaults if either is missing, version-mismatched, or
         // fails to deserialise.
-        const CONFIG_PATH:   &str = "/system/config/config.bin";
-        const ALARMS_PATH:   &str = "/system/config/alarms.bin";
-        const CONFIG_VERSION: u8  = 1;
-        const ALARMS_VERSION: u8  = 1;
-
-        let fs = crate::system::flash_fs::FlashFs::mount_or_format(p.flash);
+        let mut fs = crate::system::flash_fs::FlashFs::mount_or_format(p.flash);
         let stored_config = fs.load_blob::<Config>(CONFIG_PATH, CONFIG_VERSION);
         let stored_alarms = fs.load_blob::<app_core::ui::types::AlarmState>(ALARMS_PATH, ALARMS_VERSION);
         let config_source = if stored_config.is_some() { "loaded" } else { "default" };
@@ -448,12 +454,12 @@ impl SystemManager<'static> {
         // Recover the monotonic seq counter by scanning
         // /system/logs/events.log on flash. Must happen before the
         // first log line is emitted.
-        crate::system::event_log::init_seq_from_flash(&fs);
+        crate::system::event_log::init_seq_from_flash(&mut fs);
 
         // Probe for an SD card and mark the mirror online if one
         // is present. Stage C UI adds a Settings button for manual
         // re-probe.
-        let sd_online = crate::system::storage::probe_sd(&mut storage);
+        let sd_online = sd.probe();
         crate::system::event_log::set_sd_online(sd_online);
 
         // If the SD mirror is online, copy any flash log entries
@@ -461,13 +467,13 @@ impl SystemManager<'static> {
         // fresh boot line gets emitted to both sides via the normal
         // write path rather than through back-fill.
         if sd_online {
-            crate::system::event_log::backfill_sd(&fs, &mut storage);
+            crate::system::event_log::backfill_sd(&mut fs, &mut sd);
         }
 
         // Record the power-up in the event log. Writes
         // /system/logs/events.log on flash (always) and on SD if
         // the mirror is online.
-        crate::system::event_log::log_boot(&fs, &mut storage, &initial_time);
+        crate::system::event_log::log_boot(&mut fs, &mut sd, &initial_time);
 
         // Recompute filesystem usage after log_boot - first boot
         // creates events.log, so the file count bumps by 1.
@@ -508,7 +514,7 @@ impl SystemManager<'static> {
             power,
             display,
             audio: None,
-            storage,
+            sd,
             lcd_te,
             tx_transfer: None,
             rx_transfer: None,
@@ -645,17 +651,33 @@ impl SystemManager<'static> {
                     log::info!("factory reset: wiping flash + SD mirror");
                     self.fs.reset_user_data();
                     if crate::system::event_log::sd_online() {
-                        crate::system::storage::reset_sd(&mut self.storage);
+                        self.sd.reset_user_data();
                     }
                     self.refresh_storage_usage().await;
                 }
                 Effect::ProbeSd => {
                     log::info!("SD: re-probing on user request");
-                    let online = crate::system::storage::probe_sd(&mut self.storage);
+                    let online = self.sd.probe();
                     crate::system::event_log::set_sd_online(online);
                     if online {
-                        crate::system::event_log::backfill_sd(&self.fs, &mut self.storage);
+                        crate::system::event_log::backfill_sd(&mut self.fs, &mut self.sd);
                     }
+                    self.refresh_storage_usage().await;
+                }
+                Effect::SaveAlarms => {
+                    self.fs.save_blob(
+                        ALARMS_PATH,
+                        ALARMS_VERSION,
+                        &self.model.cached_data().alarms,
+                    );
+                    self.refresh_storage_usage().await;
+                }
+                Effect::SaveConfig => {
+                    self.fs.save_blob(
+                        CONFIG_PATH,
+                        CONFIG_VERSION,
+                        self.model.config(),
+                    );
                     self.refresh_storage_usage().await;
                 }
             }
@@ -808,8 +830,8 @@ impl SystemManager<'static> {
         // log captures the triggering event even if the model
         // transitions into sleep or shuts down.
         crate::system::event_log::try_log(
-            &self.fs,
-            &mut self.storage,
+            &mut self.fs,
+            &mut self.sd,
             &self.model.cached_data().time,
             &event,
         );

@@ -230,7 +230,7 @@ impl AlarmScreen {
                         if *x as i32 > rect.top_left.x + rect.size.width as i32 - 60 {
                             data.alarms.entries[idx].enabled =
                                 !data.alarms.entries[idx].enabled;
-                            return Action::Redraw;
+                            return Action::PersistAlarms;
                         }
                         // Left/center tap = edit.
                         let entry = &data.alarms.entries[idx];
@@ -343,7 +343,7 @@ impl AlarmScreen {
                                     enabled: true,
                                 };
                                 self.view = AlarmView::List;
-                                return Action::Redraw;
+                                return Action::PersistAlarms;
                             }
                             Action::Redraw
                         }
