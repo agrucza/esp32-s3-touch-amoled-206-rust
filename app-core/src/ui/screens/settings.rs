@@ -35,7 +35,11 @@ enum SettingsView {
     Clock,
     TimeEntry,
     DateEntry,
+    /// Storage sub-index. Routes to the three storage leaves below.
     Storage,
+    StorageFlash,
+    StorageSd,
+    StorageFactoryReset,
 }
 
 // -- Index row metadata ------------------------------------------------------
@@ -59,15 +63,60 @@ fn imu_value(_data: &SystemData) -> String<20> {
 }
 
 fn storage_value(data: &SystemData) -> String<20> {
+    // Summary shown on the top-level settings index: "<files> / <size>K".
     let mut buf = String::new();
     let _ = write!(
         buf,
         "{} / {}K",
-        data.nvs.records,
-        data.nvs.total_bytes / 1024,
+        data.storage.files,
+        data.storage.total_bytes / 1024,
     );
     buf
 }
+
+// -- Storage sub-index rows --------------------------------------------------
+//
+// Same IndexRow pattern as the top-level settings index, one level
+// deeper. Each row taps into a storage leaf view.
+
+fn storage_flash_value(data: &SystemData) -> String<20> {
+    let mut buf = String::new();
+    let _ = write!(
+        buf,
+        "{} FILES / {}K",
+        data.storage.files,
+        data.storage.total_bytes / 1024,
+    );
+    buf
+}
+
+fn storage_sd_value(data: &SystemData) -> String<20> {
+    let mut buf = String::new();
+    let _ = buf.push_str(if data.storage.sd_online { "ONLINE" } else { "NOT PRESENT" });
+    buf
+}
+
+fn storage_reset_value(_data: &SystemData) -> String<20> {
+    String::new()
+}
+
+const STORAGE_INDEX_ROWS: &[IndexRow] = &[
+    IndexRow {
+        label: "FLASH",
+        value_fn: storage_flash_value,
+        target: SettingsView::StorageFlash,
+    },
+    IndexRow {
+        label: "SD CARD",
+        value_fn: storage_sd_value,
+        target: SettingsView::StorageSd,
+    },
+    IndexRow {
+        label: "FACTORY RESET",
+        value_fn: storage_reset_value,
+        target: SettingsView::StorageFactoryReset,
+    },
+];
 
 const INDEX_ROWS: &[IndexRow] = &[
     IndexRow {
@@ -138,7 +187,10 @@ impl Screen for SettingsScreen {
             SettingsView::Clock => self.render_clock(display, data),
             SettingsView::TimeEntry => self.render_time_entry(display, data),
             SettingsView::DateEntry => self.render_date_entry(display, data),
-            SettingsView::Storage => self.render_storage(display, data),
+            SettingsView::Storage => self.render_storage_index(display, data),
+            SettingsView::StorageFlash => self.render_storage_flash(display, data),
+            SettingsView::StorageSd => self.render_storage_sd(display, data),
+            SettingsView::StorageFactoryReset => self.render_storage_factory_reset(display, data),
         }
     }
 
@@ -153,7 +205,10 @@ impl Screen for SettingsScreen {
             SettingsView::Clock => self.clock_event(event, data),
             SettingsView::TimeEntry => self.time_entry_event(event, data),
             SettingsView::DateEntry => self.date_entry_event(event, data),
-            SettingsView::Storage => self.storage_event(event),
+            SettingsView::Storage => self.storage_index_event(event),
+            SettingsView::StorageFlash => self.storage_flash_event(event),
+            SettingsView::StorageSd => self.storage_sd_event(event),
+            SettingsView::StorageFactoryReset => self.storage_factory_reset_event(event),
         }
     }
 }
@@ -505,10 +560,21 @@ impl SettingsScreen {
     }
 }
 
-// -- Storage sub-view --------------------------------------------------------
+// -- Storage sub-views -------------------------------------------------------
+//
+// Two-level hierarchy:
+//
+//   Settings → Storage (sub-index) → { Flash | SD Card | Factory Reset }
+//
+// The sub-index mirrors the top-level settings index layout (one
+// row per leaf). Each leaf is a focused view for its single
+// concern. Back navigation from a leaf returns to the Storage
+// sub-index; back from the sub-index returns to the Settings index.
 
 impl SettingsScreen {
-    fn render_storage<D: DrawTarget<Color = Rgb565>>(
+    // -- Storage sub-index ---------------------------------------------------
+
+    fn render_storage_index<D: DrawTarget<Color = Rgb565>>(
         &self,
         display: &mut D,
         data: &SystemData,
@@ -521,39 +587,15 @@ impl SettingsScreen {
             theme::AMBER,
         );
 
-        // Card 0: current usage. Read-only info.
-        let usage_rect = layout::content_card_rect(0);
-        card(display, usage_rect, CardStyle::DEFAULT);
-        let mut usage_buf: String<32> = String::new();
-        let _ = write!(
-            usage_buf,
-            "{} KEYS / {} KB",
-            data.nvs.records,
-            data.nvs.total_bytes / 1024,
-        );
-        value_body(
-            display,
-            usage_rect,
-            "FLASH CONFIG STORE",
-            usage_buf.as_str(),
-            theme::TEXT_WHITE,
-        );
-
-        // Card 1: destructive erase button. Red status dot cues
-        // that this is an irreversible action.
-        let erase_rect = layout::content_card_rect(1);
-        let erase_style = CardStyle::DEFAULT.with_status_dot(theme::RED);
-        card(display, erase_rect, erase_style);
-        value_body(
-            display,
-            erase_rect,
-            "ERASE ALL",
-            "TAP TO WIPE",
-            theme::RED,
-        );
+        for (i, row) in STORAGE_INDEX_ROWS.iter().enumerate() {
+            let rect = layout::content_card_rect(i);
+            card(display, rect, CardStyle::DEFAULT);
+            let val = (row.value_fn)(data);
+            value_body(display, rect, row.label, val.as_str(), theme::TEXT_WHITE);
+        }
     }
 
-    fn storage_event(&mut self, event: &SystemEvent) -> Action {
+    fn storage_index_event(&mut self, event: &SystemEvent) -> Action {
         match event {
             SystemEvent::Tap { x, y } if layout::header_icon_hit(*x, *y) => {
                 self.view = SettingsView::Index;
@@ -568,18 +610,184 @@ impl SettingsScreen {
             }
             SystemEvent::Tap { x, y } => {
                 let pt = Point::new(*x as i32, *y as i32);
-                // Tap on the "ERASE ALL" card (index 1) wipes
-                // flash. The model reacts to the returned action
-                // by emitting Effect::EraseNvs; the manager runs
-                // the erase and pushes a fresh
-                // `NvsUsageUpdated` event so the index view
-                // reflects the zeroed count on next render.
-                if layout::content_card_rect(1).contains(pt) {
-                    return Action::EraseNvs;
+                for (i, row) in STORAGE_INDEX_ROWS.iter().enumerate() {
+                    if layout::content_card_rect(i).contains(pt) {
+                        self.view = row.target;
+                        return Action::Redraw;
+                    }
                 }
                 Action::None
             }
-            SystemEvent::NvsUsageUpdated { .. } => Action::Redraw,
+            SystemEvent::StorageUsageUpdated { .. } => Action::Redraw,
+            _ => Action::None,
+        }
+    }
+
+    // -- Flash leaf (read-only info) -----------------------------------------
+
+    fn render_storage_flash<D: DrawTarget<Color = Rgb565>>(
+        &self,
+        display: &mut D,
+        data: &SystemData,
+    ) {
+        header_bar(
+            display,
+            layout::header_rect(),
+            HeaderIcon::Back,
+            "FLASH",
+            theme::AMBER,
+        );
+
+        let rect = layout::content_card_rect(0);
+        card(display, rect, CardStyle::DEFAULT);
+        let mut buf: String<32> = String::new();
+        let _ = write!(
+            buf,
+            "{} FILES / {} KB",
+            data.storage.files,
+            data.storage.total_bytes / 1024,
+        );
+        value_body(display, rect, "USAGE", buf.as_str(), theme::TEXT_WHITE);
+    }
+
+    fn storage_flash_event(&mut self, event: &SystemEvent) -> Action {
+        match event {
+            SystemEvent::Tap { x, y } if layout::header_icon_hit(*x, *y) => {
+                self.view = SettingsView::Storage;
+                Action::Redraw
+            }
+            SystemEvent::Swipe {
+                dir: crate::events::SwipeDir::Right,
+                region: crate::events::SwipeRegion::Content,
+            } => {
+                self.view = SettingsView::Storage;
+                Action::Redraw
+            }
+            SystemEvent::StorageUsageUpdated { .. } => Action::Redraw,
+            _ => Action::None,
+        }
+    }
+
+    // -- SD card leaf (status + tap to probe) --------------------------------
+
+    fn render_storage_sd<D: DrawTarget<Color = Rgb565>>(
+        &self,
+        display: &mut D,
+        data: &SystemData,
+    ) {
+        header_bar(
+            display,
+            layout::header_rect(),
+            HeaderIcon::Back,
+            "SD CARD",
+            theme::AMBER,
+        );
+
+        // Card 0: status line. Green dot when online, amber when
+        // not. Read-only; the button below triggers the probe.
+        let status_rect = layout::content_card_rect(0);
+        let (dot, status_text, status_color) = if data.storage.sd_online {
+            (theme::GREEN, "ONLINE",      theme::TEXT_WHITE)
+        } else {
+            (theme::AMBER, "NOT PRESENT", theme::AMBER)
+        };
+        card(display, status_rect, CardStyle::DEFAULT.with_status_dot(dot));
+        value_body(display, status_rect, "STATUS", status_text, status_color);
+
+        // Card 1: tap target to (re-)probe.
+        let probe_rect = layout::content_card_rect(1);
+        card(display, probe_rect, CardStyle::DEFAULT);
+        let probe_text = if data.storage.sd_online { "TAP TO REPROBE" } else { "TAP TO INITIALIZE" };
+        value_body(display, probe_rect, "PROBE", probe_text, theme::TEXT_WHITE);
+    }
+
+    fn storage_sd_event(&mut self, event: &SystemEvent) -> Action {
+        match event {
+            SystemEvent::Tap { x, y } if layout::header_icon_hit(*x, *y) => {
+                self.view = SettingsView::Storage;
+                Action::Redraw
+            }
+            SystemEvent::Swipe {
+                dir: crate::events::SwipeDir::Right,
+                region: crate::events::SwipeRegion::Content,
+            } => {
+                self.view = SettingsView::Storage;
+                Action::Redraw
+            }
+            SystemEvent::Tap { x, y } => {
+                let pt = Point::new(*x as i32, *y as i32);
+                if layout::content_card_rect(1).contains(pt) {
+                    return Action::InitSd;
+                }
+                Action::None
+            }
+            SystemEvent::StorageUsageUpdated { .. } => Action::Redraw,
+            _ => Action::None,
+        }
+    }
+
+    // -- Factory reset leaf (destructive) ------------------------------------
+
+    fn render_storage_factory_reset<D: DrawTarget<Color = Rgb565>>(
+        &self,
+        display: &mut D,
+        _data: &SystemData,
+    ) {
+        header_bar(
+            display,
+            layout::header_rect(),
+            HeaderIcon::Back,
+            "FACTORY RESET",
+            theme::RED,
+        );
+
+        // Card 0: warning summary (read-only).
+        let warn_rect = layout::content_card_rect(0);
+        card(display, warn_rect, CardStyle::DEFAULT.with_status_dot(theme::RED));
+        value_body(
+            display,
+            warn_rect,
+            "WARNING",
+            "WIPES CONFIG + LOGS",
+            theme::RED,
+        );
+
+        // Card 1: confirmation tap target.
+        let confirm_rect = layout::content_card_rect(1);
+        card(display, confirm_rect, CardStyle::DEFAULT.with_status_dot(theme::RED));
+        value_body(
+            display,
+            confirm_rect,
+            "CONFIRM",
+            "TAP TO WIPE",
+            theme::RED,
+        );
+    }
+
+    fn storage_factory_reset_event(&mut self, event: &SystemEvent) -> Action {
+        match event {
+            SystemEvent::Tap { x, y } if layout::header_icon_hit(*x, *y) => {
+                self.view = SettingsView::Storage;
+                Action::Redraw
+            }
+            SystemEvent::Swipe {
+                dir: crate::events::SwipeDir::Right,
+                region: crate::events::SwipeRegion::Content,
+            } => {
+                self.view = SettingsView::Storage;
+                Action::Redraw
+            }
+            SystemEvent::Tap { x, y } => {
+                let pt = Point::new(*x as i32, *y as i32);
+                if layout::content_card_rect(1).contains(pt) {
+                    // Bounce back to Storage sub-index on confirm
+                    // so the user sees the refreshed usage counts
+                    // land naturally.
+                    self.view = SettingsView::Storage;
+                    return Action::FactoryReset;
+                }
+                Action::None
+            }
             _ => Action::None,
         }
     }

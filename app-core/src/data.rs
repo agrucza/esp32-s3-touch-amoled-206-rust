@@ -18,7 +18,7 @@ use drivers::rtc::DateTime as RtcDateTime;
 /// Calendar time of day. Defaults to an arbitrary recent date so
 /// screens have something reasonable to render before the first
 /// RTC read.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[allow(dead_code)] // `second` is read by future screens (seconds face)
 pub struct TimeData {
     pub hour: u8,
@@ -147,25 +147,29 @@ pub struct TouchData {
 }
 
 // ============================================================================
-// NvsUsage - flash-backed config-store occupancy, for the settings screen.
+// StorageUsage - flash-backed filesystem occupancy, for the settings screen.
 // ============================================================================
 
-/// Summary of the firmware's flash-backed config store. Updated
-/// at boot and after every save via
-/// [`crate::events::SystemEvent::NvsUsageUpdated`].
+/// Summary of the firmware's flash-backed storage. Updated at boot
+/// and after every save via
+/// [`crate::events::SystemEvent::StorageUsageUpdated`].
 ///
-/// `total_bytes` is the size of the region reserved for config
-/// (64 KB by default, defined by
-/// `firmware::system::nvs::FLASH_REGION_SIZE`). `records` is the
-/// number of live (latest-per-key) entries.
+/// `total_bytes` is the size of the LittleFS partition declared in
+/// the board's `partitions-*.csv` (mirrored by
+/// `firmware::system::flash_fs::FLASH_FS_SIZE`). `files` is the
+/// count of regular files across our known directories
+/// (`/config`, `/logs`, `/sounds`, ...).
 ///
-/// Exact on-flash byte usage isn't tracked - sequential-storage
-/// doesn't expose record sizes through the public iterator API,
-/// and append-only wear-leveling makes "bytes used" a fuzzy
-/// number anyway. Record count is what a user actually cares
-/// about ("am I running out?").
+/// Exact used-bytes isn't tracked - the UI only needs an
+/// "anything going on?" hint, and file count is what a user
+/// actually cares about ("how many things am I storing?").
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct NvsUsage {
-    pub records: u32,
+pub struct StorageUsage {
+    pub files: u32,
     pub total_bytes: u32,
+    /// `true` if the SD mirror is currently usable for writes. Set
+    /// by the manager after a successful `probe_sd`; auto-cleared
+    /// if a subsequent SD write fails. The settings screen renders
+    /// this as "SD: ONLINE" / "SD: NOT PRESENT".
+    pub sd_online: bool,
 }

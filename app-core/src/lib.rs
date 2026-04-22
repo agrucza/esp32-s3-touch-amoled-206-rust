@@ -18,6 +18,7 @@ pub mod commands;
 pub mod config;
 pub mod data;
 pub mod events;
+pub mod log;
 pub mod model;
 pub mod nav;
 pub mod ui;

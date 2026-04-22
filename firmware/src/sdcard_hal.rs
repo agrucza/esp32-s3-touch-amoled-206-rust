@@ -15,7 +15,7 @@
 //!
 //! SPI2 is reserved for the display; always use SPI3 here.
 
-use drivers::sdcard::{DummyTimeSource, SdCard, VolumeManager};
+use drivers::sdcard::{RtcTimeSource, SdCard, VolumeManager};
 use embedded_hal_bus::spi::{ExclusiveDevice, NoDelay};
 use esp_hal::{
     Blocking,
@@ -32,8 +32,10 @@ pub type EspSdCard<'d> = SdCard<
     Delay,
 >;
 
-/// Convenience alias: VolumeManager backed by the ESP SdCard + DummyTimeSource.
-pub type EspVolumeManager<'d> = VolumeManager<EspSdCard<'d>, DummyTimeSource>;
+/// Convenience alias: VolumeManager backed by the ESP SdCard + RtcTimeSource.
+/// `RtcTimeSource` is zero-sized and reads a shared wall clock that
+/// firmware updates from the PCF85063 (see `drivers::sdcard::update_wall_clock`).
+pub type EspVolumeManager<'d> = VolumeManager<EspSdCard<'d>, RtcTimeSource>;
 
 /// Build an [`EspSdCard`] from raw esp-hal peripherals.
 ///

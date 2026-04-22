@@ -1,8 +1,9 @@
 pub mod audio;
 pub mod bus;
 pub mod display;
+pub mod event_log;
+pub mod flash_fs;
 pub mod manager;
-pub mod nvs;
 pub mod power;
 pub mod storage;
 pub mod tasks;

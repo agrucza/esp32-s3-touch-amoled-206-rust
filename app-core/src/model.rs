@@ -70,11 +70,20 @@ pub enum Effect {
     /// Immediate shutdown request (Action::Shutdown from a screen).
     Shutdown,
 
-    /// Erase the entire flash-backed config store. Manager calls
-    /// `Nvs::erase_all()` then re-summarises usage and emits a
-    /// fresh `SystemEvent::NvsUsageUpdated` (change-detected
-    /// against the last known value).
-    EraseNvs,
+    /// Wipe user-visible persistent data (config, alarms, logs,
+    /// uploaded sounds, etc.) back to defaults without reformatting
+    /// the filesystem. Manager calls `FlashFs::reset_user_data`,
+    /// re-summarises usage, and emits a fresh
+    /// `SystemEvent::StorageUsageUpdated` (change-detected against
+    /// the last known value).
+    FactoryReset,
+
+    /// User-triggered SD probe + back-fill. Manager calls
+    /// `storage::probe_sd`, flips the mirror online flag, runs
+    /// back-fill if the probe succeeded, and emits a fresh
+    /// `SystemEvent::StorageUsageUpdated` so the settings screen
+    /// sees the new status.
+    ProbeSd,
 }
 
 /// Application state machine.
@@ -285,8 +294,8 @@ impl Model {
                 }
                 self.needs_redraw = true;
             }
-            SystemEvent::NvsUsageUpdated { usage } => {
-                self.cached_data.nvs = *usage;
+            SystemEvent::StorageUsageUpdated { usage } => {
+                self.cached_data.storage = *usage;
                 self.needs_redraw = true;
             }
             SystemEvent::TouchPressed { x, y } => {
@@ -405,8 +414,12 @@ impl Model {
                 self.screen.switch_to(target, &self.cached_data);
                 self.needs_redraw = true;
             }
-            Action::EraseNvs => {
-                let _ = out.push(Effect::EraseNvs);
+            Action::FactoryReset => {
+                let _ = out.push(Effect::FactoryReset);
+                self.needs_redraw = true;
+            }
+            Action::InitSd => {
+                let _ = out.push(Effect::ProbeSd);
                 self.needs_redraw = true;
             }
         }

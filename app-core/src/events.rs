@@ -105,13 +105,13 @@ pub enum SystemEvent {
         result: SelfTestResult,
     },
 
-    // -- Flash-backed config store --
-    /// Fresh NVS usage snapshot. Emitted by the manager once at
-    /// boot (after the initial load), and after every save
-    /// operation. The main loop caches the result in
-    /// `cached_data.nvs` for the settings screen to render.
-    NvsUsageUpdated {
-        usage: crate::data::NvsUsage,
+    // -- Flash-backed storage --
+    /// Fresh flash-filesystem usage snapshot. Emitted by the
+    /// manager once at boot (after the initial load), and after
+    /// every save / reset. The main loop caches the result in
+    /// `cached_data.storage` for the settings screen to render.
+    StorageUsageUpdated {
+        usage: crate::data::StorageUsage,
     },
 }
 
@@ -255,6 +255,36 @@ pub fn is_wake_source(event: &SystemEvent) -> bool {
     )
 }
 
+/// One loggable event in a form the firmware can write directly:
+/// a short static tag plus an optional integer detail that becomes
+/// the third CSV column.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LoggedEvent {
+    pub tag: &'static str,
+    pub detail: Option<u32>,
+}
+
+/// Classify a [`SystemEvent`] for the SD-card event log, or return
+/// `None` if the event is too chatty or too low-signal to record.
+///
+/// Loggable events are the ones a user might care about reconstructing
+/// later (alarms that fired, timers that completed, power-path changes,
+/// battery trend, shutdown requests). Fire-hose events (touch,
+/// half-minute tick, snapshot refreshes other than BatteryChanged) are
+/// intentionally skipped so the log doesn't drown out the interesting
+/// lines.
+pub fn classify_for_log(event: &SystemEvent) -> Option<LoggedEvent> {
+    Some(match event {
+        SystemEvent::AlarmFired               => LoggedEvent { tag: "alarm",         detail: None },
+        SystemEvent::TimerExpired             => LoggedEvent { tag: "timer_expired", detail: None },
+        SystemEvent::VbusInserted             => LoggedEvent { tag: "vbus_in",       detail: None },
+        SystemEvent::VbusRemoved              => LoggedEvent { tag: "vbus_out",      detail: None },
+        SystemEvent::PowerButtonLong          => LoggedEvent { tag: "shutdown_req",  detail: None },
+        SystemEvent::BatteryChanged { percent } => LoggedEvent { tag: "battery",     detail: Some(*percent as u32) },
+        _ => return None,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -290,5 +320,37 @@ mod tests {
         // activity event.
         assert!(!is_user_activity(&SystemEvent::PowerButtonLong));
         assert!(!is_wake_source(&SystemEvent::PowerButtonLong));
+    }
+
+    #[test]
+    fn log_classifier_covers_alarm_timer_power_button() {
+        assert_eq!(
+            classify_for_log(&SystemEvent::AlarmFired),
+            Some(LoggedEvent { tag: "alarm", detail: None }),
+        );
+        assert_eq!(
+            classify_for_log(&SystemEvent::TimerExpired),
+            Some(LoggedEvent { tag: "timer_expired", detail: None }),
+        );
+        assert_eq!(
+            classify_for_log(&SystemEvent::PowerButtonLong),
+            Some(LoggedEvent { tag: "shutdown_req", detail: None }),
+        );
+    }
+
+    #[test]
+    fn log_classifier_captures_battery_percent() {
+        assert_eq!(
+            classify_for_log(&SystemEvent::BatteryChanged { percent: 73 }),
+            Some(LoggedEvent { tag: "battery", detail: Some(73) }),
+        );
+    }
+
+    #[test]
+    fn log_classifier_skips_firehose_events() {
+        // These fire at a rate that would swamp the log.
+        assert!(classify_for_log(&SystemEvent::HalfMinuteChanged).is_none());
+        assert!(classify_for_log(&SystemEvent::TouchPressed { x: 0, y: 0 }).is_none());
+        assert!(classify_for_log(&SystemEvent::TouchReleased).is_none());
     }
 }

@@ -9,6 +9,17 @@ path  = "src/main.rs"
 test  = false
 bench = false
 
+# -- Board selection ---------------------------------------------------------
+# Exactly one of these should be enabled. Board-specific layout
+# constants (flash partition sizes, pin maps, etc.) key off them.
+# The C6 port isn't active yet; `board-c6` exists so the
+# filesystem constants compile in both shapes and the numbers
+# show up next to each other.
+[features]
+default  = ["board-s3"]
+board-s3 = []
+board-c6 = []
+
 [dependencies]
 # --- Espressif bootloader descriptor (required by espflash to verify the image) ---
 esp-bootloader-esp-idf = { version = "0.5.0", features = ["esp32s3"] }
@@ -69,16 +80,15 @@ heapless = "0.9.2"
 # --- PSRAM heap allocator ---
 esp-alloc = "0.10.0"
 
-# --- Flash-backed persistence (NVS equivalent on bare-metal) ---
+# --- Flash-backed persistence ---
 # `esp-storage` exposes the flash chip through `embedded-storage`
-# traits; `sequential-storage` layers an append-only KV store on
-# top, with wear-leveling. `postcard` is a compact serde-compat
-# binary format for serialising our Config / AlarmState structs.
+# traits. `littlefs-rust` is a pure-Rust port of LittleFS that we
+# run on top: one filesystem hosting config / alarms / event log /
+# future audio assets and face definitions.
 esp-storage         = { version = "0.9.0", features = ["esp32s3"] }
-sequential-storage  = { version = "7.2.0", features = ["postcard"] }
+# embedded-storage: the NorFlash / ReadNorFlash traits that
+# flash_fs.rs calls on esp_storage::FlashStorage.
+embedded-storage    = "0.3.1"
+littlefs-rust       = { version = "0.1.0" }
 postcard            = { version = "1.1.3", default-features = false }
 serde               = { version = "1", default-features = false, features = ["derive"] }
-# `sequential-storage` only ships an async API; `FlashStorage`
-# only implements the blocking `NorFlash`. Wrap with
-# `BlockingAsync` to bridge.
-embassy-embedded-hal = { version = "0.6.0" }

@@ -159,7 +159,11 @@ pub struct SystemManager<'d> {
     // Peripherals
     pub display: Display<'d>,
     pub audio: Option<AudioSystem<'d>>,
-    pub storage: Option<EspVolumeManager<'d>>,
+    /// SD-card volume manager. Constructed unconditionally at boot
+    /// (see `storage::init_sd`), so the SPI / CS hardware stays
+    /// available for user-triggered re-probes. Actual readability
+    /// is tracked by `event_log::SD_ONLINE`.
+    pub storage: EspVolumeManager<'d>,
 
     // Tearing-effect line from the display. We wait for its rising
     // edge (vblank start) before pushing pixels so partial flushes
@@ -194,16 +198,18 @@ pub struct SystemManager<'d> {
     // RTC controller, used to enter/exit hardware light sleep.
     rtc: esp_hal::rtc_cntl::Rtc<'d>,
 
-    // Flash-backed persistent config store. Owned by the manager
-    // so saves / loads run on-demand without locking.
-    nvs: crate::system::nvs::Nvs<'d>,
+    // Flash-backed persistent storage. Owned by the manager so
+    // saves / loads run on-demand without locking. Replaces the
+    // previous `system::nvs::Nvs` handle; the old module is kept
+    // briefly with `#[allow(dead_code)]` for reference.
+    fs: crate::system::flash_fs::FlashFs<'d>,
 
-    // Last NVS usage pushed into the event channel. Compared
+    // Last storage usage pushed into the event channel. Compared
     // against a fresh summary after each save / boot; we only
-    // emit `SystemEvent::NvsUsageUpdated` when the value
+    // emit `SystemEvent::StorageUsageUpdated` when the value
     // actually differs. Keeps the fire-hose out of the event
     // pipeline.
-    last_nvs_usage: app_core::data::NvsUsage,
+    last_storage_usage: app_core::data::StorageUsage,
 }
 
 // `NAV_STACK_DEPTH` and the `NavStack` type live in
@@ -360,7 +366,7 @@ impl SystemManager<'static> {
         let boot_button_state = BootButtonTaskState::new(boot_btn);
 
         // 6. SD card
-        let storage = crate::system::storage::init_sd(
+        let mut storage = crate::system::storage::init_sd(
             p.spi3, p.sd_sck, p.sd_mosi, p.sd_miso,
             Output::new(p.sd_cs, Level::High, OutputConfig::default()),
         );
@@ -383,6 +389,14 @@ impl SystemManager<'static> {
         // reasonable to render before task events arrive.
         let initial_time = rtc_state.snapshot(&mut i2c);
         let initial_power = power_state.snapshot(&mut i2c);
+
+        // Seed the shared wall clock so any SD writes that happen
+        // before the first `TimeUpdated` event (e.g. the boot line
+        // below) see the real calendar time.
+        drivers::sdcard::update_wall_clock(
+            initial_time.year,   initial_time.month,  initial_time.day,
+            initial_time.hour,   initial_time.minute, initial_time.second,
+        );
 
         // 8. Stash audio peripherals for later `start_audio()`.
         // Hardware stays in post-reset low-power state until then.
@@ -413,21 +427,61 @@ impl SystemManager<'static> {
         let i2c_bus: &'static crate::system::bus::SharedI2c = crate::system::bus::I2C_BUS
             .init(embassy_sync::mutex::Mutex::new(i2c));
 
-        // Bring up flash-backed persistence and load any stored
-        // Config / AlarmState. Falls back to `::default()` for any
-        // key that's missing, has a version mismatch, or fails to
-        // deserialise.
-        let mut nvs = crate::system::nvs::Nvs::new(p.flash);
-        let stored_config = nvs.load_config().await;
-        let stored_alarms = nvs.load_alarms().await;
+        // Mount the on-flash filesystem (formats on first boot / if
+        // the existing superblock is unreadable). Then load
+        // Config / AlarmState from their files, falling back to
+        // defaults if either is missing, version-mismatched, or
+        // fails to deserialise.
+        const CONFIG_PATH:   &str = "/system/config/config.bin";
+        const ALARMS_PATH:   &str = "/system/config/alarms.bin";
+        const CONFIG_VERSION: u8  = 1;
+        const ALARMS_VERSION: u8  = 1;
+
+        let fs = crate::system::flash_fs::FlashFs::mount_or_format(p.flash);
+        let stored_config = fs.load_blob::<Config>(CONFIG_PATH, CONFIG_VERSION);
+        let stored_alarms = fs.load_blob::<app_core::ui::types::AlarmState>(ALARMS_PATH, ALARMS_VERSION);
         let config_source = if stored_config.is_some() { "loaded" } else { "default" };
         let alarms_source = if stored_alarms.is_some() { "loaded" } else { "default" };
         let loaded_config = stored_config.unwrap_or_else(Config::default);
         let loaded_alarms = stored_alarms.unwrap_or_default();
-        let initial_nvs = nvs.usage_summary().await;
+
+        // Recover the monotonic seq counter by scanning
+        // /system/logs/events.log on flash. Must happen before the
+        // first log line is emitted.
+        crate::system::event_log::init_seq_from_flash(&fs);
+
+        // Probe for an SD card and mark the mirror online if one
+        // is present. Stage C UI adds a Settings button for manual
+        // re-probe.
+        let sd_online = crate::system::storage::probe_sd(&mut storage);
+        crate::system::event_log::set_sd_online(sd_online);
+
+        // If the SD mirror is online, copy any flash log entries
+        // the SD doesn't have yet. Runs before `log_boot` so the
+        // fresh boot line gets emitted to both sides via the normal
+        // write path rather than through back-fill.
+        if sd_online {
+            crate::system::event_log::backfill_sd(&fs, &mut storage);
+        }
+
+        // Record the power-up in the event log. Writes
+        // /system/logs/events.log on flash (always) and on SD if
+        // the mirror is online.
+        crate::system::event_log::log_boot(&fs, &mut storage, &initial_time);
+
+        // Recompute filesystem usage after log_boot - first boot
+        // creates events.log, so the file count bumps by 1.
+        let fs_usage = fs.usage();
+        let initial_usage = app_core::data::StorageUsage {
+            files: fs_usage.files,
+            total_bytes: fs_usage.total_bytes,
+            sd_online,
+        };
         log::info!(
-            "NVS: config={} alarms={} records={}/64KB",
-            config_source, alarms_source, initial_nvs.records,
+            "flash_fs: config={} alarms={} files={} region={}KB sd={}",
+            config_source, alarms_source, fs_usage.files,
+            fs_usage.total_bytes / 1024,
+            if sd_online { "online" } else { "offline" },
         );
 
         // Seed the initial cached-data snapshot so the first frame
@@ -437,7 +491,7 @@ impl SystemManager<'static> {
         cached_data.time = initial_time;
         cached_data.power = initial_power;
         cached_data.alarms = loaded_alarms;
-        cached_data.nvs = initial_nvs;
+        cached_data.storage = initial_usage;
 
         // Construct the Model (UI + cached state + dispatch).
         let model = app_core::model::Model::new(
@@ -464,8 +518,8 @@ impl SystemManager<'static> {
             mic_drain_buf: alloc::vec![0u8; MIC_DRAIN_BUF_SIZE].into_boxed_slice(),
             row_hashes: alloc::vec![0u32; HEIGHT as usize].into_boxed_slice(),
             rtc,
-            nvs,
-            last_nvs_usage: initial_nvs,
+            fs,
+            last_storage_usage: initial_usage,
         };
 
         let bundle = TaskBundle {
@@ -587,24 +641,42 @@ impl SystemManager<'static> {
                     log::info!("System: shutdown requested");
                     self.power.shutdown();
                 }
-                Effect::EraseNvs => {
-                    log::info!("NVS: erasing all stored records");
-                    self.nvs.erase_all().await;
-                    self.refresh_nvs_usage().await;
+                Effect::FactoryReset => {
+                    log::info!("factory reset: wiping flash + SD mirror");
+                    self.fs.reset_user_data();
+                    if crate::system::event_log::sd_online() {
+                        crate::system::storage::reset_sd(&mut self.storage);
+                    }
+                    self.refresh_storage_usage().await;
+                }
+                Effect::ProbeSd => {
+                    log::info!("SD: re-probing on user request");
+                    let online = crate::system::storage::probe_sd(&mut self.storage);
+                    crate::system::event_log::set_sd_online(online);
+                    if online {
+                        crate::system::event_log::backfill_sd(&self.fs, &mut self.storage);
+                    }
+                    self.refresh_storage_usage().await;
                 }
             }
         }
     }
 
-    /// Recompute NVS usage and push a `NvsUsageUpdated` event if
-    /// the value actually changed. Called after any operation
-    /// that could affect the store (save/erase/boot). Keeps the
-    /// event channel quiet when nothing visibly changed.
-    async fn refresh_nvs_usage(&mut self) {
-        let fresh = self.nvs.usage_summary().await;
-        if fresh != self.last_nvs_usage {
-            self.last_nvs_usage = fresh;
-            EVENTS.send(SystemEvent::NvsUsageUpdated { usage: fresh }).await;
+    /// Recompute filesystem usage and push a `StorageUsageUpdated`
+    /// event if the value actually changed. Called after any
+    /// operation that could affect the store (save / reset /
+    /// boot). Keeps the fire-hose out of the event pipeline when
+    /// nothing visibly changed.
+    async fn refresh_storage_usage(&mut self) {
+        let fs_usage = self.fs.usage();
+        let fresh = app_core::data::StorageUsage {
+            files: fs_usage.files,
+            total_bytes: fs_usage.total_bytes,
+            sd_online: crate::system::event_log::sd_online(),
+        };
+        if fresh != self.last_storage_usage {
+            self.last_storage_usage = fresh;
+            EVENTS.send(SystemEvent::StorageUsageUpdated { usage: fresh }).await;
         }
     }
 
@@ -720,6 +792,28 @@ impl SystemManager<'static> {
     /// action interpretation). This wrapper hands the event to the
     /// model and executes the returned effects on hardware.
     async fn handle_event(&mut self, event: SystemEvent) {
+        // Bridge fresh RTC time into the SD-card wall clock so file
+        // mtimes and log lines see real calendar time. Cheap - a
+        // single atomic store.
+        if let SystemEvent::TimeUpdated { data } = &event {
+            drivers::sdcard::update_wall_clock(
+                data.year, data.month, data.day,
+                data.hour, data.minute, data.second,
+            );
+        }
+
+        // Best-effort append to /system/logs/events.log on flash
+        // (always) and on SD if a card was detected at boot. No-op
+        // if the event isn't loggable. Runs before the model so the
+        // log captures the triggering event even if the model
+        // transitions into sleep or shuts down.
+        crate::system::event_log::try_log(
+            &self.fs,
+            &mut self.storage,
+            &self.model.cached_data().time,
+            &event,
+        );
+
         let effects = self.model.handle_event(&event, Instant::now());
         self.execute_effects(effects).await;
     }

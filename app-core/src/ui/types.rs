@@ -132,11 +132,19 @@ pub enum Action {
     /// Dismiss the active alarm. The manager stops the buzz and
     /// navigates back to the previous screen.
     DismissAlarm,
-    /// Erase the entire flash-backed config store. The manager
-    /// calls `Nvs::erase_all()`, re-summarises usage, and emits
-    /// a fresh `SystemEvent::NvsUsageUpdated`. Irrecoverable -
+    /// Wipe user-visible persistent data (config, alarms, logs,
+    /// uploaded sounds) back to defaults. The manager calls
+    /// `FlashFs::reset_user_data`, re-summarises usage, and emits
+    /// a fresh `SystemEvent::StorageUsageUpdated`. Irrecoverable -
     /// wrap in a confirmation dialog on the UI side.
-    EraseNvs,
+    FactoryReset,
+    /// (Re-)probe the SD card. Emitted by the Storage settings
+    /// screen when the user taps the "SD CARD" row. The manager
+    /// probes the card, flips the mirror online flag, runs back-fill
+    /// if newly online, and emits a fresh
+    /// `SystemEvent::StorageUsageUpdated` so the screen reflects
+    /// the new status.
+    InitSd,
 }
 
 // -- Persistent app state ----------------------------------------------------
@@ -465,9 +473,9 @@ mod alarm_tests {
 
 // Per-peripheral snapshot data structs live in `app-core::data`.
 // Re-exported here so screens can `use crate::ui::types::{TimeData,
-// PowerData, MotionData, TouchData, NvsUsage, SystemData}` from one
-// place.
-pub use crate::data::{MotionData, NvsUsage, PowerData, TimeData, TouchData};
+// PowerData, MotionData, TouchData, StorageUsage, SystemData}` from
+// one place.
+pub use crate::data::{MotionData, PowerData, StorageUsage, TimeData, TouchData};
 
 /// System state, passed to screens on render and events.
 ///
@@ -480,9 +488,9 @@ pub struct SystemData {
     pub power: PowerData,
     pub motion: MotionData,
     pub touch: TouchData,
-    /// Flash config-store occupancy. Updated at boot and after
-    /// every save via `SystemEvent::NvsUsageUpdated`.
-    pub nvs: NvsUsage,
+    /// Flash-filesystem occupancy. Updated at boot and after
+    /// every save / reset via `SystemEvent::StorageUsageUpdated`.
+    pub storage: StorageUsage,
     pub tick_count: u32,
     pub stopwatch: StopwatchState,
     pub timer: TimerState,
