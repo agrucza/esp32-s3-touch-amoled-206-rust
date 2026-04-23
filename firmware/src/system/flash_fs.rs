@@ -58,6 +58,8 @@ use littlefs_rust::{
 };
 use serde::{Deserialize, Serialize};
 
+use crate::system::fs::{unwrap_blob, wrap_blob};
+
 // -- Region geometry --------------------------------------------------------
 
 // Board-specific region constants. Exactly one `board-*` Cargo
@@ -132,18 +134,6 @@ fn map_storage_err(e: FlashStorageError) -> LfsError {
     }
 }
 
-// -- Versioned blob wrapper -------------------------------------------------
-
-/// Wrapper written to disk for any `save_blob` value. On load we
-/// compare `version` to the caller's current build constant; a
-/// mismatch causes the record to be dropped and the caller to fall
-/// back to its default.
-#[derive(Serialize, Deserialize)]
-struct StoredBlob<T> {
-    version: u8,
-    inner: T,
-}
-
 // -- FlashFs ----------------------------------------------------------------
 
 /// High-level access to the on-flash filesystem.
@@ -153,10 +143,6 @@ struct StoredBlob<T> {
 /// once at boot by [`FlashFs::mount_or_format`].
 pub struct FlashFs<'d> {
     fs: Filesystem<FlashFsStorage<'d>>,
-    /// Postcard scratch buffer reused by `save_blob`. Large enough
-    /// for the biggest versioned record we store (AlarmState fits
-    /// in < 256 B; 512 is generous).
-    buf: [u8; 512],
 }
 
 impl<'d> FlashFs<'d> {
@@ -193,7 +179,7 @@ impl<'d> FlashFs<'d> {
         let _ = fs.mkdir("/system/config");
         let _ = fs.mkdir("/system/logs");
         let _ = fs.mkdir("/system/sounds");
-        Self { fs, buf: [0u8; 512] }
+        Self { fs }
     }
 
     // -- Versioned blob helpers --------------------------------------------
@@ -203,50 +189,45 @@ impl<'d> FlashFs<'d> {
     /// Returns `None` if the file is missing, the record's version
     /// doesn't match `expected_version`, or deserialisation fails.
     /// Callers fall back to `T::default()` on `None`.
+    ///
+    /// Normally reached via `Store::load_blob`; kept on `FlashFs`
+    /// itself so the `store.flash_mut()` escape hatch remains useful.
     pub fn load_blob<T>(&self, path: &str, expected_version: u8) -> Option<T>
     where
         T: for<'de> Deserialize<'de>,
     {
-        let bytes = match self.fs.read_to_vec(path) {
-            Ok(b) => b,
-            Err(LfsError::NoEntry) => return None,
-            Err(e) => {
-                log::warn!("flash_fs: read {} failed: {:?}", path, e);
-                return None;
-            }
-        };
-        match postcard::from_bytes::<StoredBlob<T>>(&bytes) {
-            Ok(stored) if stored.version == expected_version => Some(stored.inner),
-            Ok(stored) => {
-                log::warn!(
-                    "flash_fs: {} version {} != expected {}; ignoring",
-                    path, stored.version, expected_version,
-                );
-                None
-            }
-            Err(e) => {
-                log::warn!("flash_fs: deserialising {} failed: {:?}", path, e);
-                None
-            }
-        }
+        let bytes = self.read_file_inner(path)?;
+        unwrap_blob(&bytes, expected_version)
     }
 
     /// Write a postcard-serialised, version-tagged blob to `path`.
     /// Creates parent directories on demand.
+    ///
+    /// Normally reached via `Store::save_blob` (which also mirrors
+    /// the same bytes to SD when the card is online). Kept on
+    /// `FlashFs` so flash-only saves are still available via
+    /// `store.flash_mut()`.
     pub fn save_blob<T>(&mut self, path: &str, version: u8, value: &T)
     where
         T: Serialize,
     {
-        let stored = StoredBlob { version, inner: value };
-        let bytes = match postcard::to_slice(&stored, &mut self.buf) {
-            Ok(b) => b,
-            Err(e) => {
-                log::warn!("flash_fs: serialising {} failed: {:?}", path, e);
-                return;
-            }
-        };
+        let mut buf = [0u8; 512];
+        let Some(bytes) = wrap_blob(&mut buf, version, value) else { return };
         if let Err(e) = self.fs.write_file(path, bytes) {
             log::warn!("flash_fs: write {} failed: {:?}", path, e);
+        }
+    }
+
+    /// Internal whole-file read: `None` on missing or I/O error.
+    /// Shared by `load_blob` and the public `read_file`.
+    fn read_file_inner(&self, path: &str) -> Option<Vec<u8>> {
+        match self.fs.read_to_vec(path) {
+            Ok(v) => Some(v),
+            Err(LfsError::NoEntry) => None,
+            Err(e) => {
+                log::warn!("flash_fs: read {} failed: {:?}", path, e);
+                None
+            }
         }
     }
 
@@ -329,22 +310,15 @@ impl<'d> FlashFs<'d> {
     /// Read the entire file at `path` into a `Vec`. Returns `None`
     /// on missing file; logs a warning and returns `None` on other
     /// I/O errors so callers can treat "read failed" uniformly.
-    #[allow(dead_code)] // reachable only through `fs::Storage`; no direct caller yet
+    #[allow(dead_code)] // no live caller; kept to round out the backend contract and the Storage impl
     pub fn read_file(&mut self, path: &str) -> Option<Vec<u8>> {
-        match self.fs.read_to_vec(path) {
-            Ok(v) => Some(v),
-            Err(LfsError::NoEntry) => None,
-            Err(e) => {
-                log::warn!("flash_fs: read {} failed: {:?}", path, e);
-                None
-            }
-        }
+        self.read_file_inner(path)
     }
 
     /// Write `bytes` to `path`, creating or truncating the file.
     /// Parent directories must already exist (mount_or_format
     /// creates the `/system/` tree up front).
-    #[allow(dead_code)] // reachable only through `fs::Storage`; no direct caller yet
+    #[allow(dead_code)] // no live caller; kept to round out the backend contract and the Storage impl
     pub fn write_file(&mut self, path: &str, bytes: &[u8]) -> Result<(), LfsError> {
         self.fs.write_file(path, bytes)
     }

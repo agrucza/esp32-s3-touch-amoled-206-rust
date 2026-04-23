@@ -1,31 +1,228 @@
-//! SD card hardware bringup.
+//! Unified storage facade: flash + SD mirror behind one handle.
 //!
-//! Construction of the SPI peripheral, `SdCard`, and `VolumeManager`
-//! happens here - those are the "cable" plumbing that's board-specific.
-//! Everything above that (file ops, probe, reset) lives on
-//! [`crate::system::sd_fs::SdFs`].
+//! `Store` owns the on-flash LittleFS ([`FlashFs`]) and the SD card
+//! volume ([`SdFs`]) together with the SD-mirror online flag. It
+//! exposes two layers of API:
+//!
+//! * **Mirrored operations** - `save_blob`, `append_line`,
+//!   `reset_user_data`. Flash is authoritative; SD is a best-effort
+//!   mirror that gets disabled on the first write failure (pulled
+//!   card, read-only media, FS corruption). Callers don't have to
+//!   think about which backends are in play.
+//!
+//! * **Escape hatches** - `flash_mut()` / `sd_mut()` return the
+//!   concrete handles for operations that only make sense on one
+//!   side (flash-only config reads, SD-only user content, FS-usage
+//!   queries).
+//!
+//! Keeping both layers available on the same type means the
+//! SystemManager holds a single `store` field, and each call site
+//! picks the semantics it wants at the callsite rather than at the
+//! field boundary.
+//!
+//! Rule of thumb:
+//! * `store.save_blob(...)` / `store.append_line(...)` / `store.reset_user_data()`
+//!   -> both sides, coordinated.
+//! * `store.flash_mut().<op>()` / `store.sd_mut().<op>()`
+//!   -> explicit one-side operation.
+
+use core::sync::atomic::{AtomicBool, Ordering};
+use esp_hal::gpio::{Output, interconnect::{PeripheralInput, PeripheralOutput}};
+use esp_hal::peripherals::FLASH;
+use serde::{Deserialize, Serialize};
 
 use crate::sdcard_hal;
+use crate::system::flash_fs::{FlashFs, FsUsage};
+use crate::system::fs::{unwrap_blob, wrap_blob};
 use crate::system::sd_fs::SdFs;
-use esp_hal::gpio::{Output, interconnect::{PeripheralInput, PeripheralOutput}};
 
-/// Build the SD `VolumeManager` and wrap it in an [`SdFs`]. No I/O
-/// yet - the underlying `SdCard` defers ACMD41 identification until
-/// the first real read, so this succeeds whether or not a card is
-/// in the slot. Call [`SdFs::probe`] afterwards to detect presence.
+/// Scratch buffer size for mirror writes of versioned blobs.
+/// Matches `FlashFs`'s historic 512-byte preallocation: biggest
+/// record today (`AlarmState`) serialises to well under 256 B, with
+/// headroom for growth.
+const BLOB_SCRATCH: usize = 512;
+
+/// Flash + SD behind one handle. See module docs.
 ///
-/// Returning `SdFs` directly (not `Option`) keeps the SPI peripheral
-/// and CS pin alive for the whole boot; the runtime can re-probe on
-/// demand (Settings "Initialize SD card" button) without re-plumbing
-/// any hardware tokens.
-pub fn init_sd<'d>(
-    spi: impl esp_hal::spi::master::Instance + 'd,
-    sck: impl PeripheralOutput<'d>,
-    mosi: impl PeripheralOutput<'d>,
-    miso: impl PeripheralInput<'d>,
-    cs: Output<'d>,
-) -> SdFs<'d> {
-    log::info!("SD card: building volume manager (card access deferred)");
-    let sd_card = sdcard_hal::build_sdcard(spi, sck, mosi, miso, cs);
-    SdFs::new(drivers::sdcard::VolumeManager::new(sd_card, drivers::sdcard::RtcTimeSource))
+/// The SD side is always constructed so the SPI peripheral and CS
+/// pin stay alive for the whole boot - runtime re-probes (Settings
+/// "Initialize SD card" button) don't need to re-plumb any hardware
+/// tokens. Actual card readability is tracked by `sd_online()`.
+pub struct Store<'d> {
+    flash: FlashFs<'d>,
+    sd: SdFs<'d>,
+    /// Whether the SD mirror is currently usable for writes.
+    ///
+    /// * Flipped `true` when `probe_sd()` succeeds.
+    /// * Flipped `false` automatically on the first SD write
+    ///   failure so warn-spam stops if the card got yanked.
+    /// * User re-arms via `probe_sd()` from the Settings screen.
+    ///
+    /// Flash writes are unaffected by this flag; flash is
+    /// authoritative either way.
+    sd_online: AtomicBool,
+}
+
+impl<'d> Store<'d> {
+    /// Mount flash (format on first boot / corrupted superblock)
+    /// and build the SD volume manager. No SD I/O yet - call
+    /// [`Self::probe_sd`] afterwards to detect card presence.
+    pub fn init(
+        flash: FLASH<'d>,
+        spi: impl esp_hal::spi::master::Instance + 'd,
+        sck: impl PeripheralOutput<'d>,
+        mosi: impl PeripheralOutput<'d>,
+        miso: impl PeripheralInput<'d>,
+        cs: Output<'d>,
+    ) -> Self {
+        let flash = FlashFs::mount_or_format(flash);
+        log::info!("SD card: building volume manager (card access deferred)");
+        let sd_card = sdcard_hal::build_sdcard(spi, sck, mosi, miso, cs);
+        let sd = SdFs::new(drivers::sdcard::VolumeManager::new(
+            sd_card, drivers::sdcard::RtcTimeSource,
+        ));
+        Self { flash, sd, sd_online: AtomicBool::new(false) }
+    }
+
+    // -- Online state -------------------------------------------------------
+
+    /// Current SD mirror state.
+    pub fn sd_online(&self) -> bool {
+        self.sd_online.load(Ordering::Relaxed)
+    }
+
+    /// Mark the SD mirror offline. Called on the first write
+    /// failure so warn-spam stops; user re-arms via `probe_sd()`.
+    fn mark_sd_offline(&self) {
+        self.sd_online.store(false, Ordering::Relaxed);
+    }
+
+    // -- Probe + backfill ---------------------------------------------------
+
+    /// Re-probe the SD slot and update the online flag. On a
+    /// successful probe, back-fill any event-log entries that are
+    /// on flash but not yet on the SD mirror. Returns the new
+    /// online state.
+    pub fn probe_sd(&mut self) -> bool {
+        let online = self.sd.probe();
+        self.sd_online.store(online, Ordering::Relaxed);
+        if online {
+            crate::system::event_log::backfill_sd(self);
+        }
+        online
+    }
+
+    // -- Escape hatches -----------------------------------------------------
+
+    /// Direct handle on the flash-side backend. Use for flash-only
+    /// operations (config reads during boot, FS usage queries, any
+    /// operation the SD mirror shouldn't see).
+    pub fn flash_mut(&mut self) -> &mut FlashFs<'d> {
+        &mut self.flash
+    }
+
+    /// Direct handle on the SD-side backend. Use for SD-only
+    /// operations (user content on `/user/...`, back-fill scans,
+    /// anything that shouldn't touch flash).
+    #[allow(dead_code)] // escape hatch for future SD-only callers (user data, sounds, backups)
+    pub fn sd_mut(&mut self) -> &mut SdFs<'d> {
+        &mut self.sd
+    }
+
+    /// Split borrow: both backends at once. Required by
+    /// `event_log::backfill_sd`, which has to stream from flash
+    /// into SD in one pass. No invariant couples the two sides,
+    /// so handing out both mutable refs is safe - the Store is
+    /// just a bundle plus an atomic flag.
+    pub fn parts_mut(&mut self) -> (&mut FlashFs<'d>, &mut SdFs<'d>) {
+        (&mut self.flash, &mut self.sd)
+    }
+
+    /// Flash-side filesystem usage. SD-side usage isn't tracked
+    /// here - the UI shows flash as the authoritative store plus a
+    /// binary "SD online" indicator.
+    pub fn usage(&self) -> FsUsage {
+        self.flash.usage()
+    }
+
+    // -- Mirrored ops -------------------------------------------------------
+
+    /// Load a versioned blob. Flash is authoritative for config
+    /// data, so we don't fall through to SD on a flash miss -
+    /// caller's `T::default()` path handles the missing case.
+    pub fn load_blob<T>(&self, path: &str, expected_version: u8) -> Option<T>
+    where
+        T: for<'de> Deserialize<'de>,
+    {
+        self.flash.load_blob(path, expected_version)
+    }
+
+    /// Save a versioned blob. Writes the flash primary, then
+    /// (if the SD mirror is online) the identical bytes to the SD
+    /// side so the mirror stays byte-for-byte consistent.
+    pub fn save_blob<T>(&mut self, path: &str, version: u8, value: &T)
+    where
+        T: Serialize,
+    {
+        // Flash-side write via the existing helper so the
+        // `store.flash_mut().save_blob(...)` path stays consistent
+        // with this one.
+        self.flash.save_blob(path, version, value);
+
+        if !self.sd_online() {
+            return;
+        }
+        let mut buf = [0u8; BLOB_SCRATCH];
+        let Some(bytes) = wrap_blob(&mut buf, version, value) else { return };
+        if let Err(e) = self.sd.write_file(path, bytes) {
+            log::warn!(
+                "store: SD mirror save {} failed ({:?}), marking SD offline",
+                path, e,
+            );
+            self.mark_sd_offline();
+        }
+    }
+
+    /// Append `bytes` to `path` on flash (always) and on SD (if
+    /// the mirror is online). First SD failure flips the mirror
+    /// offline.
+    pub fn append_line(&mut self, path: &str, bytes: &[u8]) {
+        if let Err(e) = self.flash.append_line(path, bytes) {
+            log::warn!("store: flash append {} failed: {:?}", path, e);
+        }
+        if !self.sd_online() {
+            return;
+        }
+        if let Err(e) = self.sd.append_line(path, bytes) {
+            log::warn!(
+                "store: SD mirror append {} failed ({:?}), marking SD offline",
+                path, e,
+            );
+            self.mark_sd_offline();
+        }
+    }
+
+    /// Wipe firmware-written content on both backends (factory
+    /// reset). Each side honours its own reset-dirs list - flash
+    /// clears `config/` + `logs/`, SD clears `logs/` only (user
+    /// content elsewhere on the card is preserved).
+    pub fn reset_user_data(&mut self) {
+        self.flash.reset_user_data();
+        if self.sd_online() {
+            self.sd.reset_user_data();
+        }
+    }
+
+    /// Try to re-interpret a blob from whichever SD file exists
+    /// under `path`. Used during gap-fill / recovery paths; no
+    /// current caller, but kept so the "SD-side config mirror"
+    /// design stays reachable without a second round of plumbing.
+    #[allow(dead_code)] // no live caller; kept so the SD-fallback read path stays one line away
+    pub fn load_blob_sd<T>(&mut self, path: &str, expected_version: u8) -> Option<T>
+    where
+        T: for<'de> Deserialize<'de>,
+    {
+        let bytes = self.sd.read_file(path)?;
+        unwrap_blob(&bytes, expected_version)
+    }
 }

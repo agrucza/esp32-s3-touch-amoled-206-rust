@@ -1,35 +1,48 @@
-//! Storage-backend trait shared by `flash_fs::FlashFs` and
-//! `sd_fs::SdFs`.
+//! Filesystem-backend trait and shared versioned-blob helpers.
 //!
-//! The trait unifies the operations common to any filesystem-like
-//! persistent backend: line-oriented append + scan, whole-file
-//! read + write, and factory-reset wipe. Backend-specific concerns
-//! (flash mount/format, SD probe, versioned blob helpers) stay on
-//! the concrete types.
+//! Two things live here:
 //!
-//! Generic over backend means functions like "mirror a directory
-//! from one place to another" can be written once and dispatched
-//! to either side.
+//! * The [`Storage`] trait, implemented by both
+//!   [`crate::system::flash_fs::FlashFs`] and
+//!   [`crate::system::sd_fs::SdFs`]. Unifies the line-oriented +
+//!   whole-file operations common to any filesystem-like persistent
+//!   backend so generic code (e.g. the Store composite's "wipe every
+//!   backend" path) can dispatch uniformly across the two.
+//!
+//! * A small set of versioned-blob helpers ([`StoredBlob`],
+//!   [`wrap_blob`], [`unwrap_blob`]). Shared so both `FlashFs`
+//!   (primary writer) and [`crate::system::storage::Store`] (mirror
+//!   writer) encode config / alarm records identically - SD-side
+//!   blob files become byte-for-byte copies of their flash peers.
 
 use alloc::vec::Vec;
 use core::ops::ControlFlow;
+use serde::{Deserialize, Serialize};
+
+// -- Storage trait ----------------------------------------------------------
 
 /// A filesystem-like persistent backend.
 ///
-/// No in-tree caller writes against the trait yet - it's the
-/// abstraction a future file-sync / mirror / backup feature will
-/// be written against. Impls exist on both backends now so that
-/// generic work can be added without touching the concrete types.
-#[allow(dead_code)]
-///
 /// Each method is best-effort and takes an absolute `path`. All
-/// paths are expected to be rooted at `/system/...` on both
-/// current backends (see `flash_fs.rs` and `sd_fs.rs` for the
-/// on-disk layout).
+/// paths are expected to be rooted at `/system/...` on both current
+/// backends (see `flash_fs.rs` and `sd_fs.rs` for the on-disk
+/// layout).
 ///
 /// The associated `Error` type lets each backend keep its native
 /// error (littlefs vs. sdmmc) without an erasure layer. Consumers
 /// typically either log the error or convert to `()`.
+///
+/// ### Why the trait exists
+///
+/// `Store` doesn't dispatch through `&mut dyn Storage` today - it
+/// calls `self.flash.<op>()` / `self.sd.<op>()` directly, because
+/// the two backends compose in non-identical ways (SD writes are
+/// gated by the online flag; flash is authoritative). The trait's
+/// job is to enforce that the two backends have matching shapes,
+/// so the "mirror op" patterns in `Store` stay symmetrical and new
+/// backends (e.g. a third tier for the C6 variant) can be added
+/// without widening the composite's surface.
+#[allow(dead_code)] // contract enforcer, not a dispatch point
 pub trait Storage {
     /// Native error type for this backend.
     type Error: core::fmt::Debug;
@@ -67,4 +80,60 @@ pub trait Storage {
     /// clears `SD_RESET_CHILDREN`). Directory structure stays in
     /// place; only files are removed.
     fn reset_user_data(&mut self);
+}
+
+// -- Versioned blob helpers -------------------------------------------------
+
+/// Envelope written to disk for any versioned blob (config,
+/// alarms). On load we compare `version` to the caller's current
+/// build constant; a mismatch causes the record to be dropped and
+/// the caller to fall back to its default.
+///
+/// Kept in this module (rather than on `FlashFs`) so that both the
+/// flash write and the SD mirror write emit the same byte stream.
+#[derive(Serialize, Deserialize)]
+pub(crate) struct StoredBlob<T> {
+    pub version: u8,
+    pub inner: T,
+}
+
+/// Serialise `{ version, value }` into `buf`. Returns the populated
+/// prefix on success, or `None` if `buf` is too small. Callers size
+/// the buffer based on the biggest blob they persist (512 B is
+/// generous for today's `Config` / `AlarmState`).
+pub(crate) fn wrap_blob<'b, T: Serialize>(
+    buf: &'b mut [u8],
+    version: u8,
+    value: &T,
+) -> Option<&'b [u8]> {
+    match postcard::to_slice(&StoredBlob { version, inner: value }, buf) {
+        Ok(slice) => Some(slice),
+        Err(e) => {
+            log::warn!("fs: blob serialise failed: {:?}", e);
+            None
+        }
+    }
+}
+
+/// Deserialise a versioned blob from `bytes`. Returns the inner
+/// value if the envelope's `version` matches `expected_version`;
+/// otherwise logs a warning and returns `None`.
+pub(crate) fn unwrap_blob<T>(bytes: &[u8], expected_version: u8) -> Option<T>
+where
+    T: for<'de> Deserialize<'de>,
+{
+    match postcard::from_bytes::<StoredBlob<T>>(bytes) {
+        Ok(stored) if stored.version == expected_version => Some(stored.inner),
+        Ok(stored) => {
+            log::warn!(
+                "fs: blob version {} != expected {}; ignoring",
+                stored.version, expected_version,
+            );
+            None
+        }
+        Err(e) => {
+            log::warn!("fs: blob deserialise failed: {:?}", e);
+            None
+        }
+    }
 }

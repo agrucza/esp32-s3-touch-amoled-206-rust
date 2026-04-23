@@ -46,8 +46,8 @@ const READ_LINE_CAP: usize = 96;
 /// Owns the `embedded-sdmmc::VolumeManager`. Construction succeeds
 /// even without a card in the slot - call [`Self::probe`] afterwards
 /// to detect presence. All file ops are best-effort; the caller
-/// (typically via `event_log`'s `SD_ONLINE` flag) decides whether
-/// to attempt them.
+/// (typically via the composite `Store`'s online flag) decides
+/// whether to attempt them.
 pub struct SdFs<'d> {
     vol: EspVolumeManager<'d>,
 }
@@ -145,7 +145,7 @@ impl<'d> SdFs<'d> {
     /// Read the entire file at `path` into a `Vec`. Returns
     /// `None` on missing file; warns-and-returns-`None` on other
     /// I/O errors so callers can treat "read failed" uniformly.
-    #[allow(dead_code)] // reachable only through `fs::Storage`; no direct caller yet
+    #[allow(dead_code)] // only live caller is `Store::load_blob_sd`, which is itself dead scaffolding
     pub fn read_file(&mut self, path: &str) -> Option<Vec<u8>> {
         let result = self.with_file(path, FileMode::ReadOnly, false, |vol, file| {
             let len = vol.file_length(file)? as usize;
@@ -171,7 +171,9 @@ impl<'d> SdFs<'d> {
 
     /// Write `bytes` to `path`, creating-or-truncating the file.
     /// Creates parent directories as needed.
-    #[allow(dead_code)] // reachable only through `fs::Storage`; no direct caller yet
+    ///
+    /// Used by `Store::save_blob` for the SD-mirror side; the flash
+    /// write goes through `FlashFs::save_blob` directly.
     pub fn write_file(&mut self, path: &str, bytes: &[u8])
         -> Result<(), SdmmcError<SdCardError>>
     {
