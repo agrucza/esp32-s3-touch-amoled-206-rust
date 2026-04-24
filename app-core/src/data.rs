@@ -173,3 +173,98 @@ pub struct StorageUsage {
     /// this as "SD: ONLINE" / "SD: NOT PRESENT".
     pub sd_online: bool,
 }
+
+// ============================================================================
+// BatteryHistory - ring buffer of recent battery-percent samples.
+// ============================================================================
+
+/// One battery-percent reading at a specific wall-clock time.
+///
+/// Sourced from `SystemEvent::BatteryChanged` entries in the flash
+/// event log (tag = `"battery"`, detail = percent). The settings
+/// battery screen renders these as a time-ordered polyline.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct BatterySample {
+    pub time: TimeData,
+    pub percent: u8,
+}
+
+/// Capacity of the battery-history ring buffer.
+///
+/// Battery events fire on every percent change, so at a typical
+/// discharge rate one sample lands every few minutes. 48 samples
+/// covers several hours of runtime - plenty for a "trend at a
+/// glance" graph without growing `SystemData` excessively.
+pub const BATTERY_HISTORY_CAP: usize = 48;
+
+/// Ring buffer of the most recent battery samples, oldest at the
+/// front. Pushed to by the model on every `BatteryChanged` event;
+/// boot-seeded by the manager from the flash event log.
+///
+/// Not `Copy` (held by `SystemData` via clone), which forces
+/// `SystemData` itself off `Copy` - that's fine, see the module docs.
+#[derive(Debug, Clone, Default)]
+pub struct BatteryHistory {
+    samples: heapless::Deque<BatterySample, BATTERY_HISTORY_CAP>,
+}
+
+impl BatteryHistory {
+    /// Append `sample`. Drops the oldest entry if the buffer is
+    /// full so the view always reflects the most recent window.
+    pub fn push(&mut self, sample: BatterySample) {
+        if self.samples.is_full() {
+            let _ = self.samples.pop_front();
+        }
+        // push_back only errors when full, which we just handled.
+        let _ = self.samples.push_back(sample);
+    }
+
+    /// Iterate samples oldest-first. The battery screen walks this
+    /// left-to-right to place graph points.
+    pub fn iter(&self) -> impl Iterator<Item = &BatterySample> {
+        self.samples.iter()
+    }
+
+    pub fn len(&self) -> usize {
+        self.samples.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.samples.is_empty()
+    }
+}
+
+#[cfg(test)]
+mod battery_history_tests {
+    use super::*;
+
+    fn sample(hour: u8, percent: u8) -> BatterySample {
+        BatterySample {
+            time: TimeData { hour, ..Default::default() },
+            percent,
+        }
+    }
+
+    #[test]
+    fn push_accumulates_then_drops_oldest() {
+        let mut h = BatteryHistory::default();
+        for i in 0..BATTERY_HISTORY_CAP {
+            h.push(sample(i as u8, (100 - i) as u8));
+        }
+        assert_eq!(h.len(), BATTERY_HISTORY_CAP);
+        assert_eq!(h.iter().next().unwrap().percent, 100);
+
+        // Overflow: oldest (100) should drop, newest (say, 42) lands at tail.
+        h.push(sample(99, 42));
+        assert_eq!(h.len(), BATTERY_HISTORY_CAP);
+        assert_eq!(h.iter().next().unwrap().percent, 99);
+        assert_eq!(h.iter().last().unwrap().percent, 42);
+    }
+
+    #[test]
+    fn empty_default() {
+        let h = BatteryHistory::default();
+        assert!(h.is_empty());
+        assert_eq!(h.len(), 0);
+    }
+}

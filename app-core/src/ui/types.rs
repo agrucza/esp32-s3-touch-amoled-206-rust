@@ -498,7 +498,13 @@ pub use crate::data::{MotionData, PowerData, StorageUsage, TimeData, TouchData};
 /// Peripheral snapshots are updated by the manager's event handler.
 /// App state (stopwatch, timer) is mutated directly by screens
 /// via `&mut SystemData` in `on_event`.
-#[derive(Debug, Clone, Copy, Default)]
+///
+/// Intentionally not `Copy`: [`crate::data::BatteryHistory`] owns a
+/// ring buffer that can't live on the stack silently on every pass.
+/// The struct is always accessed through `&SystemData` / `&mut
+/// SystemData` references, so the missing `Copy` costs nothing at
+/// call sites - see `Model::new` (only by-value use).
+#[derive(Debug, Clone, Default)]
 pub struct SystemData {
     pub time: TimeData,
     pub power: PowerData,
@@ -507,6 +513,10 @@ pub struct SystemData {
     /// Flash-filesystem occupancy. Updated at boot and after
     /// every save / reset via `SystemEvent::StorageUsageUpdated`.
     pub storage: StorageUsage,
+    /// Recent battery-percent samples for the settings battery
+    /// graph. Seeded at boot from the flash event log, appended
+    /// on every `SystemEvent::BatteryChanged`.
+    pub battery_history: crate::data::BatteryHistory,
     pub tick_count: u32,
     pub stopwatch: StopwatchState,
     pub timer: TimerState,

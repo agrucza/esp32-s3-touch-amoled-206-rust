@@ -44,7 +44,7 @@
 //! side until the user re-probes.
 
 use crate::system::storage::Store;
-use app_core::data::TimeData;
+use app_core::data::{BatteryHistory, BatterySample, TimeData};
 use app_core::events::{LoggedEvent, SystemEvent, classify_for_log};
 use app_core::log::parse_log_line;
 use core::fmt::Write as _;
@@ -76,6 +76,35 @@ pub fn init_seq_from_flash(store: &mut Store) {
     });
     NEXT_SEQ.store(max_seq.wrapping_add(1), Ordering::Relaxed);
     log::info!("event_log: resumed at seq {}", max_seq + 1);
+}
+
+/// Boot-seed the battery-history ring buffer from the flash event
+/// log. Walks the file once, pushing every `battery,<percent>` line
+/// through `BatteryHistory::push` so the most recent
+/// `BATTERY_HISTORY_CAP` samples land in `out` with older ones
+/// naturally aged out.
+///
+/// Called from `SystemManager::init` before `Model::new`, so the
+/// first render of the battery settings screen already has data.
+pub fn load_battery_history(store: &mut Store, out: &mut BatteryHistory) {
+    let mut seen = 0u32;
+    let _ = store.flash_mut().for_each_line(LOG_PATH, |line| {
+        if let Some(entry) = parse_log_line(line) {
+            if entry.tag.as_str() == "battery" {
+                if let Some(pct) = entry.detail {
+                    out.push(BatterySample { time: entry.time, percent: pct as u8 });
+                    seen += 1;
+                }
+            }
+        }
+        ControlFlow::Continue(())
+    });
+    if seen > 0 {
+        log::info!(
+            "event_log: seeded battery history ({} scanned, kept {})",
+            seen, out.len(),
+        );
+    }
 }
 
 /// Copy any flash log entry whose `seq` is newer than the highest

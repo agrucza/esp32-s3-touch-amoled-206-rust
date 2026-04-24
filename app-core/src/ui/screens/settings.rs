@@ -12,8 +12,9 @@
 
 use embedded_graphics::{
     draw_target::DrawTarget,
-    geometry::Point,
+    geometry::{Point, Size},
     pixelcolor::Rgb565,
+    primitives::{Line, PrimitiveStyle, Rectangle, StyledDrawable},
 };
 use heapless::String;
 use core::fmt::Write;
@@ -35,6 +36,8 @@ enum SettingsView {
     Clock,
     TimeEntry,
     DateEntry,
+    /// Battery status + history graph (samples from the flash event log).
+    Battery,
     /// Storage sub-index. Routes to the storage leaves below.
     Storage,
     StorageFlash,
@@ -60,6 +63,15 @@ fn clock_value(data: &SystemData) -> String<20> {
 fn imu_value(_data: &SystemData) -> String<20> {
     let mut buf = String::new();
     let _ = buf.push_str("QMI8658");
+    buf
+}
+
+fn battery_value(data: &SystemData) -> String<20> {
+    let mut buf = String::new();
+    match data.power.battery_percent {
+        Some(pct) => { let _ = write!(buf, "{}%", pct); }
+        None      => { let _ = buf.push_str("--"); }
+    }
     buf
 }
 
@@ -137,6 +149,11 @@ const INDEX_ROWS: &[IndexRow] = &[
         target: SettingsView::Clock,
     },
     IndexRow {
+        label: "BATTERY",
+        value_fn: battery_value,
+        target: SettingsView::Battery,
+    },
+    IndexRow {
         label: "6-AXIS IMU",
         value_fn: imu_value,
         target: SettingsView::Imu,
@@ -199,6 +216,7 @@ impl Screen for SettingsScreen {
             SettingsView::Clock => self.render_clock(display, data),
             SettingsView::TimeEntry => self.render_time_entry(display, data),
             SettingsView::DateEntry => self.render_date_entry(display, data),
+            SettingsView::Battery => self.render_battery(display, data),
             SettingsView::Storage => self.render_storage_index(display, data),
             SettingsView::StorageFlash => self.render_storage_flash(display, data),
             SettingsView::StorageSd => self.render_storage_sd(display, data),
@@ -218,6 +236,7 @@ impl Screen for SettingsScreen {
             SettingsView::Clock => self.clock_event(event, data),
             SettingsView::TimeEntry => self.time_entry_event(event, data),
             SettingsView::DateEntry => self.date_entry_event(event, data),
+            SettingsView::Battery => self.battery_event(event),
             SettingsView::Storage => self.storage_index_event(event),
             SettingsView::StorageFlash => self.storage_flash_event(event),
             SettingsView::StorageSd => self.storage_sd_event(event),
@@ -569,6 +588,66 @@ impl SettingsScreen {
                 Action::None
             }
             SystemEvent::SelfTestUpdated { .. } => Action::Redraw,
+            _ => Action::None,
+        }
+    }
+
+    // -- Battery sub-view ----------------------------------------------------
+
+    fn render_battery<D: DrawTarget<Color = Rgb565>>(
+        &self,
+        display: &mut D,
+        data: &SystemData,
+    ) {
+        header_bar(
+            display,
+            layout::header_rect(),
+            HeaderIcon::Back,
+            "BATTERY",
+            theme::AMBER,
+        );
+
+        // Status card: current percent + voltage (from the live
+        // PowerData snapshot, not from the history). History is for
+        // trend; this line is "what is it right now."
+        let status_rect = layout::content_card_rect(0);
+        card(display, status_rect, CardStyle::DEFAULT);
+        let mut val: String<20> = String::new();
+        match (data.power.battery_percent, data.power.battery_voltage_mv) {
+            (Some(pct), Some(mv)) => {
+                let _ = write!(val, "{}% / {}.{:02}V", pct, mv / 1000, (mv % 1000) / 10);
+            }
+            (Some(pct), None) => { let _ = write!(val, "{}%", pct); }
+            _                  => { let _ = val.push_str("--"); }
+        }
+        value_body(display, status_rect, "NOW", val.as_str(), theme::TEXT_WHITE);
+
+        // Graph panel below the status card. Custom geometry: a
+        // single wide rect that holds gridlines + polyline. Height
+        // picked to fit the remaining content band without pushing
+        // into the bezel corners.
+        let g = graph_rect();
+        card(display, g, CardStyle::DEFAULT);
+        draw_battery_graph(display, g, &data.battery_history);
+    }
+
+    fn battery_event(&mut self, event: &SystemEvent) -> Action {
+        match event {
+            SystemEvent::Tap { x, y } if layout::header_icon_hit(*x, *y) => {
+                self.view = SettingsView::Index;
+                Action::Redraw
+            }
+            SystemEvent::Swipe {
+                dir: crate::events::SwipeDir::Right,
+                region: crate::events::SwipeRegion::Content,
+            } => {
+                self.view = SettingsView::Index;
+                Action::Redraw
+            }
+            // Any live snapshot refresh or new sample should repaint.
+            SystemEvent::PowerUpdated { .. }
+            | SystemEvent::BatteryChanged { .. }
+            | SystemEvent::TimeUpdated { .. } => Action::Redraw,
             _ => Action::None,
         }
     }
@@ -942,4 +1021,103 @@ fn format_result(
 fn dimmed(mut style: CardStyle) -> CardStyle {
     style.bg = theme::TEXT_MUTED;
     style
+}
+
+// -- Battery-graph helpers ---------------------------------------------------
+
+/// Bounding rect for the battery-history graph panel. Sits below
+/// the status card in the battery sub-view, centered in the same
+/// horizontal band as the card stack.
+fn graph_rect() -> Rectangle {
+    // Start one card-slot below the status card (content_card_rect(0)),
+    // stretch down to the bezel-safe content bottom so the graph
+    // has the whole remaining screen height to itself.
+    let top = layout::content_card_rect(1).top_left.y;
+    let bot = theme::CONTENT_BOTTOM;
+    Rectangle::new(
+        Point::new(layout::CARD_MARGIN_X, top),
+        Size::new(layout::CARD_WIDTH as u32, (bot - top) as u32),
+    )
+}
+
+/// Render the battery history as a polyline inside `rect`. Draws
+/// faint horizontal gridlines at 25/50/75% and connects consecutive
+/// samples with short line segments in amber. Empty history gets a
+/// centered "NO DATA" caption instead.
+fn draw_battery_graph<D: DrawTarget<Color = Rgb565>>(
+    display: &mut D,
+    rect: Rectangle,
+    history: &crate::data::BatteryHistory,
+) {
+    // Inset the drawable area so strokes don't kiss the card border.
+    const INSET: i32 = 10;
+    let plot = Rectangle::new(
+        Point::new(rect.top_left.x + INSET, rect.top_left.y + INSET),
+        Size::new(
+            (rect.size.width as i32 - 2 * INSET) as u32,
+            (rect.size.height as i32 - 2 * INSET) as u32,
+        ),
+    );
+
+    // Horizontal gridlines at 25 / 50 / 75 percent.
+    let grid_style = PrimitiveStyle::with_stroke(theme::TEXT_MUTED, 1);
+    let left  = plot.top_left.x;
+    let right = plot.top_left.x + plot.size.width as i32;
+    for pct in [25, 50, 75] {
+        let y = plot_y(pct, &plot);
+        let _ = Line::new(Point::new(left, y), Point::new(right, y))
+            .draw_styled(&grid_style, display);
+    }
+
+    // Empty state: centered caption.
+    if history.is_empty() {
+        fonts::draw_centered_in_rect(
+            display, &fonts::body(), "NO DATA", plot, theme::TEXT_MUTED,
+        );
+        return;
+    }
+
+    // Map each sample to a screen point, oldest on the left. When
+    // there's only one sample the polyline has no segments - draw
+    // a single-pixel dot via a length-1 Line so the view still
+    // shows "there is data here."
+    let n = history.len();
+    let width = plot.size.width as i32;
+    let sample_point = |i: usize, pct: u8| -> Point {
+        let x = if n <= 1 {
+            plot.top_left.x + width / 2
+        } else {
+            plot.top_left.x + (i as i32 * width) / (n as i32 - 1)
+        };
+        Point::new(x, plot_y(pct, &plot))
+    };
+
+    // Color each segment by the *lower* of its two endpoint
+    // percents, so the line turns amber / red the instant it drops
+    // into a warning band. Matches the palette `battery_color` uses
+    // for the battery icon elsewhere in the UI.
+    let mut prev: Option<(Point, u8)> = None;
+    for (i, sample) in history.iter().enumerate() {
+        let p = sample_point(i, sample.percent);
+        if let Some((q, prev_pct)) = prev {
+            let color = crate::ui::primitives::battery_color(prev_pct.min(sample.percent));
+            let stroke = PrimitiveStyle::with_stroke(color, 2);
+            let _ = Line::new(q, p).draw_styled(&stroke, display);
+        } else if n == 1 {
+            // Single sample: draw it as a zero-length line so the
+            // stroke still renders a small marker.
+            let color = crate::ui::primitives::battery_color(sample.percent);
+            let stroke = PrimitiveStyle::with_stroke(color, 2);
+            let _ = Line::new(p, p).draw_styled(&stroke, display);
+        }
+        prev = Some((p, sample.percent));
+    }
+}
+
+/// Map a battery percent (0-100, clamped) to the pixel Y inside
+/// `plot`. 100% sits at the top edge, 0% at the bottom edge.
+fn plot_y(percent: u8, plot: &Rectangle) -> i32 {
+    let p = percent.min(100) as i32;
+    let h = plot.size.height as i32;
+    plot.top_left.y + (100 - p) * h / 100
 }

@@ -322,7 +322,13 @@ impl Model {
             SystemEvent::TouchReleased => {
                 self.cached_data.touch = TouchData::default();
             }
-            SystemEvent::HalfMinuteChanged | SystemEvent::BatteryChanged { .. } => {
+            SystemEvent::BatteryChanged { percent } => {
+                self.cached_data.battery_history.push(
+                    crate::data::BatterySample {
+                        time: self.cached_data.time,
+                        percent: *percent,
+                    },
+                );
                 self.needs_redraw = true;
             }
             _ => {}

@@ -1,19 +1,24 @@
 //! RTC (PCF85063A) task state.
 //!
 //! Owns the RTC driver plus the INT# line (GPIO39). The PCF85063
-//! INT# pin is shared across four sources:
+//! INT# pin is shared across three live sources in this firmware:
 //!
-//!   * Half-minute interrupt (HMI) - pulses low at second=0 and
-//!     second=30, drives `HalfMinuteChanged`
 //!   * Alarm match - latches AF in Control_2, drives `AlarmFired`
 //!   * Countdown timer expiry - latches TF, drives `TimerExpired`
 //!   * CLKOUT (unused here)
 //!
+//! HMI (half-minute interrupt) and MI (minute interrupt) are *not*
+//! enabled - the PCF85063 has a silicon quirk where TF latches
+//! prematurely (~20 s into a 60 s countdown) when HMI is active
+//! on the shared INT# line. We drive clock-face redraws from a
+//! 1 s software poll in the task loop instead (`TimeUpdated`), so
+//! no user-visible tick depends on INT# pulses.
+//!
 //! The task waits on the falling edge, reads Control_2 to find
 //! out which source fired, clears any latched flags, and emits
-//! the corresponding system event. HMI pulses are unlatched -
-//! if neither AF nor TF is set when the INT fires, we know it
-//! was the periodic half-minute tick.
+//! the corresponding system event. An INT# with neither AF nor
+//! TF set is unexpected (nothing else should be able to assert
+//! INT#) and gets logged as a warn.
 //!
 //! ## Phase 4 task loop sketch
 //!
@@ -39,9 +44,10 @@ use embassy_time::{Duration, Timer};
 use embedded_hal::i2c::I2c as I2cTrait;
 use esp_hal::gpio::Input;
 
-/// RTC task: wait on INT#, classify the source (HMI / alarm /
-/// timer), emit the matching event and a fresh `TimeUpdated`
-/// snapshot so the main loop's cached time stays current.
+/// RTC task: wait on INT#, classify the source (alarm / timer),
+/// emit the matching event and a fresh `TimeUpdated` snapshot so
+/// the main loop's cached time stays current.
+///
 /// Default time poll interval in seconds.
 const DEFAULT_TIME_POLL_SECS: u64 = 1;
 
@@ -133,8 +139,9 @@ impl<'d> RtcTaskState<'d> {
             }
         }
 
-        // No HMI/MI - we use a software poll for time updates
-        // to avoid INT# conflicts with the hardware countdown timer.
+        // HMI/MI stay disabled - the PCF85063 latches TF prematurely
+        // when HMI is active on the shared INT# line. Clock redraws
+        // are driven by the 1 s software poll in `rtc_task` instead.
 
         Self { rtc, int_pin, poll_secs: DEFAULT_TIME_POLL_SECS }
     }
@@ -238,7 +245,10 @@ impl<'d> RtcTaskState<'d> {
             let _ = self.rtc.disable_timer(i2c);
             Some(SystemEvent::TimerExpired)
         } else {
-            Some(SystemEvent::HalfMinuteChanged)
+            // Unexpected: HMI/MI are never enabled, so INT# should
+            // only fire for alarm or timer. Log and swallow.
+            log::warn!("RTC: INT# fired with no AF/TF set - stray pulse");
+            None
         }
     }
 }

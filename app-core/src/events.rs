@@ -30,10 +30,6 @@ pub enum SystemEvent {
     Swipe { dir: SwipeDir, region: SwipeRegion },
 
     // -- Time --
-    /// Half-minute clock tick - emitted when the PCF85063
-    /// half-minute interrupt pulses INT# low at second=0 and
-    /// second=30 of every minute. Drives time-display redraws.
-    HalfMinuteChanged,
     /// RTC alarm fired (set via `Rtc::set_alarm`). The RTC task
     /// reads Control_2 on INT# fall and clears the alarm flag
     /// before emitting this event.
@@ -75,9 +71,9 @@ pub enum SystemEvent {
 
     // -- Snapshot refreshes --
     /// Fresh RTC snapshot (calendar date + time of day). Emitted
-    /// by the RTC task after every INT# fall, so `cached_data.time`
-    /// is updated alongside the triggering event
-    /// (HalfMinuteChanged / AlarmFired / TimerExpired).
+    /// by the RTC task every `poll_secs` from the software poll,
+    /// and also after any alarm/timer INT# so `cached_data.time`
+    /// is fresh alongside the triggering event.
     TimeUpdated {
         data: crate::data::TimeData,
     },
@@ -349,7 +345,6 @@ mod tests {
     #[test]
     fn log_classifier_skips_firehose_events() {
         // These fire at a rate that would swamp the log.
-        assert!(classify_for_log(&SystemEvent::HalfMinuteChanged).is_none());
         assert!(classify_for_log(&SystemEvent::TouchPressed { x: 0, y: 0 }).is_none());
         assert!(classify_for_log(&SystemEvent::TouchReleased).is_none());
     }

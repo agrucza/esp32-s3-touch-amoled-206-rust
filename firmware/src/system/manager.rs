@@ -488,6 +488,12 @@ impl SystemManager<'static> {
         cached_data.power = initial_power;
         cached_data.alarms = loaded_alarms;
         cached_data.storage = initial_usage;
+        // Back-fill the battery-history ring buffer from the flash
+        // log so the battery settings graph has something to render
+        // before the first new BatteryChanged event arrives.
+        crate::system::event_log::load_battery_history(
+            &mut store, &mut cached_data.battery_history,
+        );
 
         // Construct the Model (UI + cached state + dispatch).
         let model = app_core::model::Model::new(
@@ -900,9 +906,12 @@ impl SystemManager<'static> {
     /// when awake and `Model::needs_redraw()` is true.
     async fn render(&mut self) {
         let render_start = Instant::now();
-        // Copy the cache so we can freely borrow `&mut self.display`
-        // below. `SystemData` is `Copy`, so this is cheap.
-        let data = *self.model.cached_data();
+        // Clone the cache so we can freely borrow `&mut self.model`
+        // (for `screen_mut()`) alongside `&mut self.display` below.
+        // `SystemData` was `Copy` before `battery_history` landed;
+        // the per-frame clone cost is ~400 bytes, well below the
+        // render-time budget at any realistic frame cadence.
+        let data = self.model.cached_data().clone();
         self.display.clear(crate::ui::theme::BG).ok();
         self.model.screen_mut().render(&mut self.display, &data);
         if let Some(pct) = data.power.battery_percent {
