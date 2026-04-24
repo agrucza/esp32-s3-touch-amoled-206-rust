@@ -646,6 +646,19 @@ impl SystemManager<'static> {
                     self.store.probe_sd();
                     self.refresh_storage_usage().await;
                 }
+                Effect::RestoreFromSd => {
+                    log::info!("restore: copying config blobs from SD to flash");
+                    let (copied, skipped) = self.store
+                        .restore_config_from_sd(&[CONFIG_PATH, ALARMS_PATH]);
+                    log::info!(
+                        "restore: {} copied, {} skipped - resetting",
+                        copied, skipped,
+                    );
+                    // Brief yield so pending log writes and the
+                    // final UI render can land before the reset.
+                    Timer::after(Duration::from_millis(200)).await;
+                    esp_hal::system::software_reset();
+                }
                 Effect::SaveAlarms => {
                     self.store.save_blob(
                         ALARMS_PATH,

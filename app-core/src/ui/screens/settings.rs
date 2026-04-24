@@ -35,10 +35,11 @@ enum SettingsView {
     Clock,
     TimeEntry,
     DateEntry,
-    /// Storage sub-index. Routes to the three storage leaves below.
+    /// Storage sub-index. Routes to the storage leaves below.
     Storage,
     StorageFlash,
     StorageSd,
+    StorageRestoreFlash,
     StorageFactoryReset,
 }
 
@@ -100,6 +101,12 @@ fn storage_reset_value(_data: &SystemData) -> String<20> {
     String::new()
 }
 
+fn storage_restore_value(data: &SystemData) -> String<20> {
+    let mut buf = String::new();
+    let _ = buf.push_str(if data.storage.sd_online { "" } else { "SD NOT PRESENT" });
+    buf
+}
+
 const STORAGE_INDEX_ROWS: &[IndexRow] = &[
     IndexRow {
         label: "FLASH",
@@ -110,6 +117,11 @@ const STORAGE_INDEX_ROWS: &[IndexRow] = &[
         label: "SD CARD",
         value_fn: storage_sd_value,
         target: SettingsView::StorageSd,
+    },
+    IndexRow {
+        label: "RESTORE FROM SD",
+        value_fn: storage_restore_value,
+        target: SettingsView::StorageRestoreFlash,
     },
     IndexRow {
         label: "FACTORY RESET",
@@ -190,6 +202,7 @@ impl Screen for SettingsScreen {
             SettingsView::Storage => self.render_storage_index(display, data),
             SettingsView::StorageFlash => self.render_storage_flash(display, data),
             SettingsView::StorageSd => self.render_storage_sd(display, data),
+            SettingsView::StorageRestoreFlash => self.render_storage_restore(display, data),
             SettingsView::StorageFactoryReset => self.render_storage_factory_reset(display, data),
         }
     }
@@ -208,6 +221,7 @@ impl Screen for SettingsScreen {
             SettingsView::Storage => self.storage_index_event(event),
             SettingsView::StorageFlash => self.storage_flash_event(event),
             SettingsView::StorageSd => self.storage_sd_event(event),
+            SettingsView::StorageRestoreFlash => self.storage_restore_event(event, data),
             SettingsView::StorageFactoryReset => self.storage_factory_reset_event(event),
         }
     }
@@ -718,6 +732,94 @@ impl SettingsScreen {
                 let pt = Point::new(*x as i32, *y as i32);
                 if layout::content_card_rect(1).contains(pt) {
                     return Action::InitSd;
+                }
+                Action::None
+            }
+            SystemEvent::StorageUsageUpdated { .. } => Action::Redraw,
+            _ => Action::None,
+        }
+    }
+
+    // -- Restore-from-SD leaf (destructive, gated on SD online) --------------
+
+    fn render_storage_restore<D: DrawTarget<Color = Rgb565>>(
+        &self,
+        display: &mut D,
+        data: &SystemData,
+    ) {
+        header_bar(
+            display,
+            layout::header_rect(),
+            HeaderIcon::Back,
+            "RESTORE FROM SD",
+            theme::AMBER,
+        );
+
+        // Card 0: summary of what happens. Always present so the
+        // user has context whether SD is online or not.
+        let warn_rect = layout::content_card_rect(0);
+        card(display, warn_rect, CardStyle::DEFAULT.with_status_dot(theme::AMBER));
+        value_body(
+            display,
+            warn_rect,
+            "OVERWRITES",
+            "FLASH CONFIG + REBOOT",
+            theme::AMBER,
+        );
+
+        // Card 1: confirm target. Disabled (dimmed, different label)
+        // when the SD mirror isn't online - matches the InitSd row's
+        // gating idea but flipped: here offline is the blocker.
+        let confirm_rect = layout::content_card_rect(1);
+        if data.storage.sd_online {
+            card(display, confirm_rect, CardStyle::DEFAULT.with_status_dot(theme::AMBER));
+            value_body(
+                display,
+                confirm_rect,
+                "CONFIRM",
+                "TAP TO RESTORE",
+                theme::AMBER,
+            );
+        } else {
+            card(display, confirm_rect, dimmed(CardStyle::DEFAULT));
+            value_body(
+                display,
+                confirm_rect,
+                "CONFIRM",
+                "SD NOT PRESENT",
+                theme::TEXT_MUTED,
+            );
+        }
+    }
+
+    fn storage_restore_event(
+        &mut self,
+        event: &SystemEvent,
+        data: &SystemData,
+    ) -> Action {
+        match event {
+            SystemEvent::Tap { x, y } if layout::header_icon_hit(*x, *y) => {
+                self.view = SettingsView::Storage;
+                Action::Redraw
+            }
+            SystemEvent::Swipe {
+                dir: crate::events::SwipeDir::Right,
+                region: crate::events::SwipeRegion::Content,
+            } => {
+                self.view = SettingsView::Storage;
+                Action::Redraw
+            }
+            SystemEvent::Tap { x, y } => {
+                if !data.storage.sd_online {
+                    return Action::None;
+                }
+                let pt = Point::new(*x as i32, *y as i32);
+                if layout::content_card_rect(1).contains(pt) {
+                    // No bounce-back - the manager will software-
+                    // reset shortly after this returns, so the
+                    // next frame never draws. Leaving `view` on
+                    // StorageRestoreFlash is fine.
+                    return Action::RestoreFromSd;
                 }
                 Action::None
             }

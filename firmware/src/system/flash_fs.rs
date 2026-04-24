@@ -310,15 +310,40 @@ impl<'d> FlashFs<'d> {
     /// Read the entire file at `path` into a `Vec`. Returns `None`
     /// on missing file; logs a warning and returns `None` on other
     /// I/O errors so callers can treat "read failed" uniformly.
-    #[allow(dead_code)] // no live caller; kept to round out the backend contract and the Storage impl
     pub fn read_file(&mut self, path: &str) -> Option<Vec<u8>> {
         self.read_file_inner(path)
+    }
+
+    /// Enumerate regular files in `dir`, invoking `callback` with
+    /// each filename (no path prefix). Non-file entries and any
+    /// names that don't fit the internal scratch buffer are skipped.
+    /// Missing directory is a silent no-op - that's a legitimate
+    /// "nothing persisted yet" state, not an error.
+    ///
+    /// Used by `Store::backfill_config` to learn which blobs need
+    /// mirroring to SD on probe.
+    pub fn for_each_file<F>(&self, dir: &str, mut callback: F)
+    where
+        F: FnMut(&str) -> ControlFlow<()>,
+    {
+        let Ok(entries) = self.fs.list_dir(dir) else { return };
+        for entry in entries {
+            if entry.file_type != FileType::File {
+                continue;
+            }
+            let mut name: heapless::String<64> = heapless::String::new();
+            if core::fmt::Write::write_fmt(&mut name, format_args!("{}", entry.name)).is_err() {
+                continue;
+            }
+            if callback(&name).is_break() {
+                return;
+            }
+        }
     }
 
     /// Write `bytes` to `path`, creating or truncating the file.
     /// Parent directories must already exist (mount_or_format
     /// creates the `/system/` tree up front).
-    #[allow(dead_code)] // no live caller; kept to round out the backend contract and the Storage impl
     pub fn write_file(&mut self, path: &str, bytes: &[u8]) -> Result<(), LfsError> {
         self.fs.write_file(path, bytes)
     }

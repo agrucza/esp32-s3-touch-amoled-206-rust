@@ -145,6 +145,11 @@ pub enum Action {
     /// `SystemEvent::StorageUsageUpdated` so the screen reflects
     /// the new status.
     InitSd,
+    /// Restore the in-flash config blobs from the SD mirror, then
+    /// software-reset. Destructive; the UI wraps the trigger in a
+    /// confirm tap. Requires SD to be online - the Settings row is
+    /// disabled otherwise.
+    RestoreFromSd,
     /// Persist the current `AlarmState` to flash. Emitted by
     /// screens after they mutate `data.alarms`. Subsumes Redraw -
     /// returning this also triggers a redraw, so screens don't

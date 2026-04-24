@@ -145,7 +145,6 @@ impl<'d> SdFs<'d> {
     /// Read the entire file at `path` into a `Vec`. Returns
     /// `None` on missing file; warns-and-returns-`None` on other
     /// I/O errors so callers can treat "read failed" uniformly.
-    #[allow(dead_code)] // only live caller is `Store::load_blob_sd`, which is itself dead scaffolding
     pub fn read_file(&mut self, path: &str) -> Option<Vec<u8>> {
         let result = self.with_file(path, FileMode::ReadOnly, false, |vol, file| {
             let len = vol.file_length(file)? as usize;

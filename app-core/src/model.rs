@@ -85,6 +85,13 @@ pub enum Effect {
     /// sees the new status.
     ProbeSd,
 
+    /// Restore flash-side config blobs from the SD mirror, then
+    /// software-reset. The in-memory Model still holds pre-restore
+    /// state, so proceeding without a reset would let the next
+    /// save_blob clobber the freshly-restored flash. The reset also
+    /// sidesteps mid-alarm / mid-timer edge cases.
+    RestoreFromSd,
+
     /// Persist the current `AlarmState` to
     /// `/system/config/alarms.bin` on flash. Triggered when a
     /// screen returns `Action::PersistAlarms` after mutating the
@@ -431,6 +438,10 @@ impl Model {
             }
             Action::InitSd => {
                 let _ = out.push(Effect::ProbeSd);
+                self.needs_redraw = true;
+            }
+            Action::RestoreFromSd => {
+                let _ = out.push(Effect::RestoreFromSd);
                 self.needs_redraw = true;
             }
             Action::PersistAlarms => {
