@@ -48,10 +48,10 @@ pub const fn header_rect() -> Rectangle {
 
 // -- Hero pill ---------------------------------------------------------------
 
-/// Width of the amber hero pill (clock, stopwatch, future timer).
+/// Width of the signal hero pill (clock, stopwatch, future timer).
 pub const HERO_PILL_W: i32 = 320;
 
-/// Height of the amber hero pill.
+/// Height of the signal hero pill.
 pub const HERO_PILL_H: i32 = 130;
 
 /// Top of the hero pill, measured from the framebuffer top.

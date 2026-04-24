@@ -7,8 +7,13 @@
 //! `view` to the corresponding sub-view; tapping the back chevron
 //! returns to Index.
 //!
-//! Visual style matches the widget-layer "All Bookings" reference -
-//! all content is built from [`card`] + [`value_body`] + [`header_bar`].
+//! Chrome follows the Nightwatch vocabulary: every sub-view shares a
+//! [`header`] bar with chevron-left + title + right-aligned
+//! telemetry + a 1-px signal hairline underline. The Index itself is
+//! a stack of [`row`]s (icon / uppercase label / right control);
+//! the leaf sub-views still use the rounded `card` + `value_body`
+//! vocabulary inside, since those fit the tabular diagnostic data
+//! better than a flat row list.
 
 use embedded_graphics::{
     draw_target::DrawTarget,
@@ -19,13 +24,61 @@ use embedded_graphics::{
 use heapless::String;
 use core::fmt::Write;
 
-use crate::ui::{fonts, layout, theme};
+use crate::ui::{fonts, glyphs, layout, theme};
 use crate::ui::types::{
     Action, Screen, SelfTestId, SelfTestResult, SystemData, SystemEvent,
 };
 use crate::ui::widgets::{
-    card, header_bar, value_body, CardStyle, HeaderIcon, Numpad, NumpadAction, MAX_DIGITS,
+    card, chamfered_panel, header, header_icon_hit, row, tag_label, value_body,
+    CardStyle, RowControl,
+    Numpad, NumpadAction, NOTCH, ROW_H, MAX_DIGITS,
 };
+
+// -- Settings chrome helpers -------------------------------------------------
+
+/// Top of the Nightwatch header bar on settings sub-views.
+const HDR_TOP: i32 = 30;
+/// Height of the Nightwatch header bar (see [`widgets::HEADER_H`]).
+const HDR_H: i32 = 28;
+
+/// Header rect shared by every settings sub-view.
+fn hdr_rect() -> Rectangle {
+    Rectangle::new(
+        Point::new(0, HDR_TOP),
+        Size::new(theme::SCREEN_W as u32, HDR_H as u32),
+    )
+}
+
+/// Draw the standard Nightwatch settings header with `title` and a
+/// fixed `SYS.CFG` telemetry on the right. `accent` tints the
+/// chevron, title, and hairline.
+fn draw_header<D: DrawTarget<Color = Rgb565>>(
+    display: &mut D, title: &str, accent: Rgb565,
+) {
+    header(display, hdr_rect(), title, "SYS.CFG", accent);
+}
+
+/// Y of the first row below the settings header.
+const ROWS_TOP: i32 = HDR_TOP + HDR_H + 8;
+
+/// Rect for the Nth row in the settings Index / Storage sub-index.
+///
+/// Rows span the full screen width; the `row` widget's internal
+/// `ROW_PAD` keeps the icon, label, and hairline visually inset from
+/// the bezel arc on its own. Letting the rect go edge-to-edge means
+/// the row reads as a real list row rather than a floating panel.
+fn row_rect(index: usize) -> Rectangle {
+    let y = ROWS_TOP + index as i32 * ROW_H;
+    Rectangle::new(
+        Point::new(0, y),
+        Size::new(theme::SCREEN_W as u32, ROW_H as u32),
+    )
+}
+
+/// Hit test the back chevron in the settings Nightwatch header.
+fn header_back_hit(x: u16, y: u16) -> bool {
+    header_icon_hit(x, y, hdr_rect())
+}
 
 // -- View enum ---------------------------------------------------------------
 
@@ -48,8 +101,43 @@ enum SettingsView {
 
 // -- Index row metadata ------------------------------------------------------
 
+/// Per-row icon. Rust can't coerce a generic `fn(..D..)` into a
+/// non-generic function pointer, so we enum-dispatch to pick one of
+/// a closed set of glyphs at render time (same pattern the App
+/// Drawer uses).
+#[derive(Clone, Copy)]
+enum RowIcon {
+    Clock,
+    Battery,
+    Imu,
+    Storage,
+    Flash,
+    SdCard,
+    Restore,
+    Skull,
+    NightMode,
+}
+
+fn draw_row_icon<D: DrawTarget<Color = Rgb565>>(
+    display: &mut D, kind: RowIcon, cx: i32, cy: i32, color: Rgb565,
+) {
+    let r = 8;
+    match kind {
+        RowIcon::Clock     => glyphs::clock(display, cx, cy, r, color),
+        RowIcon::Battery   => glyphs::battery(display, cx, cy, r, color),
+        RowIcon::Imu       => glyphs::imu(display, cx, cy, r, color),
+        RowIcon::Storage   => glyphs::chip(display, cx, cy, r, color),
+        RowIcon::Flash     => glyphs::chip(display, cx, cy, r, color),
+        RowIcon::SdCard    => glyphs::sd_card(display, cx, cy, r, color),
+        RowIcon::Restore   => glyphs::chip(display, cx, cy, r, color),
+        RowIcon::Skull     => glyphs::skull(display, cx, cy, r, color),
+        RowIcon::NightMode => glyphs::moon(display, cx, cy, r, color),
+    }
+}
+
 struct IndexRow {
     label: &'static str,
+    icon: RowIcon,
     value_fn: fn(&SystemData) -> String<20>,
     target: SettingsView,
 }
@@ -122,21 +210,25 @@ fn storage_restore_value(data: &SystemData) -> String<20> {
 const STORAGE_INDEX_ROWS: &[IndexRow] = &[
     IndexRow {
         label: "FLASH",
+        icon: RowIcon::Flash,
         value_fn: storage_flash_value,
         target: SettingsView::StorageFlash,
     },
     IndexRow {
         label: "SD CARD",
+        icon: RowIcon::SdCard,
         value_fn: storage_sd_value,
         target: SettingsView::StorageSd,
     },
     IndexRow {
         label: "RESTORE FROM SD",
+        icon: RowIcon::Restore,
         value_fn: storage_restore_value,
         target: SettingsView::StorageRestoreFlash,
     },
     IndexRow {
         label: "FACTORY RESET",
+        icon: RowIcon::Skull,
         value_fn: storage_reset_value,
         target: SettingsView::StorageFactoryReset,
     },
@@ -145,21 +237,25 @@ const STORAGE_INDEX_ROWS: &[IndexRow] = &[
 const INDEX_ROWS: &[IndexRow] = &[
     IndexRow {
         label: "CLOCK",
+        icon: RowIcon::Clock,
         value_fn: clock_value,
         target: SettingsView::Clock,
     },
     IndexRow {
         label: "BATTERY",
+        icon: RowIcon::Battery,
         value_fn: battery_value,
         target: SettingsView::Battery,
     },
     IndexRow {
         label: "6-AXIS IMU",
+        icon: RowIcon::Imu,
         value_fn: imu_value,
         target: SettingsView::Imu,
     },
     IndexRow {
         label: "STORAGE",
+        icon: RowIcon::Storage,
         value_fn: storage_value,
         target: SettingsView::Storage,
     },
@@ -195,6 +291,10 @@ const NUMPAD_TIME_Y: i32 = 90;
 pub struct SettingsScreen {
     view: SettingsView,
     numpad: Numpad,
+    /// Screen-local Night Mode flag. Not persisted - this row is a
+    /// demo of the Nightwatch toggle widget; wire to `config.night_mode`
+    /// once that preference is added to `Config`.
+    night_mode: bool,
 }
 
 impl SettingsScreen {
@@ -202,6 +302,7 @@ impl SettingsScreen {
         Self {
             view: SettingsView::Index,
             numpad: Numpad::new(6),
+            night_mode: false,
         }
     }
 }
@@ -252,35 +353,37 @@ impl SettingsScreen {
     fn render_index<D: DrawTarget<Color = Rgb565>>(
         &self, display: &mut D, data: &SystemData,
     ) {
-        header_bar(
-            display,
-            layout::header_rect(),
-            HeaderIcon::Close,
-            "SETTINGS",
-            theme::AMBER,
-        );
+        draw_header(display, "SETTINGS", theme::SIGNAL);
+        render_rows(display, data, INDEX_ROWS);
 
-        for (i, row) in INDEX_ROWS.iter().enumerate() {
-            let rect = layout::content_card_rect(i);
-            card(display, rect, CardStyle::DEFAULT);
-            let val = (row.value_fn)(data);
-            value_body(display, rect, row.label, val.as_str(), theme::TEXT_WHITE);
-        }
+        // Night Mode toggle row. Not backed by persisted config yet;
+        // kept in-session on the SettingsScreen struct so we can
+        // demo the Nightwatch toggle widget live.
+        let rect = row_rect(INDEX_ROWS.len());
+        row(
+            display, rect,
+            |d, cx, cy, c| draw_row_icon(d, RowIcon::NightMode, cx, cy, c),
+            theme::CYAN,
+            "NIGHT MODE",
+            RowControl::Toggle(self.night_mode),
+        );
     }
 
     fn index_event(&mut self, event: &SystemEvent) -> Action {
         match event {
-            SystemEvent::Tap { x, y } if layout::header_icon_hit(*x, *y) => {
+            SystemEvent::Tap { x, y } if header_back_hit(*x, *y) => {
                 Action::Back
             }
             SystemEvent::Tap { x, y } => {
-                for (i, row) in INDEX_ROWS.iter().enumerate() {
-                    if layout::content_card_rect(i)
-                        .contains(Point::new(*x as i32, *y as i32))
-                    {
-                        self.view = row.target;
-                        return Action::Redraw;
-                    }
+                if let Some(target) = row_hit(*x, *y, INDEX_ROWS) {
+                    self.view = target;
+                    return Action::Redraw;
+                }
+                // Night Mode row lives at index INDEX_ROWS.len().
+                let pt = Point::new(*x as i32, *y as i32);
+                if row_rect(INDEX_ROWS.len()).contains(pt) {
+                    self.night_mode = !self.night_mode;
+                    return Action::Redraw;
                 }
                 Action::None
             }
@@ -289,19 +392,53 @@ impl SettingsScreen {
     }
 }
 
+// -- Shared row rendering / hit-testing for index + storage sub-index --------
+
+/// Render a stack of [`IndexRow`]s using `nightwatch::row`. The right
+/// control is an inline mono value per row; empty strings collapse
+/// into no inline text (bare row) so the row reads as a drill-in
+/// without redundant chevron noise.
+fn render_rows<D: DrawTarget<Color = Rgb565>>(
+    display: &mut D, data: &SystemData, rows: &[IndexRow],
+) {
+    for (i, r) in rows.iter().enumerate() {
+        let rect = row_rect(i);
+        let val = (r.value_fn)(data);
+        let kind = r.icon;
+        let control = if val.is_empty() {
+            RowControl::Chevron(theme::CYAN)
+        } else {
+            RowControl::Inline(val.as_str(), theme::FG_MUTED)
+        };
+        row(
+            display, rect,
+            |d, cx, cy, c| draw_row_icon(d, kind, cx, cy, c),
+            theme::CYAN,
+            r.label,
+            control,
+        );
+    }
+}
+
+/// Row hit test: if `(x, y)` lands in any row's rect, return that
+/// row's target view.
+fn row_hit(x: u16, y: u16, rows: &[IndexRow]) -> Option<SettingsView> {
+    let pt = Point::new(x as i32, y as i32);
+    for (i, r) in rows.iter().enumerate() {
+        if row_rect(i).contains(pt) {
+            return Some(r.target);
+        }
+    }
+    None
+}
+
 // -- Clock sub-view (time + date cards) --------------------------------------
 
 impl SettingsScreen {
     fn render_clock<D: DrawTarget<Color = Rgb565>>(
         &self, display: &mut D, data: &SystemData,
     ) {
-        header_bar(
-            display,
-            layout::header_rect(),
-            HeaderIcon::Back,
-            "CLOCK",
-            theme::AMBER,
-        );
+        draw_header(display, "CLOCK", theme::SIGNAL);
 
         // Time card.
         let rect = layout::content_card_rect(0);
@@ -309,7 +446,7 @@ impl SettingsScreen {
         let mut time_buf: String<12> = String::new();
         let _ = write!(time_buf, "{:02}:{:02}:{:02}",
             data.time.hour, data.time.minute, data.time.second);
-        value_body(display, rect, "TIME", time_buf.as_str(), theme::TEXT_WHITE);
+        value_body(display, rect, "TIME", time_buf.as_str(), theme::FG);
 
         // Date card.
         let rect = layout::content_card_rect(1);
@@ -317,7 +454,7 @@ impl SettingsScreen {
         let mut date_buf: String<12> = String::new();
         let _ = write!(date_buf, "{:02}.{:02}.{:04}",
             data.time.day, data.time.month, data.time.year);
-        value_body(display, rect, "DATE", date_buf.as_str(), theme::TEXT_WHITE);
+        value_body(display, rect, "DATE", date_buf.as_str(), theme::FG);
     }
 
     fn clock_event(&mut self, event: &SystemEvent, data: &SystemData) -> Action {
@@ -325,7 +462,7 @@ impl SettingsScreen {
             // Keep the display fresh.
             SystemEvent::TimeUpdated { .. } => Action::Redraw,
 
-            SystemEvent::Tap { x, y } if layout::header_icon_hit(*x, *y) => {
+            SystemEvent::Tap { x, y } if header_back_hit(*x, *y) => {
                 self.view = SettingsView::Index;
                 Action::Redraw
             }
@@ -379,13 +516,7 @@ impl SettingsScreen {
     fn render_time_entry<D: DrawTarget<Color = Rgb565>>(
         &self, display: &mut D, _data: &SystemData,
     ) {
-        header_bar(
-            display,
-            layout::header_rect(),
-            HeaderIcon::Back,
-            "SET TIME",
-            theme::AMBER,
-        );
+        draw_header(display, "SET TIME", theme::SIGNAL);
 
         // HH:MM:SS label from digits.
         let p = pad_digits(&self.numpad.digits, 6);
@@ -396,7 +527,7 @@ impl SettingsScreen {
             display, &fonts::value(),
             &buf,
             theme::SCREEN_W as i32 / 2, NUMPAD_TIME_Y,
-            theme::AMBER,
+            theme::SIGNAL,
         );
 
         self.numpad.render(display);
@@ -404,7 +535,7 @@ impl SettingsScreen {
 
     fn time_entry_event(&mut self, event: &SystemEvent, data: &mut SystemData) -> Action {
         match event {
-            SystemEvent::Tap { x, y } if layout::header_icon_hit(*x, *y) => {
+            SystemEvent::Tap { x, y } if header_back_hit(*x, *y) => {
                 self.numpad = Numpad::new(6);
                 self.view = SettingsView::Clock;
                 Action::Redraw
@@ -456,13 +587,7 @@ impl SettingsScreen {
     fn render_date_entry<D: DrawTarget<Color = Rgb565>>(
         &self, display: &mut D, _data: &SystemData,
     ) {
-        header_bar(
-            display,
-            layout::header_rect(),
-            HeaderIcon::Back,
-            "SET DATE",
-            theme::AMBER,
-        );
+        draw_header(display, "SET DATE", theme::SIGNAL);
 
         // DD.MM.YYYY label from digits.
         let p = pad_digits(&self.numpad.digits, 8);
@@ -473,7 +598,7 @@ impl SettingsScreen {
             display, &fonts::value(),
             &buf,
             theme::SCREEN_W as i32 / 2, NUMPAD_TIME_Y,
-            theme::AMBER,
+            theme::SIGNAL,
         );
 
         self.numpad.render(display);
@@ -481,7 +606,7 @@ impl SettingsScreen {
 
     fn date_entry_event(&mut self, event: &SystemEvent, data: &mut SystemData) -> Action {
         match event {
-            SystemEvent::Tap { x, y } if layout::header_icon_hit(*x, *y) => {
+            SystemEvent::Tap { x, y } if header_back_hit(*x, *y) => {
                 self.numpad = Numpad::new(6);
                 self.view = SettingsView::Clock;
                 Action::Redraw
@@ -535,13 +660,7 @@ impl SettingsScreen {
         display: &mut D,
         data: &SystemData,
     ) {
-        header_bar(
-            display,
-            layout::header_rect(),
-            HeaderIcon::Back,
-            "6-AXIS IMU",
-            theme::AMBER,
-        );
+        draw_header(display, "6-AXIS IMU", theme::SIGNAL);
 
         for (i, test) in IMU_TESTS.iter().enumerate() {
             let rect = layout::content_card_rect(i);
@@ -565,7 +684,7 @@ impl SettingsScreen {
 
     fn imu_event(&mut self, event: &SystemEvent) -> Action {
         match event {
-            SystemEvent::Tap { x, y } if layout::header_icon_hit(*x, *y) => {
+            SystemEvent::Tap { x, y } if header_back_hit(*x, *y) => {
                 self.view = SettingsView::Index;
                 Action::Redraw
             }
@@ -599,13 +718,7 @@ impl SettingsScreen {
         display: &mut D,
         data: &SystemData,
     ) {
-        header_bar(
-            display,
-            layout::header_rect(),
-            HeaderIcon::Back,
-            "BATTERY",
-            theme::AMBER,
-        );
+        draw_header(display, "BATTERY", theme::SIGNAL);
 
         // Status card: current percent + voltage (from the live
         // PowerData snapshot, not from the history). History is for
@@ -620,7 +733,7 @@ impl SettingsScreen {
             (Some(pct), None) => { let _ = write!(val, "{}%", pct); }
             _                  => { let _ = val.push_str("--"); }
         }
-        value_body(display, status_rect, "NOW", val.as_str(), theme::TEXT_WHITE);
+        value_body(display, status_rect, "NOW", val.as_str(), theme::FG);
 
         // Graph panel below the status card. Custom geometry: a
         // single wide rect that holds gridlines + polyline. Height
@@ -633,7 +746,7 @@ impl SettingsScreen {
 
     fn battery_event(&mut self, event: &SystemEvent) -> Action {
         match event {
-            SystemEvent::Tap { x, y } if layout::header_icon_hit(*x, *y) => {
+            SystemEvent::Tap { x, y } if header_back_hit(*x, *y) => {
                 self.view = SettingsView::Index;
                 Action::Redraw
             }
@@ -672,25 +785,13 @@ impl SettingsScreen {
         display: &mut D,
         data: &SystemData,
     ) {
-        header_bar(
-            display,
-            layout::header_rect(),
-            HeaderIcon::Back,
-            "STORAGE",
-            theme::AMBER,
-        );
-
-        for (i, row) in STORAGE_INDEX_ROWS.iter().enumerate() {
-            let rect = layout::content_card_rect(i);
-            card(display, rect, CardStyle::DEFAULT);
-            let val = (row.value_fn)(data);
-            value_body(display, rect, row.label, val.as_str(), theme::TEXT_WHITE);
-        }
+        draw_header(display, "STORAGE", theme::SIGNAL);
+        render_rows(display, data, STORAGE_INDEX_ROWS);
     }
 
     fn storage_index_event(&mut self, event: &SystemEvent) -> Action {
         match event {
-            SystemEvent::Tap { x, y } if layout::header_icon_hit(*x, *y) => {
+            SystemEvent::Tap { x, y } if header_back_hit(*x, *y) => {
                 self.view = SettingsView::Index;
                 Action::Redraw
             }
@@ -702,12 +803,9 @@ impl SettingsScreen {
                 Action::Redraw
             }
             SystemEvent::Tap { x, y } => {
-                let pt = Point::new(*x as i32, *y as i32);
-                for (i, row) in STORAGE_INDEX_ROWS.iter().enumerate() {
-                    if layout::content_card_rect(i).contains(pt) {
-                        self.view = row.target;
-                        return Action::Redraw;
-                    }
+                if let Some(target) = row_hit(*x, *y, STORAGE_INDEX_ROWS) {
+                    self.view = target;
+                    return Action::Redraw;
                 }
                 Action::None
             }
@@ -723,16 +821,37 @@ impl SettingsScreen {
         display: &mut D,
         data: &SystemData,
     ) {
-        header_bar(
+        draw_header(display, "FLASH", theme::SIGNAL);
+
+        // Chamfered HUD panel with a hanging FLASH tag ribbon - the
+        // spec's "tag-labelled panel" idiom. Body carries the usage
+        // numbers as mono-ish body text.
+        let margin = 28i32;
+        let panel_w = theme::SCREEN_W as i32 - margin * 2;
+        let panel_h = 120i32;
+        let panel_rect = Rectangle::new(
+            Point::new(margin, ROWS_TOP + 24),
+            Size::new(panel_w as u32, panel_h as u32),
+        );
+        // Symmetric chamfered panel (Nightwatch default - TL + BR both cut).
+        chamfered_panel(display, panel_rect, NOTCH, theme::SIGNAL, 1);
+
+        // Tag ribbon sits exactly at the panel's TL corner. Its own
+        // TL chamfer of size NOTCH carves out the same triangular
+        // area as the panel's TL chamfer so the two align pixel-
+        // for-pixel.
+        tag_label(
             display,
-            layout::header_rect(),
-            HeaderIcon::Back,
+            panel_rect.top_left.x,
+            panel_rect.top_left.y,
             "FLASH",
-            theme::AMBER,
+            theme::SIGNAL,
+            NOTCH,
         );
 
-        let rect = layout::content_card_rect(0);
-        card(display, rect, CardStyle::DEFAULT);
+        // Interior: usage line centered vertically in the full panel
+        // rect. The tag sits in the top-left corner and doesn't
+        // interfere with a single centered line of body text.
         let mut buf: String<32> = String::new();
         let _ = write!(
             buf,
@@ -740,12 +859,15 @@ impl SettingsScreen {
             data.storage.files,
             data.storage.total_bytes / 1024,
         );
-        value_body(display, rect, "USAGE", buf.as_str(), theme::TEXT_WHITE);
+        fonts::draw_centered_in_rect(
+            display, &fonts::value(),
+            buf.as_str(), panel_rect, theme::FG,
+        );
     }
 
     fn storage_flash_event(&mut self, event: &SystemEvent) -> Action {
         match event {
-            SystemEvent::Tap { x, y } if layout::header_icon_hit(*x, *y) => {
+            SystemEvent::Tap { x, y } if header_back_hit(*x, *y) => {
                 self.view = SettingsView::Storage;
                 Action::Redraw
             }
@@ -768,21 +890,15 @@ impl SettingsScreen {
         display: &mut D,
         data: &SystemData,
     ) {
-        header_bar(
-            display,
-            layout::header_rect(),
-            HeaderIcon::Back,
-            "SD CARD",
-            theme::AMBER,
-        );
+        draw_header(display, "SD CARD", theme::SIGNAL);
 
-        // Card 0: status line. Green dot when online, amber when
+        // Card 0: status line. Green dot when online, yellow when
         // not. Read-only; the button below triggers the probe.
         let status_rect = layout::content_card_rect(0);
         let (dot, status_text, status_color) = if data.storage.sd_online {
-            (theme::GREEN, "ONLINE",      theme::TEXT_WHITE)
+            (theme::GREEN, "ONLINE",      theme::FG)
         } else {
-            (theme::AMBER, "NOT PRESENT", theme::AMBER)
+            (theme::SIGNAL, "NOT PRESENT", theme::SIGNAL)
         };
         card(display, status_rect, CardStyle::DEFAULT.with_status_dot(dot));
         value_body(display, status_rect, "STATUS", status_text, status_color);
@@ -791,12 +907,12 @@ impl SettingsScreen {
         let probe_rect = layout::content_card_rect(1);
         card(display, probe_rect, CardStyle::DEFAULT);
         let probe_text = if data.storage.sd_online { "TAP TO REPROBE" } else { "TAP TO INITIALIZE" };
-        value_body(display, probe_rect, "PROBE", probe_text, theme::TEXT_WHITE);
+        value_body(display, probe_rect, "PROBE", probe_text, theme::FG);
     }
 
     fn storage_sd_event(&mut self, event: &SystemEvent) -> Action {
         match event {
-            SystemEvent::Tap { x, y } if layout::header_icon_hit(*x, *y) => {
+            SystemEvent::Tap { x, y } if header_back_hit(*x, *y) => {
                 self.view = SettingsView::Storage;
                 Action::Redraw
             }
@@ -826,24 +942,18 @@ impl SettingsScreen {
         display: &mut D,
         data: &SystemData,
     ) {
-        header_bar(
-            display,
-            layout::header_rect(),
-            HeaderIcon::Back,
-            "RESTORE FROM SD",
-            theme::AMBER,
-        );
+        draw_header(display, "RESTORE FROM SD", theme::SIGNAL);
 
         // Card 0: summary of what happens. Always present so the
         // user has context whether SD is online or not.
         let warn_rect = layout::content_card_rect(0);
-        card(display, warn_rect, CardStyle::DEFAULT.with_status_dot(theme::AMBER));
+        card(display, warn_rect, CardStyle::DEFAULT.with_status_dot(theme::SIGNAL));
         value_body(
             display,
             warn_rect,
             "OVERWRITES",
             "FLASH CONFIG + REBOOT",
-            theme::AMBER,
+            theme::SIGNAL,
         );
 
         // Card 1: confirm target. Disabled (dimmed, different label)
@@ -851,13 +961,13 @@ impl SettingsScreen {
         // gating idea but flipped: here offline is the blocker.
         let confirm_rect = layout::content_card_rect(1);
         if data.storage.sd_online {
-            card(display, confirm_rect, CardStyle::DEFAULT.with_status_dot(theme::AMBER));
+            card(display, confirm_rect, CardStyle::DEFAULT.with_status_dot(theme::SIGNAL));
             value_body(
                 display,
                 confirm_rect,
                 "CONFIRM",
                 "TAP TO RESTORE",
-                theme::AMBER,
+                theme::SIGNAL,
             );
         } else {
             card(display, confirm_rect, dimmed(CardStyle::DEFAULT));
@@ -866,7 +976,7 @@ impl SettingsScreen {
                 confirm_rect,
                 "CONFIRM",
                 "SD NOT PRESENT",
-                theme::TEXT_MUTED,
+                theme::FG_DIM,
             );
         }
     }
@@ -877,7 +987,7 @@ impl SettingsScreen {
         data: &SystemData,
     ) -> Action {
         match event {
-            SystemEvent::Tap { x, y } if layout::header_icon_hit(*x, *y) => {
+            SystemEvent::Tap { x, y } if header_back_hit(*x, *y) => {
                 self.view = SettingsView::Storage;
                 Action::Redraw
             }
@@ -914,40 +1024,34 @@ impl SettingsScreen {
         display: &mut D,
         _data: &SystemData,
     ) {
-        header_bar(
-            display,
-            layout::header_rect(),
-            HeaderIcon::Back,
-            "FACTORY RESET",
-            theme::RED,
-        );
+        draw_header(display, "FACTORY RESET", theme::DANGER);
 
         // Card 0: warning summary (read-only).
         let warn_rect = layout::content_card_rect(0);
-        card(display, warn_rect, CardStyle::DEFAULT.with_status_dot(theme::RED));
+        card(display, warn_rect, CardStyle::DEFAULT.with_status_dot(theme::DANGER));
         value_body(
             display,
             warn_rect,
             "WARNING",
             "WIPES CONFIG + LOGS",
-            theme::RED,
+            theme::DANGER,
         );
 
         // Card 1: confirmation tap target.
         let confirm_rect = layout::content_card_rect(1);
-        card(display, confirm_rect, CardStyle::DEFAULT.with_status_dot(theme::RED));
+        card(display, confirm_rect, CardStyle::DEFAULT.with_status_dot(theme::DANGER));
         value_body(
             display,
             confirm_rect,
             "CONFIRM",
             "TAP TO WIPE",
-            theme::RED,
+            theme::DANGER,
         );
     }
 
     fn storage_factory_reset_event(&mut self, event: &SystemEvent) -> Action {
         match event {
-            SystemEvent::Tap { x, y } if layout::header_icon_hit(*x, *y) => {
+            SystemEvent::Tap { x, y } if header_back_hit(*x, *y) => {
                 self.view = SettingsView::Storage;
                 Action::Redraw
             }
@@ -997,29 +1101,29 @@ fn format_result(
     match result {
         SelfTestResult::NotRun => {
             let _ = buf.push_str("--");
-            (buf, theme::TEXT_MUTED, None)
+            (buf, theme::FG_DIM, None)
         }
         SelfTestResult::Running => {
             let _ = buf.push_str("RUNNING");
-            (buf, theme::TEXT_DIM, Some(theme::AMBER))
+            (buf, theme::FG_MUTED, Some(theme::SIGNAL))
         }
         SelfTestResult::PassAxes3(v) => {
             let _ = write!(&mut buf, "{} {} {} {}", v[0], v[1], v[2], unit);
-            (buf, theme::TEXT_WHITE, Some(theme::GREEN))
+            (buf, theme::FG, Some(theme::GREEN))
         }
         SelfTestResult::FailAxes3(v) => {
             let _ = write!(&mut buf, "{} {} {} {}", v[0], v[1], v[2], unit);
-            (buf, theme::RED, Some(theme::RED))
+            (buf, theme::DANGER, Some(theme::DANGER))
         }
         SelfTestResult::Error(_) => {
             let _ = buf.push_str("ERROR");
-            (buf, theme::RED, Some(theme::RED))
+            (buf, theme::DANGER, Some(theme::DANGER))
         }
     }
 }
 
 fn dimmed(mut style: CardStyle) -> CardStyle {
-    style.bg = theme::TEXT_MUTED;
+    style.bg = theme::FG_DIM;
     style
 }
 
@@ -1042,7 +1146,7 @@ fn graph_rect() -> Rectangle {
 
 /// Render the battery history as a polyline inside `rect`. Draws
 /// faint horizontal gridlines at 25/50/75% and connects consecutive
-/// samples with short line segments in amber. Empty history gets a
+/// samples with short line segments in the battery color. Empty history gets a
 /// centered "NO DATA" caption instead.
 fn draw_battery_graph<D: DrawTarget<Color = Rgb565>>(
     display: &mut D,
@@ -1060,7 +1164,7 @@ fn draw_battery_graph<D: DrawTarget<Color = Rgb565>>(
     );
 
     // Horizontal gridlines at 25 / 50 / 75 percent.
-    let grid_style = PrimitiveStyle::with_stroke(theme::TEXT_MUTED, 1);
+    let grid_style = PrimitiveStyle::with_stroke(theme::FG_DIM, 1);
     let left  = plot.top_left.x;
     let right = plot.top_left.x + plot.size.width as i32;
     for pct in [25, 50, 75] {
@@ -1072,7 +1176,7 @@ fn draw_battery_graph<D: DrawTarget<Color = Rgb565>>(
     // Empty state: centered caption.
     if history.is_empty() {
         fonts::draw_centered_in_rect(
-            display, &fonts::body(), "NO DATA", plot, theme::TEXT_MUTED,
+            display, &fonts::body(), "NO DATA", plot, theme::FG_DIM,
         );
         return;
     }
@@ -1093,7 +1197,7 @@ fn draw_battery_graph<D: DrawTarget<Color = Rgb565>>(
     };
 
     // Color each segment by the *lower* of its two endpoint
-    // percents, so the line turns amber / red the instant it drops
+    // percents, so the line turns yellow / red the instant it drops
     // into a warning band. Matches the palette `battery_color` uses
     // for the battery icon elsewhere in the UI.
     let mut prev: Option<(Point, u8)> = None;

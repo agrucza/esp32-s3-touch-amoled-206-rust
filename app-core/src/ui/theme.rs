@@ -1,31 +1,106 @@
-//! Modern smartwatch palette: warm amber on pure black, with white as
-//! the primary text color and grey for secondary labels. Inspired by
-//! contemporary travel/utility watch UI concepts (filled rounded
-//! cards, amber pills, soft hierarchy).
+//! Nightwatch OS palette - Cyberpunk 2077-inspired HUD tokens.
+//!
+//! All colors are full-saturation to fake emission on the AMOLED.
+//! Only `#000000` is acceptable as a background - anywhere a "dark
+//! surface" is needed, use `INK` or `INK_2` (near-black panel tints),
+//! never grey. Borders are accent-colored when active, `STEEL` only
+//! when the control is disabled.
+//!
+//! Layer convention:
+//! * `BG` / `INK*` - surfaces, filled rectangles
+//! * `STEEL*` / `CHROME` / `BONE` - neutrals for dividers, muted text,
+//!   body text
+//! * `SIGNAL` / `CYAN` / `YELLOW` / `GREEN` / `ORANGE` - accents; one
+//!   dominant accent per screen. Signal red is the default HUD chrome;
+//!   cyan is secondary (labels, info); yellow is reserved for the
+//!   active-tab state; green = ok; orange = media.
+//!
+//! Semantic aliases (`FG`, `FG_MUTED`, `DANGER`, ...) are resolved at
+//! compile time to one of the palette constants, so screens can
+//! reference intent rather than color and the palette can shift
+//! centrally.
 
 use embedded_graphics::pixelcolor::Rgb565;
 
-// -- Palette -----------------------------------------------------------------
+// -- Neutrals ---------------------------------------------------------------
 
-/// Pure black so AMOLED pixels stay off.
-pub const BG:         Rgb565 = Rgb565::new(0, 0, 0);
-/// Subtle dark grey for filled cards / panel surfaces - barely above
-/// black but visibly raised against the BG.
-pub const PANEL_BG:   Rgb565 = Rgb565::new(4, 8, 4);
-/// Warm orange-amber (~#FFAA00). The hero accent color.
-pub const AMBER:      Rgb565 = Rgb565::new(31, 42, 0);
-/// Dim amber for inactive borders, dim bar troughs.
-pub const AMBER_DIM:  Rgb565 = Rgb565::new(12, 18, 0);
-/// Primary text color: pure white for titles and key data values.
-pub const TEXT_WHITE: Rgb565 = Rgb565::new(31, 63, 31);
-/// Secondary text: medium grey (~#808080) for labels and captions.
-pub const TEXT_DIM:   Rgb565 = Rgb565::new(16, 32, 16);
-/// Tertiary text: darker grey for inactive/placeholder labels.
-pub const TEXT_MUTED: Rgb565 = Rgb565::new(10, 20, 10);
-/// Notification green.
-pub const GREEN:      Rgb565 = Rgb565::new(0, 50, 10);
-/// Warning red.
-pub const RED:        Rgb565 = Rgb565::new(31, 0, 2);
+/// True black - the only acceptable background on AMOLED.
+pub const BG:      Rgb565 = Rgb565::new(0, 0, 0);
+/// Near-black panel fill (#050608).
+pub const INK:     Rgb565 = Rgb565::new(0, 1, 1);
+/// Slightly lifted surface (#0B0D12). Use for pulldown overlays or
+/// panels that need to read as "above" the base INK layer.
+#[allow(dead_code)]
+pub const INK_2:   Rgb565 = Rgb565::new(1, 3, 2);
+/// Elevated surface (#14171E). Toggle trough, deeper sub-panel fill.
+pub const INK_3:   Rgb565 = Rgb565::new(2, 5, 3);
+/// Divider / inactive border (#2A2F3A).
+pub const STEEL:   Rgb565 = Rgb565::new(5, 11, 7);
+/// Disabled-state text / inert pill handle (#474D5A).
+pub const STEEL_2: Rgb565 = Rgb565::new(8, 19, 11);
+/// Muted metadata / captions (#8A93A3).
+pub const CHROME:  Rgb565 = Rgb565::new(17, 36, 20);
+/// Body text (#E6E9EE). Technically not pure white so it reads as
+/// "bone" rather than "paper" on the black field.
+pub const BONE:    Rgb565 = Rgb565::new(28, 58, 29);
+
+// -- Accents ----------------------------------------------------------------
+
+/// Signal red (#FF003C). Primary HUD chrome, default accent.
+pub const SIGNAL:      Rgb565 = Rgb565::new(31, 0, 7);
+/// Signal red hover peak (#FF3355).
+#[allow(dead_code)]
+pub const SIGNAL_HOT:  Rgb565 = Rgb565::new(31, 6, 10);
+/// Dim signal red (#A8002A). Pressed / inactive.
+pub const SIGNAL_DIM:  Rgb565 = Rgb565::new(21, 0, 5);
+/// Very dim signal red (#4A0014). Panel tint.
+#[allow(dead_code)]
+pub const SIGNAL_DEEP: Rgb565 = Rgb565::new(9, 0, 2);
+
+/// Cyan (#00F0FF). Secondary - labels, info, computer icons.
+pub const CYAN:      Rgb565 = Rgb565::new(0, 60, 31);
+/// Cyan hover peak (#7BFBFF).
+#[allow(dead_code)]
+pub const CYAN_HOT:  Rgb565 = Rgb565::new(15, 62, 31);
+/// Dim cyan (#0098A6).
+#[allow(dead_code)]
+pub const CYAN_DIM:  Rgb565 = Rgb565::new(0, 38, 20);
+
+/// Yellow (#FFEE00). Active-tab state only.
+pub const YELLOW: Rgb565 = Rgb565::new(31, 59, 0);
+
+/// Green (#00FF9C). Ok / safe / charging.
+pub const GREEN:  Rgb565 = Rgb565::new(0, 63, 19);
+
+/// Orange (#FF8A00). Media, data streams, secondary warning.
+#[allow(dead_code)]
+pub const ORANGE: Rgb565 = Rgb565::new(31, 34, 0);
+
+// -- Semantic aliases -------------------------------------------------------
+
+/// Primary body text.
+pub const FG:       Rgb565 = BONE;
+/// Secondary / caption text.
+pub const FG_MUTED: Rgb565 = CHROME;
+/// Tertiary / disabled text.
+pub const FG_DIM:   Rgb565 = STEEL_2;
+/// Default surface fill.
+#[allow(dead_code)]
+pub const SURFACE:  Rgb565 = INK;
+/// Divider / inactive border.
+#[allow(dead_code)]
+pub const BORDER:   Rgb565 = STEEL;
+/// Semantic danger / critical.
+pub const DANGER:   Rgb565 = SIGNAL;
+/// Semantic ok.
+#[allow(dead_code)]
+pub const OK:       Rgb565 = GREEN;
+/// Semantic warning.
+#[allow(dead_code)]
+pub const WARN:     Rgb565 = YELLOW;
+/// Semantic info.
+#[allow(dead_code)]
+pub const INFO:     Rgb565 = CYAN;
 
 // -- Screen geometry ---------------------------------------------------------
 

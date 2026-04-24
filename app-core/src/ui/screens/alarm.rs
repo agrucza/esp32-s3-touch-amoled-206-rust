@@ -155,7 +155,7 @@ impl AlarmScreen {
             layout::header_rect(),
             HeaderIcon::Close,
             "ALARMS",
-            theme::AMBER,
+            theme::SIGNAL,
         );
 
         let start = self.page * CARDS_PER_PAGE;
@@ -168,7 +168,7 @@ impl AlarmScreen {
             let dot = if entry.enabled {
                 theme::GREEN
             } else {
-                theme::RED
+                theme::DANGER
             };
             let style = CardStyle::DEFAULT.with_status_dot(dot);
             card(display, rect, style);
@@ -188,7 +188,7 @@ impl AlarmScreen {
             }
 
             value_body(display, rect, day_buf.as_str(), time_buf.as_str(),
-                if entry.enabled { theme::TEXT_WHITE } else { theme::TEXT_MUTED });
+                if entry.enabled { theme::FG } else { theme::FG_DIM });
         }
 
         let pages = (MAX_ALARMS + CARDS_PER_PAGE - 1) / CARDS_PER_PAGE;
@@ -262,7 +262,7 @@ impl AlarmScreen {
             layout::header_rect(),
             HeaderIcon::Back,
             "EDIT ALARM",
-            theme::AMBER,
+            theme::SIGNAL,
         );
 
         // HH:MM label from digits.
@@ -277,7 +277,7 @@ impl AlarmScreen {
             display, &fonts::value(),
             &buf,
             theme::SCREEN_W as i32 / 2, NUMPAD_TIME_Y,
-            theme::AMBER,
+            theme::SIGNAL,
         );
 
         // Day selector row.
@@ -286,7 +286,7 @@ impl AlarmScreen {
         for (i, label) in DAY_LABELS.iter().enumerate() {
             let cx = start_x + i as i32 * DAY_SPACING;
             let active = (self.edit_days & (1 << DAY_BIT[i])) != 0;
-            let color = if active { theme::AMBER } else { theme::TEXT_MUTED };
+            let color = if active { theme::SIGNAL } else { theme::FG_DIM };
             fonts::draw_centered(
                 display, &fonts::body(),
                 label, cx, DAY_ROW_Y,
@@ -376,12 +376,12 @@ impl AlarmScreen {
             layout::header_rect(),
             HeaderIcon::None,
             "ALARM",
-            theme::AMBER,
+            theme::SIGNAL,
         );
 
-        // Hero pill with the alarm time, flashing amber/red.
+        // Hero pill with the alarm time, flashing signal/danger.
         let phase = self.alert_ticks / FLASH_PHASE_TICKS;
-        let pill_color = if phase % 2 == 0 { theme::AMBER } else { theme::RED };
+        let pill_color = if phase % 2 == 0 { theme::SIGNAL } else { theme::DANGER };
         primitives::pill_solid(
             display,
             layout::HERO_PILL_X, layout::HERO_PILL_Y,
@@ -407,18 +407,18 @@ impl AlarmScreen {
         icon_button(
             display,
             layout::LEFT_CIRCLE_CX, layout::CIRCLE_CY,
-            theme::PANEL_BG,
-            glyphs::hourglass, theme::TEXT_WHITE,
-            "SNOOZE", theme::TEXT_DIM,
+            theme::INK,
+            glyphs::hourglass, theme::FG,
+            "SNOOZE", theme::FG_MUTED,
         );
 
         // Right circle: dismiss.
         icon_button(
             display,
             layout::RIGHT_CIRCLE_CX, layout::CIRCLE_CY,
-            theme::PANEL_BG,
-            glyphs::stop, theme::TEXT_WHITE,
-            "DISMISS", theme::TEXT_DIM,
+            theme::INK,
+            glyphs::stop, theme::FG,
+            "DISMISS", theme::FG_MUTED,
         );
     }
 

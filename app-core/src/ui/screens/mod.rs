@@ -1,6 +1,7 @@
 pub mod alarm;
+pub mod app_drawer;
 pub mod clock;
-pub mod panel;
+pub mod quick_access;
 pub mod settings;
 pub mod status;
 pub mod stopwatch;
@@ -19,22 +20,9 @@ pub const HOME_APPS: &[ScreenId] = &[
     ScreenId::Status,
 ];
 
-/// All apps reachable from the pull-down panel. Superset of
-/// [`HOME_APPS`] - includes entries that should be reachable
-/// deliberately but not through casual L/R swipes (Settings, future
-/// File Explorer, etc.). The panel picker renders this list.
-pub const PANEL_APPS: &[ScreenId] = &[
-    ScreenId::Clock,
-    ScreenId::Status,
-    ScreenId::Stopwatch,
-    ScreenId::Timer,
-    ScreenId::Alarm,
-    ScreenId::Settings,
-];
-
 /// Return the next or previous home app relative to `current`,
 /// wrapping at the ends. Operates on [`HOME_APPS`] only - screens
-/// that aren't home-row apps (Settings, Panel) don't participate
+/// that aren't home-row apps (Settings, overlays) don't participate
 /// in L/R cycling and just return `current` unchanged.
 pub fn cycle_home_app(current: ScreenId, forward: bool) -> ScreenId {
     let Some(idx) = HOME_APPS.iter().position(|s| *s == current) else {
@@ -59,15 +47,21 @@ pub enum ActiveScreen {
     Timer(timer::TimerScreen),
     Alarm(alarm::AlarmScreen),
     Settings(settings::SettingsScreen),
-    Panel(panel::PanelScreen),
+    /// Pull-down Quick Access overlay. Reached via swipe-down-from-top.
+    QuickAccess(quick_access::QuickAccessScreen),
+    /// Pull-up App Drawer. Reached via swipe-up-from-bottom and via
+    /// tapping the watch face.
+    AppDrawer(app_drawer::AppDrawerScreen),
 }
 
 impl ActiveScreen {
     /// Create a fresh screen for the given id.
     ///
-    /// Note: `ScreenId::Panel` can't be constructed this way - the
-    /// panel needs a `previous: ScreenId` context that plain id-based
-    /// construction can't supply. Use `new_panel(previous)` instead.
+    /// Note: `ScreenId::QuickAccess` and `ScreenId::AppDrawer` can't
+    /// be constructed this way - both overlays need a `previous:
+    /// ScreenId` context that plain id-based construction can't
+    /// supply. Use `new_quick_access(previous)` or
+    /// `new_app_drawer(previous)` instead.
     pub fn new(id: ScreenId) -> Self {
         match id {
             ScreenId::Clock => Self::Clock(clock::ClockScreen::new()),
@@ -76,17 +70,29 @@ impl ActiveScreen {
             ScreenId::Timer => Self::Timer(timer::TimerScreen::new()),
             ScreenId::Alarm => Self::Alarm(alarm::AlarmScreen::new()),
             ScreenId::Settings => Self::Settings(settings::SettingsScreen::new()),
-            ScreenId::Panel => {
-                debug_assert!(false, "use ActiveScreen::new_panel(previous) for Panel");
+            ScreenId::QuickAccess => {
+                debug_assert!(false,
+                    "use ActiveScreen::new_quick_access(previous) for QuickAccess");
+                Self::Clock(clock::ClockScreen::new())
+            }
+            ScreenId::AppDrawer => {
+                debug_assert!(false,
+                    "use ActiveScreen::new_app_drawer(previous) for AppDrawer");
                 Self::Clock(clock::ClockScreen::new())
             }
         }
     }
 
-    /// Create the panel screen, remembering which screen it should
-    /// return to on close.
-    pub fn new_panel(previous: ScreenId) -> Self {
-        Self::Panel(panel::PanelScreen::new(previous))
+    /// Create the Quick Access overlay, remembering which screen
+    /// it should return to on close.
+    pub fn new_quick_access(previous: ScreenId) -> Self {
+        Self::QuickAccess(quick_access::QuickAccessScreen::new(previous))
+    }
+
+    /// Create the App Drawer overlay, remembering which screen it
+    /// should return to on close.
+    pub fn new_app_drawer(previous: ScreenId) -> Self {
+        Self::AppDrawer(app_drawer::AppDrawerScreen::new(previous))
     }
 
     pub fn render<D: DrawTarget<Color = Rgb565>>(&self, display: &mut D, data: &SystemData) {
@@ -97,7 +103,8 @@ impl ActiveScreen {
             Self::Timer(s) => s.render(display, data),
             Self::Alarm(s) => s.render(display, data),
             Self::Settings(s) => s.render(display, data),
-            Self::Panel(s) => s.render(display, data),
+            Self::QuickAccess(s) => s.render(display, data),
+            Self::AppDrawer(s) => s.render(display, data),
         }
     }
 
@@ -109,7 +116,8 @@ impl ActiveScreen {
             Self::Timer(s) => s.on_event(event, data),
             Self::Alarm(s) => s.on_event(event, data),
             Self::Settings(s) => s.on_event(event, data),
-            Self::Panel(s) => s.on_event(event, data),
+            Self::QuickAccess(s) => s.on_event(event, data),
+            Self::AppDrawer(s) => s.on_event(event, data),
         }
     }
 
@@ -121,7 +129,8 @@ impl ActiveScreen {
             Self::Timer(s) => s.on_mount(data),
             Self::Alarm(s) => s.on_mount(data),
             Self::Settings(s) => s.on_mount(data),
-            Self::Panel(s) => s.on_mount(data),
+            Self::QuickAccess(s) => s.on_mount(data),
+            Self::AppDrawer(s) => s.on_mount(data),
         }
     }
 
@@ -133,7 +142,8 @@ impl ActiveScreen {
             Self::Timer(s) => s.on_unmount(),
             Self::Alarm(s) => s.on_unmount(),
             Self::Settings(s) => s.on_unmount(),
-            Self::Panel(s) => s.on_unmount(),
+            Self::QuickAccess(s) => s.on_unmount(),
+            Self::AppDrawer(s) => s.on_unmount(),
         }
     }
 
@@ -146,21 +156,31 @@ impl ActiveScreen {
             Self::Timer(_) => ScreenId::Timer,
             Self::Alarm(_) => ScreenId::Alarm,
             Self::Settings(_) => ScreenId::Settings,
-            Self::Panel(_) => ScreenId::Panel,
+            Self::QuickAccess(_) => ScreenId::QuickAccess,
+            Self::AppDrawer(_) => ScreenId::AppDrawer,
         }
     }
 
-    /// Switch to a different screen.
+    /// Switch to a different screen. Constructs a fresh instance of
+    /// the target screen and runs its mount hook. Not valid for the
+    /// overlay screens; use `open_quick_access` / `open_app_drawer`.
     pub fn switch_to(&mut self, id: ScreenId, data: &SystemData) {
         self.unmount();
         *self = Self::new(id);
         self.mount(data);
     }
 
-    /// Open the panel screen.
-    pub fn open_panel(&mut self, previous: ScreenId, data: &SystemData) {
+    /// Open the Quick Access overlay.
+    pub fn open_quick_access(&mut self, previous: ScreenId, data: &SystemData) {
         self.unmount();
-        *self = Self::new_panel(previous);
+        *self = Self::new_quick_access(previous);
+        self.mount(data);
+    }
+
+    /// Open the App Drawer overlay.
+    pub fn open_app_drawer(&mut self, previous: ScreenId, data: &SystemData) {
+        self.unmount();
+        *self = Self::new_app_drawer(previous);
         self.mount(data);
     }
 }
@@ -201,11 +221,11 @@ mod cycle_tests {
 
     #[test]
     fn non_home_screen_returns_unchanged() {
-        // Screens that aren't in HOME_APPS (Stopwatch, Timer, Alarm,
-        // Settings, Panel) don't participate in L/R cycling - the
-        // function returns them unchanged.
+        // Screens that aren't in HOME_APPS don't participate in L/R
+        // cycling - the function returns them unchanged.
         assert_eq!(cycle_home_app(ScreenId::Stopwatch, true), ScreenId::Stopwatch);
         assert_eq!(cycle_home_app(ScreenId::Settings, false), ScreenId::Settings);
-        assert_eq!(cycle_home_app(ScreenId::Panel, true), ScreenId::Panel);
+        assert_eq!(cycle_home_app(ScreenId::QuickAccess, true), ScreenId::QuickAccess);
+        assert_eq!(cycle_home_app(ScreenId::AppDrawer, true), ScreenId::AppDrawer);
     }
 }

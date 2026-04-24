@@ -72,7 +72,7 @@ impl CardStyle {
     /// until the first screen actually needs it - we'll add a
     /// preset or a `with_focus(...)` helper then.
     pub const DEFAULT: Self = Self {
-        bg: theme::PANEL_BG,
+        bg: theme::INK,
         border: None,
         radius: CARD_RADIUS,
         status_dot: None,
@@ -86,7 +86,7 @@ impl CardStyle {
     /// let style = if result.passed {
     ///     CardStyle::DEFAULT.with_status_dot(theme::GREEN)
     /// } else {
-    ///     CardStyle::DEFAULT.with_status_dot(theme::RED)
+    ///     CardStyle::DEFAULT.with_status_dot(theme::DANGER)
     /// };
     /// card(display, rect, style);
     /// ```

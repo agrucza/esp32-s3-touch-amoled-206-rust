@@ -11,7 +11,7 @@
 //!
 //! **Numpad view** - digit entry for setting the duration:
 //! - Header bar: Back chevron + "TIMER"
-//! - Amber time label: HH:MM:SS showing entered digits
+//! - Signal time label: HH:MM:SS showing entered digits
 //!   (right-to-left fill like a calculator)
 //! - 3x4 grid of rounded-rect buttons via the Numpad widget
 //!
@@ -117,27 +117,27 @@ impl TimerScreen {
     }
 
     /// Returns the hero pill color while alerting: alternates
-    /// amber/red at 250ms per phase (same rate as numpad flash).
+    /// signal/danger at 250ms per phase (same rate as numpad flash).
     fn alert_pill_color(&self) -> Rgb565 {
         let phase = self.alert_ticks / FLASH_PHASE_TICKS;
         if phase % 2 == 0 {
-            theme::AMBER
+            theme::SIGNAL
         } else {
-            theme::RED
+            theme::DANGER
         }
     }
 
-    /// Returns the numpad time label color, alternating amber/red
+    /// Returns the numpad time label color, alternating signal/danger
     /// during the clamp flash animation.
     fn time_label_color(&self) -> Rgb565 {
         if self.flash_ticks == 0 {
-            return theme::AMBER;
+            return theme::SIGNAL;
         }
         let phase = (FLASH_TOTAL_TICKS - self.flash_ticks) / FLASH_PHASE_TICKS;
         if phase % 2 == 0 {
-            theme::RED
+            theme::DANGER
         } else {
-            theme::AMBER
+            theme::SIGNAL
         }
     }
 }
@@ -214,14 +214,14 @@ impl TimerScreen {
             layout::header_rect(),
             HeaderIcon::Close,
             "TIMER",
-            theme::AMBER,
+            theme::SIGNAL,
         );
 
         // Hero pill with remaining time. Flashes red while alerting.
         let pill_color = if self.alerting {
             self.alert_pill_color()
         } else {
-            theme::AMBER
+            theme::SIGNAL
         };
         primitives::pill_solid(
             display,
@@ -243,16 +243,16 @@ impl TimerScreen {
             TimerState::Running { .. } => icon_button(
                 display,
                 layout::LEFT_CIRCLE_CX, layout::CIRCLE_CY,
-                theme::PANEL_BG,
-                glyphs::pause, theme::TEXT_WHITE,
-                "PAUSE", theme::TEXT_DIM,
+                theme::INK,
+                glyphs::pause, theme::FG,
+                "PAUSE", theme::FG_MUTED,
             ),
             _ => icon_button(
                 display,
                 layout::LEFT_CIRCLE_CX, layout::CIRCLE_CY,
-                theme::PANEL_BG,
-                glyphs::play, theme::TEXT_WHITE,
-                "START", theme::TEXT_DIM,
+                theme::INK,
+                glyphs::play, theme::FG,
+                "START", theme::FG_MUTED,
             ),
         };
 
@@ -260,9 +260,9 @@ impl TimerScreen {
         icon_button(
             display,
             layout::RIGHT_CIRCLE_CX, layout::CIRCLE_CY,
-            theme::PANEL_BG,
-            glyphs::stop, theme::TEXT_WHITE,
-            "RESET", theme::TEXT_DIM,
+            theme::INK,
+            glyphs::stop, theme::FG,
+            "RESET", theme::FG_MUTED,
         );
     }
 
@@ -351,7 +351,7 @@ impl TimerScreen {
             layout::header_rect(),
             HeaderIcon::Back,
             "TIMER",
-            theme::AMBER,
+            theme::SIGNAL,
         );
 
         // Time label showing entered digits as HH:MM:SS.

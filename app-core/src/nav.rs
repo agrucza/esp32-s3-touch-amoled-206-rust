@@ -4,9 +4,9 @@
 //! Pushed when the user navigates *into* a new screen, popped on
 //! `Back`.
 //!
-//! The Panel modal is never pushed - it replaces the current
-//! screen when launching an app, and the pre-panel screen already
-//! sits below it on the stack.
+//! The Quick Access and App Drawer overlays are never pushed - each
+//! one replaces the current screen when launching an app, and the
+//! pre-overlay screen already sits below it on the stack.
 
 use crate::ui::types::ScreenId;
 use heapless::Vec;
@@ -46,6 +46,14 @@ impl NavStack {
     /// it.
     pub fn pop_or_home(&mut self) -> ScreenId {
         self.inner.pop().unwrap_or(ScreenId::Clock)
+    }
+
+    /// Peek the top screen without popping, or return
+    /// `ScreenId::Clock` if the stack is empty. Used by the overlay
+    /// open path to reuse the pre-overlay entry when the user
+    /// switches directly between the two overlays.
+    pub fn peek_or_home(&self) -> ScreenId {
+        self.inner.last().copied().unwrap_or(ScreenId::Clock)
     }
 
     /// Current depth (for diagnostics / tests).

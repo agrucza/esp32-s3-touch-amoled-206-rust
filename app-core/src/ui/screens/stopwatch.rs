@@ -1,7 +1,7 @@
 //! Stopwatch screen - count-up timer as a panel app.
 //!
 //! Layout: standard header bar (X close on the left, "STOPWATCH"
-//! title on the right), an amber hero pill containing HH:MM:SS
+//! title on the right), an signal hero pill containing HH:MM:SS
 //! elapsed time rendered in the hero font (matching the clock
 //! face), and two large dark circles below (Start/Pause on the
 //! left, Reset on the right). The left circle's glyph + caption
@@ -61,15 +61,15 @@ impl Screen for StopwatchScreen {
             layout::header_rect(),
             HeaderIcon::Close,
             "STOPWATCH",
-            theme::AMBER,
+            theme::SIGNAL,
         );
 
-        // -- Amber hero pill with HH:MM:SS --------------------------------
+        // -- Signal hero pill with HH:MM:SS --------------------------------
         primitives::pill_solid(
             display,
             layout::HERO_PILL_X, layout::HERO_PILL_Y,
             layout::HERO_PILL_W, layout::HERO_PILL_H,
-            theme::AMBER,
+            theme::SIGNAL,
         );
         let elapsed = data.stopwatch.elapsed();
         let total_secs = elapsed.as_secs();
@@ -89,16 +89,16 @@ impl Screen for StopwatchScreen {
             StopwatchState::Running { .. } => icon_button(
                 display,
                 layout::LEFT_CIRCLE_CX, layout::CIRCLE_CY,
-                theme::PANEL_BG,
-                glyphs::pause, theme::TEXT_WHITE,
-                "PAUSE", theme::TEXT_DIM,
+                theme::INK,
+                glyphs::pause, theme::FG,
+                "PAUSE", theme::FG_MUTED,
             ),
             StopwatchState::Idle | StopwatchState::Paused { .. } => icon_button(
                 display,
                 layout::LEFT_CIRCLE_CX, layout::CIRCLE_CY,
-                theme::PANEL_BG,
-                glyphs::play, theme::TEXT_WHITE,
-                "START", theme::TEXT_DIM,
+                theme::INK,
+                glyphs::play, theme::FG,
+                "START", theme::FG_MUTED,
             ),
         };
 
@@ -106,9 +106,9 @@ impl Screen for StopwatchScreen {
         icon_button(
             display,
             layout::RIGHT_CIRCLE_CX, layout::CIRCLE_CY,
-            theme::PANEL_BG,
-            glyphs::stop, theme::TEXT_WHITE,
-            "RESET", theme::TEXT_DIM,
+            theme::INK,
+            glyphs::stop, theme::FG,
+            "RESET", theme::FG_MUTED,
         );
     }
 

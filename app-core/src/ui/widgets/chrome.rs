@@ -7,7 +7,7 @@
 //! that rect to the chrome helper.
 //!
 //! The reference visual is the "All Bookings" header: X icon on the
-//! left, amber title on the right, no background bar - just icons
+//! left, red title on the right, no background bar - just icons
 //! and text floating on the screen's black background.
 
 use embedded_graphics::{
@@ -88,11 +88,11 @@ pub fn header_bar<D: DrawTarget<Color = Rgb565>>(
         HeaderIcon::None => {}
         HeaderIcon::Close => {
             let cx = left + HEADER_MARGIN + HEADER_ICON_HALF;
-            draw_close(display, cx, cy, HEADER_ICON_HALF, theme::TEXT_WHITE);
+            draw_close(display, cx, cy, HEADER_ICON_HALF, theme::FG);
         }
         HeaderIcon::Back => {
             let cx = left + HEADER_MARGIN + HEADER_ICON_HALF;
-            draw_back(display, cx, cy, HEADER_ICON_HALF, theme::TEXT_WHITE);
+            draw_back(display, cx, cy, HEADER_ICON_HALF, theme::FG);
         }
     }
 
@@ -131,8 +131,8 @@ pub fn page_scrollbar<D: DrawTarget<Color = Rgb565>>(
         layout::SCROLLBAR_W, layout::SCROLLBAR_H,
         page_count,
         active_page,
-        theme::AMBER,
-        theme::AMBER_DIM,
+        theme::SIGNAL,
+        theme::SIGNAL_DIM,
     );
 }
 

@@ -33,10 +33,15 @@ pub type Headline = raw::u8g2_font_helvR18_te;
 /// Bold value / headline text (~24 px tall, bold weight).
 pub type Value = raw::u8g2_font_helvB24_te;
 /// Hero numeric display text - clean bold sans-serif at 49 px, used
-/// for the clock face and any other large-numeric hero elements
-/// (stopwatches, timers, big readings). Digits-only `_tn` charset for
+/// for stopwatch/timer readouts. Digits-only `_tn` charset for
 /// minimal flash footprint.
 pub type Hero = raw::u8g2_font_fub49_tn;
+/// Squared-off geometric digits at 78 px, used for the Nightwatch
+/// watch face's stacked HH/MM. Digits-only.
+pub type Mega = raw::u8g2_font_logisoso78_tn;
+/// Bold small caps-ish label font (~10 px). Used for Nightwatch
+/// uppercase chrome labels and pill text.
+pub type Label = raw::u8g2_font_helvB10_te;
 
 // -- Renderer factories ------------------------------------------------------
 //

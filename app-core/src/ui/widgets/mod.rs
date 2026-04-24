@@ -1,39 +1,31 @@
 //! Reusable UI widgets.
 //!
-//! Three layers, each in its own sub-module:
+//! Four layers:
 //!
-//! * [`containers`] - visual wrappers (cards, panels). Define the
-//!   visual frame a piece of content lives inside. Never drawn
-//!   content of their own beyond their own decoration.
-//! * [`bodies`] - content layouts (label + value, icon + label, etc.)
-//!   that draw into a `Rectangle`. Can be composed with a container
-//!   by drawing both into the same rect, or used standalone on a
-//!   bare rect without any wrapping panel.
-//! * [`chrome`] - screen-level decorations (header bar, nav hints).
-//!   Things that belong to a screen's outer frame rather than its
-//!   content blocks.
+//! * [`containers`] - rounded-card visual wrappers. Used by the
+//!   stopwatch / timer / alarm / status / numpad screens.
+//! * [`bodies`] - content layouts (label + value, icon + label) that
+//!   draw into a `Rectangle`. Composable with any container.
+//! * [`chrome`] - legacy screen-level decorations (rounded header
+//!   bar, vertical page scrollbar) for the card-style screens.
+//! * [`nightwatch`] - sharp HUD-panel vocabulary for the watch face,
+//!   app grid, and settings screens: chamfered hex outlines, hanging
+//!   tag labels, red-hairline headers, toggles, 1-row dividers.
 //!
-//! The split is about *reusability tier*, not widget kind. Every
-//! card container is the same card; every body helper works inside
-//! any container; every chrome piece works on any screen.
-//!
-//! Typical usage inside a screen's `render`:
-//!
-//! ```ignore
-//! use crate::ui::widgets::{card, value_body, CardStyle};
-//! use embedded_graphics::{geometry::{Point, Size}, primitives::Rectangle};
-//!
-//! let r = Rectangle::new(Point::new(35, 120), Size::new(340, 80));
-//! card(display, r, CardStyle::DEFAULT);
-//! value_body(display, r, "ACCEL X", "721 mg", theme::TEXT_WHITE);
-//! ```
+//! Screens pick exactly one chrome style - card or nightwatch - to
+//! avoid mixing rounded and sharp on the same surface.
 
 pub mod containers;
 pub mod bodies;
 pub mod chrome;
+pub mod nightwatch;
 pub mod numpad;
 
 pub use containers::{card, CardStyle};
 pub use bodies::{icon_button, value_body};
 pub use chrome::{header_bar, page_scrollbar, HeaderIcon, HEADER_ICON_HIT_WIDTH};
+pub use nightwatch::{
+    chamfered_panel, header, header_icon_hit, row, tile, toggle, tag_label,
+    RowControl, NOTCH, HEADER_H, ROW_H, TAG_LABEL_H,
+};
 pub use numpad::{Numpad, NumpadAction, MAX_DIGITS};

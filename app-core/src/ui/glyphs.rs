@@ -284,3 +284,353 @@ pub fn panel<D: DrawTarget<Color = Rgb565>>(
         .into_styled(fill).draw(display).ok();
     }
 }
+
+// -- Nightwatch icons --------------------------------------------------------
+//
+// Primitive-drawn equivalents of the SVG sprite in the Nightwatch
+// design handoff. Matches the existing glyph signature so the new
+// icons drop straight into `tile` / `row` closures the same
+// way the older ones do.
+
+/// Heart glyph: two filled semicircles merging into a downward V.
+/// Reads as an outline at small radii because the strokes stay 2 px.
+pub fn heart<D: DrawTarget<Color = Rgb565>>(
+    display: &mut D, cx: i32, cy: i32, radius: i32, color: Rgb565,
+) {
+    let stroke = PrimitiveStyle::with_stroke(color, 2);
+    // 0.45 * radius via integer math so the glyph compiles in no_std
+    // without pulling in a soft-float conversion.
+    let r = radius * 9 / 20;
+    // Two circles forming the top lobes.
+    Circle::with_center(Point::new(cx - r, cy - r / 2), (r * 2) as u32)
+        .into_styled(stroke).draw(display).ok();
+    Circle::with_center(Point::new(cx + r, cy - r / 2), (r * 2) as u32)
+        .into_styled(stroke).draw(display).ok();
+    // Two lines meeting at the bottom point.
+    Line::new(
+        Point::new(cx - r * 2, cy),
+        Point::new(cx, cy + radius),
+    ).into_styled(stroke).draw(display).ok();
+    Line::new(
+        Point::new(cx + r * 2, cy),
+        Point::new(cx, cy + radius),
+    ).into_styled(stroke).draw(display).ok();
+}
+
+/// Envelope (message) glyph: rectangle with flap lines forming an X
+/// top half. Outline only.
+pub fn message<D: DrawTarget<Color = Rgb565>>(
+    display: &mut D, cx: i32, cy: i32, radius: i32, color: Rgb565,
+) {
+    let stroke = PrimitiveStyle::with_stroke(color, 2);
+    let w = radius * 2;
+    let h = radius * 3 / 2;
+    let x = cx - w / 2;
+    let y = cy - h / 2;
+
+    // Body outline.
+    Rectangle::new(Point::new(x, y), Size::new(w as u32, h as u32))
+        .into_styled(stroke).draw(display).ok();
+    // Flap: two lines from top corners to the center of the top edge.
+    Line::new(
+        Point::new(x, y),
+        Point::new(cx, y + h / 2),
+    ).into_styled(stroke).draw(display).ok();
+    Line::new(
+        Point::new(x + w, y),
+        Point::new(cx, y + h / 2),
+    ).into_styled(stroke).draw(display).ok();
+}
+
+/// Map-pin glyph: teardrop outline with a hollow dot at the center.
+pub fn map_pin<D: DrawTarget<Color = Rgb565>>(
+    display: &mut D, cx: i32, cy: i32, radius: i32, color: Rgb565,
+) {
+    let stroke = PrimitiveStyle::with_stroke(color, 2);
+    let r = radius * 2 / 3;
+    // Head: full circle, centered above the geometric center.
+    Circle::with_center(Point::new(cx, cy - r / 2), (r * 2) as u32)
+        .into_styled(stroke).draw(display).ok();
+    // Tail: two diagonal lines from the circle's sides down to the point.
+    Line::new(
+        Point::new(cx - r, cy),
+        Point::new(cx, cy + radius),
+    ).into_styled(stroke).draw(display).ok();
+    Line::new(
+        Point::new(cx + r, cy),
+        Point::new(cx, cy + radius),
+    ).into_styled(stroke).draw(display).ok();
+    // Inner dot.
+    Circle::with_center(Point::new(cx, cy - r / 2), (r / 2) as u32)
+        .into_styled(PrimitiveStyle::with_fill(color)).draw(display).ok();
+}
+
+/// Handset glyph: a rounded bar with two stubs on each end. Drawn as
+/// a single tilted rectangle + two short perpendicular lines so it
+/// reads as a classic phone handset silhouette.
+pub fn phone<D: DrawTarget<Color = Rgb565>>(
+    display: &mut D, cx: i32, cy: i32, radius: i32, color: Rgb565,
+) {
+    let stroke = PrimitiveStyle::with_stroke(color, 2);
+    // Handset body: a diagonal line from upper-left to lower-right.
+    Line::new(
+        Point::new(cx - radius, cy - radius + 2),
+        Point::new(cx + radius, cy + radius - 2),
+    ).into_styled(stroke).draw(display).ok();
+    // Earpiece stub (upper-left perpendicular).
+    Line::new(
+        Point::new(cx - radius - 3, cy - radius + 5),
+        Point::new(cx - radius + 3, cy - radius - 1),
+    ).into_styled(stroke).draw(display).ok();
+    // Mouthpiece stub (lower-right perpendicular).
+    Line::new(
+        Point::new(cx + radius - 3, cy + radius + 1),
+        Point::new(cx + radius + 3, cy + radius - 5),
+    ).into_styled(stroke).draw(display).ok();
+}
+
+/// Calendar glyph: square outline with a thick top bar and two small
+/// vertical "ring" lines poking above.
+pub fn calendar<D: DrawTarget<Color = Rgb565>>(
+    display: &mut D, cx: i32, cy: i32, radius: i32, color: Rgb565,
+) {
+    let stroke = PrimitiveStyle::with_stroke(color, 2);
+    let fill = PrimitiveStyle::with_fill(color);
+    let w = radius * 2;
+    let h = radius * 2;
+    let x = cx - radius;
+    let y = cy - radius + 3;
+
+    // Body outline.
+    Rectangle::new(Point::new(x, y), Size::new(w as u32, h as u32))
+        .into_styled(stroke).draw(display).ok();
+    // Filled header strip.
+    Rectangle::new(Point::new(x, y), Size::new(w as u32, 4))
+        .into_styled(fill).draw(display).ok();
+    // Two ring stubs above the header.
+    Rectangle::new(
+        Point::new(cx - radius / 2 - 1, y - 4),
+        Size::new(2, 5),
+    ).into_styled(fill).draw(display).ok();
+    Rectangle::new(
+        Point::new(cx + radius / 2 - 1, y - 4),
+        Size::new(2, 5),
+    ).into_styled(fill).draw(display).ok();
+}
+
+/// Running figure glyph: stick-figure head + diagonal body + bent legs
+/// suggesting mid-stride.
+pub fn run<D: DrawTarget<Color = Rgb565>>(
+    display: &mut D, cx: i32, cy: i32, radius: i32, color: Rgb565,
+) {
+    let stroke = PrimitiveStyle::with_stroke(color, 2);
+    let head_r = radius / 4;
+    // Head.
+    Circle::with_center(Point::new(cx + radius / 3, cy - radius), (head_r * 2) as u32)
+        .into_styled(PrimitiveStyle::with_fill(color)).draw(display).ok();
+    // Torso diagonal.
+    Line::new(
+        Point::new(cx + radius / 3, cy - radius + head_r),
+        Point::new(cx - radius / 4, cy + radius / 3),
+    ).into_styled(stroke).draw(display).ok();
+    // Front leg.
+    Line::new(
+        Point::new(cx - radius / 4, cy + radius / 3),
+        Point::new(cx + radius / 3, cy + radius),
+    ).into_styled(stroke).draw(display).ok();
+    // Back leg.
+    Line::new(
+        Point::new(cx - radius / 4, cy + radius / 3),
+        Point::new(cx - radius, cy + radius),
+    ).into_styled(stroke).draw(display).ok();
+    // Front arm.
+    Line::new(
+        Point::new(cx + radius / 6, cy - radius / 3),
+        Point::new(cx + radius, cy - radius / 4),
+    ).into_styled(stroke).draw(display).ok();
+    // Back arm.
+    Line::new(
+        Point::new(cx, cy - radius / 4),
+        Point::new(cx - radius / 2, cy),
+    ).into_styled(stroke).draw(display).ok();
+}
+
+/// Skull glyph: outlined dome with two filled circular eye sockets
+/// and three short rectangular teeth poking below. Tuned to read at
+/// a 16 px tile radius - eye dots are large enough not to get lost,
+/// teeth are spaced so they clearly separate.
+pub fn skull<D: DrawTarget<Color = Rgb565>>(
+    display: &mut D, cx: i32, cy: i32, radius: i32, color: Rgb565,
+) {
+    let stroke = PrimitiveStyle::with_stroke(color, 2);
+    let fill = PrimitiveStyle::with_fill(color);
+    let r = radius;
+
+    // Dome: outlined circle, centered above the glyph midline so
+    // there is vertical room for teeth.
+    let dome_cy = cy - r / 3;
+    Circle::with_center(Point::new(cx, dome_cy), (r * 2 - 2) as u32)
+        .into_styled(stroke).draw(display).ok();
+
+    // Eyes: two filled circular sockets (~1/3 of the dome radius).
+    let eye_r = (r / 3).max(2);
+    let eye_off = r / 2;
+    Circle::with_center(Point::new(cx - eye_off, dome_cy - 1), (eye_r * 2) as u32)
+        .into_styled(fill).draw(display).ok();
+    Circle::with_center(Point::new(cx + eye_off, dome_cy - 1), (eye_r * 2) as u32)
+        .into_styled(fill).draw(display).ok();
+
+    // Teeth: 3 short filled rectangles stepping below the dome,
+    // spaced wider than the eye pair so the jaw reads clearly.
+    let dome_bottom = dome_cy + r - 1;
+    let tooth_w = 2i32;
+    let tooth_h = r / 2 + 1;
+    for dx in [-4, 0, 4] {
+        Rectangle::new(
+            Point::new(cx + dx - tooth_w / 2, dome_bottom),
+            Size::new(tooth_w as u32, tooth_h as u32),
+        ).into_styled(fill).draw(display).ok();
+    }
+}
+
+/// Battery glyph: horizontal rounded body with a small nub on the
+/// right. Outline only.
+pub fn battery<D: DrawTarget<Color = Rgb565>>(
+    display: &mut D, cx: i32, cy: i32, radius: i32, color: Rgb565,
+) {
+    let stroke = PrimitiveStyle::with_stroke(color, 2);
+    let fill = PrimitiveStyle::with_fill(color);
+    let w = radius * 2;
+    let h = radius;
+    let x = cx - w / 2;
+    let y = cy - h / 2;
+
+    Rectangle::new(Point::new(x, y), Size::new(w as u32, h as u32))
+        .into_styled(stroke).draw(display).ok();
+    // Nub on the right side.
+    let nub_w = 3i32;
+    let nub_h = (h / 2).max(4);
+    Rectangle::new(
+        Point::new(x + w, y + (h - nub_h) / 2),
+        Size::new(nub_w as u32, nub_h as u32),
+    ).into_styled(fill).draw(display).ok();
+}
+
+/// IMU / 6-axis motion-sensor glyph: a circle with three axis lines
+/// crossing its center (horizontal, vertical, and a diagonal "Z"
+/// suggestion). Reads as a gyro / motion sensor affordance.
+pub fn imu<D: DrawTarget<Color = Rgb565>>(
+    display: &mut D, cx: i32, cy: i32, radius: i32, color: Rgb565,
+) {
+    let stroke = PrimitiveStyle::with_stroke(color, 2);
+    let r = radius;
+    Circle::with_center(Point::new(cx, cy), (r * 2) as u32)
+        .into_styled(stroke).draw(display).ok();
+    // X axis.
+    Line::new(Point::new(cx - r, cy), Point::new(cx + r, cy))
+        .into_styled(stroke).draw(display).ok();
+    // Y axis.
+    Line::new(Point::new(cx, cy - r), Point::new(cx, cy + r))
+        .into_styled(stroke).draw(display).ok();
+    // Z axis (diagonal, shorter so it doesn't overlap the circle).
+    let d = r * 2 / 3;
+    Line::new(Point::new(cx - d, cy + d), Point::new(cx + d, cy - d))
+        .into_styled(stroke).draw(display).ok();
+}
+
+/// IC-chip glyph: a DIP-style rectangular body (taller than wide)
+/// with short pin stubs on the left and right edges (3 each side).
+/// Used as the flash storage icon.
+pub fn chip<D: DrawTarget<Color = Rgb565>>(
+    display: &mut D, cx: i32, cy: i32, radius: i32, color: Rgb565,
+) {
+    let stroke = PrimitiveStyle::with_stroke(color, 2);
+    let fill = PrimitiveStyle::with_fill(color);
+    // Body is narrower than it is tall - reads as a DIP package
+    // rather than a generic square.
+    let w = radius * 5 / 4;
+    let h = radius * 2;
+    let x = cx - w / 2;
+    let y = cy - h / 2;
+
+    // Body outline.
+    Rectangle::new(Point::new(x, y), Size::new(w as u32, h as u32))
+        .into_styled(stroke).draw(display).ok();
+
+    // Pin stubs: 3 on each side, evenly spaced.
+    let pin_w = 3i32;
+    let pin_h = 2i32;
+    let step = h / 4;
+    for i in 1..=3 {
+        let py = y + step * i - pin_h / 2;
+        // Left pins.
+        Rectangle::new(
+            Point::new(x - pin_w, py),
+            Size::new(pin_w as u32, pin_h as u32),
+        ).into_styled(fill).draw(display).ok();
+        // Right pins.
+        Rectangle::new(
+            Point::new(x + w, py),
+            Size::new(pin_w as u32, pin_h as u32),
+        ).into_styled(fill).draw(display).ok();
+    }
+}
+
+/// SD card glyph: vertical rectangle with the top-right corner
+/// chamfered (the orientation notch) plus three small contact stubs
+/// near the top. Distinct from the chip glyph so flash + SD read
+/// as different media.
+pub fn sd_card<D: DrawTarget<Color = Rgb565>>(
+    display: &mut D, cx: i32, cy: i32, radius: i32, color: Rgb565,
+) {
+    let stroke = PrimitiveStyle::with_stroke(color, 2);
+    let fill = PrimitiveStyle::with_fill(color);
+    let w = (radius * 3 / 2).max(10);
+    let h = radius * 2;
+    let x = cx - w / 2;
+    let y = cy - h / 2;
+    let notch = 4;
+
+    // 5-line outline traced clockwise from top-left, with the
+    // top-right corner replaced by a diagonal chamfer.
+    Line::new(Point::new(x, y), Point::new(x + w - notch, y))
+        .into_styled(stroke).draw(display).ok();
+    Line::new(Point::new(x + w - notch, y), Point::new(x + w, y + notch))
+        .into_styled(stroke).draw(display).ok();
+    Line::new(Point::new(x + w, y + notch), Point::new(x + w, y + h))
+        .into_styled(stroke).draw(display).ok();
+    Line::new(Point::new(x + w, y + h), Point::new(x, y + h))
+        .into_styled(stroke).draw(display).ok();
+    Line::new(Point::new(x, y + h), Point::new(x, y))
+        .into_styled(stroke).draw(display).ok();
+
+    // Three tiny contact stubs near the top.
+    for i in 0..3 {
+        let px = x + 2 + i * 3;
+        Rectangle::new(
+            Point::new(px, y + notch + 2),
+            Size::new(2, 3),
+        ).into_styled(fill).draw(display).ok();
+    }
+}
+
+/// Moon glyph: crescent shape drawn as a filled circle with a
+/// smaller offset circle cut out (in the display's background color,
+/// which is always `#000` on AMOLED). Used as the Night Mode icon.
+pub fn moon<D: DrawTarget<Color = Rgb565>>(
+    display: &mut D, cx: i32, cy: i32, radius: i32, color: Rgb565,
+) {
+    let fill = PrimitiveStyle::with_fill(color);
+    let carve = PrimitiveStyle::with_fill(Rgb565::new(0, 0, 0));
+
+    // Base disc.
+    Circle::with_center(Point::new(cx, cy), (radius * 2) as u32)
+        .into_styled(fill).draw(display).ok();
+    // Offset "bite" to create the crescent. The offset is deliberate:
+    // up-right so the crescent opens to the lower-left, matching the
+    // classic night-mode moon shape.
+    Circle::with_center(
+        Point::new(cx + radius / 2, cy - radius / 3),
+        (radius * 2) as u32,
+    ).into_styled(carve).draw(display).ok();
+}

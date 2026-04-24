@@ -49,7 +49,7 @@ impl Screen for StatusScreen {
             layout::header_rect(),
             HeaderIcon::Close,
             PAGE_TITLES[self.page as usize],
-            theme::AMBER,
+            theme::SIGNAL,
         );
 
         // -- Page-specific cards ------------------------------------------
@@ -111,7 +111,7 @@ fn render_axes_cards<D: DrawTarget<Color = Rgb565>>(
         write!(buf, "{}", val).ok();
         let rect = layout::content_card_rect(i);
         card(display, rect, CardStyle::DEFAULT);
-        value_body(display, rect, label, &buf, theme::TEXT_WHITE);
+        value_body(display, rect, label, &buf, theme::FG);
     }
 }
 
@@ -124,7 +124,7 @@ fn render_env_cards<D: DrawTarget<Color = Rgb565>>(
     let _ = write!(temp_buf, "{} C", temp_c);
     let rect = layout::content_card_rect(0);
     card(display, rect, CardStyle::DEFAULT);
-    value_body(display, rect, "TEMP", &temp_buf, theme::TEXT_WHITE);
+    value_body(display, rect, "TEMP", &temp_buf, theme::FG);
 
     let mut touch_buf: heapless::String<24> = heapless::String::new();
     let touch_value: &str = match (data.touch.x, data.touch.y) {
@@ -136,5 +136,5 @@ fn render_env_cards<D: DrawTarget<Color = Rgb565>>(
     };
     let rect = layout::content_card_rect(1);
     card(display, rect, CardStyle::DEFAULT);
-    value_body(display, rect, "TOUCH", touch_value, theme::TEXT_WHITE);
+    value_body(display, rect, "TOUCH", touch_value, theme::FG);
 }

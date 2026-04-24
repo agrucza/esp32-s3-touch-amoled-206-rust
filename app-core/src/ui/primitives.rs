@@ -157,12 +157,13 @@ pub fn section_rule<D: DrawTarget<Color = Rgb565>>(
 // -- Battery indicators ------------------------------------------------------
 
 /// Pick the right status color for a given battery percentage:
-/// neutral white when healthy, amber as a heads-up, red when critical.
+/// bone (neutral) when healthy, yellow as a heads-up, signal red when
+/// critical.
 pub fn battery_color(percent: u8) -> Rgb565 {
     use super::theme;
-    if percent > 50 { theme::TEXT_WHITE }
-    else if percent >= 20 { theme::AMBER }
-    else { theme::RED }
+    if percent > 50 { theme::FG }
+    else if percent >= 20 { theme::WARN }
+    else { theme::DANGER }
 }
 
 /// Draw a small battery glyph (rectangle + nub) with a color-coded
@@ -214,8 +215,8 @@ pub fn battery_icon<D: DrawTarget<Color = Rgb565>>(
 // -- System overlays ---------------------------------------------------------
 
 /// Draw a colored rounded-rect frame that runs parallel to the bezel
-/// curve, used as a system-wide low-battery warning overlay: amber at
-/// 10-19%, red below 10%. No frame at 20% or above.
+/// curve, used as a system-wide low-battery warning overlay: yellow at
+/// 10-19%, signal red below 10%. No frame at 20% or above.
 ///
 /// Geometry is tuned by eye against the actual visible bezel rather
 /// than `theme::CORNER_R` (which is a conservative *content-safe*
@@ -231,7 +232,7 @@ pub fn battery_warning_frame<D: DrawTarget<Color = Rgb565>>(
 ) {
     use super::theme;
     if percent >= 20 { return; }
-    let color = if percent < 10 { theme::RED } else { theme::AMBER };
+    let color = if percent < 10 { theme::DANGER } else { theme::WARN };
 
     /// Empirical bezel corner radius - tuned by eye against the
     /// actual visible bezel curve, not `theme::CORNER_R`.

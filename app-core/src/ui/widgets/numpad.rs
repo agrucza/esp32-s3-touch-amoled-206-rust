@@ -123,7 +123,7 @@ impl Numpad {
                     primitives::rounded_panel(
                         display,
                         bx, by, BTN_W, BTN_H, BTN_RADIUS,
-                        None, Some(theme::AMBER),
+                        None, Some(theme::SIGNAL),
                     );
                     let rect = embedded_graphics::primitives::Rectangle::new(
                         Point::new(bx, by),
@@ -132,7 +132,7 @@ impl Numpad {
                     fonts::draw_centered_in_rect(
                         display, &fonts::value(),
                         label, rect,
-                        theme::AMBER,
+                        theme::SIGNAL,
                     );
                 } else if row == 3 && col == 0 {
                     // Backspace: glyph only, no border.
@@ -217,7 +217,7 @@ fn draw_backspace_glyph<D: DrawTarget<Color = Rgb565>>(
     display: &mut D, cx: i32, cy: i32,
 ) {
     let half = 8;
-    let style = PrimitiveStyle::with_stroke(theme::AMBER, 2);
+    let style = PrimitiveStyle::with_stroke(theme::SIGNAL, 2);
     Line::new(
         Point::new(cx + half, cy - half),
         Point::new(cx - half, cy),
@@ -238,6 +238,6 @@ fn draw_confirm_glyph<D: DrawTarget<Color = Rgb565>>(
         Point::new(cx - r / 2, cy + r),
         Point::new(cx + r, cy),
     )
-    .into_styled(PrimitiveStyle::with_fill(theme::AMBER))
+    .into_styled(PrimitiveStyle::with_fill(theme::SIGNAL))
     .draw(display).ok();
 }

@@ -1,0 +1,256 @@
+//! App Drawer - the 3x3 launcher grid.
+//!
+//! Reached by swiping up from the bottom edge (the Model routes that
+//! gesture) or by tapping anywhere on the Watch Face. Overlay-style:
+//! launching an app via a tile tap replaces the drawer on the nav
+//! stack (same modal semantics the old pull-down Panel had), so
+//! `Action::Back` from the launched app returns to the pre-drawer
+//! screen, not the drawer itself.
+//!
+//! Layout (410x502 canvas):
+//! - Top row: `APPS` title in signal red + `N INSTALLED` telemetry.
+//! - Middle: 3x3 grid of chamfered tiles (per-app accent border +
+//!   uppercase caption).
+//! - Bottom: 2px home-indicator bar in signal red, centered.
+//!
+//! Non-real tiles are dimmed with a `STEEL` border + chrome caption
+//! so the grid geometry stays complete even with fewer than 9 apps.
+
+use embedded_graphics::{
+    draw_target::DrawTarget,
+    geometry::{Point, Size},
+    pixelcolor::Rgb565,
+    prelude::Primitive,
+    primitives::{PrimitiveStyle, Rectangle},
+    Drawable,
+};
+use heapless::String;
+use core::fmt::Write;
+
+use crate::events::{SwipeDir, SystemEvent};
+use crate::ui::{fonts, glyphs, theme};
+use crate::ui::types::{Action, Screen, ScreenId, SystemData};
+use crate::ui::widgets::tile;
+
+// -- Icon dispatch -----------------------------------------------------------
+//
+// Tile icons are held as an `IconKind` enum rather than a generic
+// function pointer because the glyph functions are generic over
+// `DrawTarget` and `DrawTarget` isn't object-safe (generic methods).
+// The enum lets a const tile table exist while still dispatching to
+// the right concrete glyph in `render`.
+
+#[derive(Clone, Copy)]
+enum IconKind {
+    Clock,
+    Status,
+    Stopwatch,
+    Timer,
+    Alarm,
+    Settings,
+    Heart,
+    /// Placeholder glyph for unused slots: a small hollow square.
+    Empty,
+}
+
+fn draw_icon<D: DrawTarget<Color = Rgb565>>(
+    display: &mut D,
+    kind: IconKind,
+    cx: i32, cy: i32,
+    radius: i32,
+    color: Rgb565,
+) {
+    match kind {
+        IconKind::Clock     => glyphs::clock(display, cx, cy, radius, color),
+        IconKind::Status    => glyphs::status(display, cx, cy, radius, color),
+        IconKind::Stopwatch => glyphs::stopwatch(display, cx, cy, radius, color),
+        IconKind::Timer     => glyphs::hourglass(display, cx, cy, radius, color),
+        IconKind::Alarm     => glyphs::bell(display, cx, cy, radius, color),
+        IconKind::Settings  => glyphs::settings(display, cx, cy, radius, color),
+        IconKind::Heart     => glyphs::heart(display, cx, cy, radius, color),
+        IconKind::Empty     => {
+            let size = (radius * 2 / 3).max(6);
+            let x = cx - size / 2;
+            let y = cy - size / 2;
+            Rectangle::new(Point::new(x, y), Size::new(size as u32, size as u32))
+                .into_styled(PrimitiveStyle::with_stroke(color, 1))
+                .draw(display).ok();
+        }
+    }
+}
+
+// -- Tile table --------------------------------------------------------------
+
+/// One tile. `target` is `None` for placeholders that fill geometry
+/// without launching.
+#[derive(Clone, Copy)]
+struct TileDef {
+    target: Option<ScreenId>,
+    caption: &'static str,
+    border: Rgb565,
+    icon: IconKind,
+}
+
+/// The 9 drawer tiles in row-major order. 6 launch real screens, 3
+/// are placeholders to keep the grid complete.
+const TILES: [TileDef; 9] = [
+    // Row 0
+    TileDef { target: Some(ScreenId::Settings),  caption: "SYS.CFG",  border: theme::SIGNAL, icon: IconKind::Settings  },
+    TileDef { target: None,                      caption: "VITALS",   border: theme::STEEL,  icon: IconKind::Heart     },
+    TileDef { target: Some(ScreenId::Clock),     caption: "CLOCK",    border: theme::CYAN,   icon: IconKind::Clock     },
+    // Row 1
+    TileDef { target: Some(ScreenId::Stopwatch), caption: "STPWCH",   border: theme::GREEN,  icon: IconKind::Stopwatch },
+    TileDef { target: Some(ScreenId::Timer),     caption: "TIMER",    border: theme::ORANGE, icon: IconKind::Timer     },
+    TileDef { target: Some(ScreenId::Alarm),     caption: "ALARM",    border: theme::YELLOW, icon: IconKind::Alarm     },
+    // Row 2
+    TileDef { target: Some(ScreenId::Status),    caption: "DIAG",     border: theme::CYAN,   icon: IconKind::Status    },
+    TileDef { target: None,                      caption: "MSG",      border: theme::STEEL,  icon: IconKind::Empty     },
+    TileDef { target: None,                      caption: "CAL",      border: theme::STEEL,  icon: IconKind::Empty     },
+];
+
+// -- Layout constants --------------------------------------------------------
+
+const HEADER_Y: i32 = 44;
+const GRID_TOP: i32 = 78;
+const GRID_PAD_X: i32 = 24;
+const GRID_GAP: i32 = 8;
+/// Bottom indicator bar geometry.
+const HOME_BAR_Y: i32 = theme::SCREEN_H as i32 - 18;
+const HOME_BAR_W: i32 = 56;
+const HOME_BAR_H: i32 = 2;
+const GRID_BOTTOM: i32 = HOME_BAR_Y - 24;
+
+fn tile_rect(row: usize, col: usize) -> Rectangle {
+    let total_w = theme::SCREEN_W as i32 - GRID_PAD_X * 2;
+    let tile_w = (total_w - GRID_GAP * 2) / 3;
+    let total_h = GRID_BOTTOM - GRID_TOP;
+    let tile_h = (total_h - GRID_GAP * 2) / 3;
+
+    let x = GRID_PAD_X + col as i32 * (tile_w + GRID_GAP);
+    let y = GRID_TOP + row as i32 * (tile_h + GRID_GAP);
+    Rectangle::new(
+        Point::new(x, y),
+        Size::new(tile_w as u32, tile_h as u32),
+    )
+}
+
+// -- Screen -----------------------------------------------------------------
+
+pub struct AppDrawerScreen {
+    /// Pre-drawer screen the user came from. Used to render the
+    /// matching tile with a thicker border so the grid shows the
+    /// "launched from here" context. The Model's nav stack also
+    /// carries this entry, so the close path uses `Action::Back`
+    /// to pop it.
+    previous: ScreenId,
+}
+
+impl AppDrawerScreen {
+    pub fn new(previous: ScreenId) -> Self {
+        Self { previous }
+    }
+}
+
+impl Screen for AppDrawerScreen {
+    fn render<D: DrawTarget<Color = Rgb565>>(&self, display: &mut D, _data: &SystemData) {
+        // Header row.
+        let font_title = fonts::value();
+        fonts::draw_at(
+            display, &font_title,
+            "APPS",
+            GRID_PAD_X, HEADER_Y - 8,
+            theme::SIGNAL,
+        );
+        let installed = TILES.iter().filter(|t| t.target.is_some()).count();
+        let mut buf: String<16> = String::new();
+        let _ = write!(buf, "{:02} INSTALLED", installed);
+        fonts::draw_right(
+            display, &fonts::caption(),
+            buf.as_str(),
+            theme::SCREEN_W as i32 - GRID_PAD_X, HEADER_Y,
+            theme::FG_MUTED,
+        );
+
+        // 3x3 tile grid. The tile whose `target` matches the
+        // pre-drawer screen gets two visual cues as a "you came from
+        // here" indicator (the spec's glow can't be rendered):
+        //   - interior fill in INK_3 (raised dark, distinct from
+        //     the black background the other tiles sit on)
+        //   - 2 px border instead of 1 px
+        for (i, t) in TILES.iter().enumerate() {
+            let row = i / 3;
+            let col = i % 3;
+            let rect = tile_rect(row, col);
+
+            let is_active = t.target == Some(self.previous);
+
+            if is_active {
+                // Fill the tile interior with INK_3 before the border.
+                // A small inset keeps the fill inside the chamfer
+                // lines so the corners still read as cut.
+                let inset = Rectangle::new(
+                    Point::new(rect.top_left.x + 2, rect.top_left.y + 2),
+                    Size::new(
+                        (rect.size.width as i32 - 4) as u32,
+                        (rect.size.height as i32 - 4) as u32,
+                    ),
+                );
+                inset.into_styled(PrimitiveStyle::with_fill(theme::INK_3))
+                    .draw(display).ok();
+            }
+
+            let icon_color = if t.target.is_some() {
+                t.border
+            } else {
+                theme::FG_DIM
+            };
+            let stroke = if is_active { 2 } else { 1 };
+            let kind = t.icon;
+            tile(
+                display, rect,
+                t.border, stroke,
+                |d, cx, cy, c| draw_icon(d, kind, cx, cy, 12, c),
+                icon_color,
+                t.caption,
+            );
+        }
+
+        // Home indicator bar.
+        let cx = theme::SCREEN_W as i32 / 2;
+        Rectangle::new(
+            Point::new(cx - HOME_BAR_W / 2, HOME_BAR_Y),
+            Size::new(HOME_BAR_W as u32, HOME_BAR_H as u32),
+        )
+        .into_styled(PrimitiveStyle::with_fill(theme::SIGNAL))
+        .draw(display).ok();
+    }
+
+    fn on_event(&mut self, event: &SystemEvent, _data: &mut SystemData) -> Action {
+        match event {
+            SystemEvent::PowerButtonLong => Action::Shutdown,
+
+            // Swipe-down from anywhere closes the drawer. `Action::Back`
+            // pops the pre-drawer screen off the nav stack (pushed when
+            // the overlay opened) and switches to it, so we don't
+            // leave an orphan entry behind.
+            SystemEvent::Swipe { dir: SwipeDir::Down, .. } => Action::Back,
+
+            // Tile tap.
+            SystemEvent::Tap { x, y } => {
+                let pt = Point::new(*x as i32, *y as i32);
+                for (i, t) in TILES.iter().enumerate() {
+                    let row = i / 3;
+                    let col = i % 3;
+                    if !tile_rect(row, col).contains(pt) { continue; }
+                    if let Some(target) = t.target {
+                        return Action::SwitchScreen(target);
+                    }
+                    return Action::None;
+                }
+                Action::None
+            }
+
+            _ => Action::None,
+        }
+    }
+}

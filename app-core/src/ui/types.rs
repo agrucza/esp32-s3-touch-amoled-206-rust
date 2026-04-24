@@ -48,11 +48,15 @@ pub enum ScreenId {
     /// (IMU, RTC, Power, ...) via `SettingsScreen`'s own enum, so
     /// from the outside there is only one screen id.
     Settings,
-    /// The pull-down app picker. Not part of the home-row rotation
-    /// (it's reached only via swipe-down-from-header) and constructed
-    /// via `ActiveScreen::new_panel(previous)` because it needs
-    /// context that plain `new(id)` doesn't provide.
-    Panel,
+    /// Quick Access pull-down overlay (brightness + toggle tiles).
+    /// Reached via swipe-down-from-top. Not part of the home-row
+    /// rotation. Constructed via `ActiveScreen::new_quick_access(previous)`
+    /// because it needs context that plain `new(id)` doesn't provide.
+    QuickAccess,
+    /// Pull-up app drawer (3x3 tile launcher). Reached via
+    /// swipe-up-from-bottom and by tapping the watch face. Also
+    /// overlay-like: constructed via `ActiveScreen::new_app_drawer(previous)`.
+    AppDrawer,
 }
 
 // -- Actions -----------------------------------------------------------------
@@ -92,7 +96,8 @@ pub enum Action {
     Redraw,
     /// Switch to a specific target screen. Pushes the current
     /// screen onto the nav stack unless the current screen is
-    /// [`ScreenId::Panel`] (modal replace-top semantics).
+    /// [`ScreenId::QuickAccess`] or [`ScreenId::AppDrawer`] (modal
+    /// replace-top semantics for both overlays).
     SwitchScreen(ScreenId),
     /// Pop the nav stack and return to the previous screen. Falls
     /// back to [`ScreenId::Clock`] when the stack is empty.

@@ -35,14 +35,14 @@ const VALUE_TOP_OFFSET: i32 = 44;
 
 /// Render a "small grey label over large value" layout into `rect`.
 ///
-/// * `label` is drawn in the [`fonts::body`] style in [`theme::TEXT_DIM`],
+/// * `label` is drawn in the [`fonts::body`] style in [`theme::FG_MUTED`],
 ///   horizontally centered near the top of the rect.
 /// * `value` is drawn in the [`fonts::value`] style (bold) in
 ///   `value_color`, horizontally centered below the label.
 ///
 /// The `value_color` parameter lets the screen tint the value for
 /// semantic meaning (white neutral, green pass, red fail, amber
-/// warning). Labels always use `TEXT_DIM` so the value pops.
+/// warning). Labels always use `FG_MUTED` so the value pops.
 pub fn value_body<D: DrawTarget<Color = Rgb565>>(
     display: &mut D,
     rect: Rectangle,
@@ -56,7 +56,7 @@ pub fn value_body<D: DrawTarget<Color = Rgb565>>(
     fonts::draw_centered(
         display, &fonts::body(),
         label, cx, top + LABEL_TOP_OFFSET,
-        theme::TEXT_DIM,
+        theme::FG_MUTED,
     );
 
     fonts::draw_centered(

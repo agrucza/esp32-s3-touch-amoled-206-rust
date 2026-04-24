@@ -231,17 +231,40 @@ impl Model {
             return out;
         }
 
-        // 4. System-level swipe-down-from-top opens the panel.
-        // Push the pre-panel screen so `Action::Back` from an app
-        // launched via the panel returns here, not hardcoded
-        // Clock.
-        if !matches!(self.screen.id(), ScreenId::Panel) {
-            if let SystemEvent::Swipe { dir: SwipeDir::Down, region: SwipeRegion::Top } = event {
-                let previous = self.screen.id();
-                self.nav_stack.push(previous);
-                self.screen.open_panel(previous, &self.cached_data);
-                self.needs_redraw = true;
-                return out;
+        // 4. System-level edge gestures open the two overlays, but
+        // only when the active screen is not already an overlay.
+        // When on an overlay, edge gestures reach the overlay's own
+        // on_event so it can use them as a close affordance (e.g.
+        // swipe-down-from-top inside the drawer means "close", not
+        // "switch to Quick Access").
+        //
+        //   swipe-down-from-top   -> Quick Access
+        //   swipe-up-from-bottom  -> App Drawer
+        //
+        // Each pushes the pre-overlay screen onto the nav stack so
+        // `Action::Back` from an app launched via the overlay returns
+        // to the original screen, not a hardcoded home.
+        if !matches!(self.screen.id(),
+            ScreenId::QuickAccess | ScreenId::AppDrawer)
+        {
+            if let SystemEvent::Swipe { dir, region } = event {
+                match (dir, region) {
+                    (SwipeDir::Down, SwipeRegion::Top) => {
+                        let previous = self.screen.id();
+                        self.nav_stack.push(previous);
+                        self.screen.open_quick_access(previous, &self.cached_data);
+                        self.needs_redraw = true;
+                        return out;
+                    }
+                    (SwipeDir::Up, SwipeRegion::Bottom) => {
+                        let previous = self.screen.id();
+                        self.nav_stack.push(previous);
+                        self.screen.open_app_drawer(previous, &self.cached_data);
+                        self.needs_redraw = true;
+                        return out;
+                    }
+                    _ => {}
+                }
             }
         }
 
@@ -341,9 +364,11 @@ impl Model {
         match action {
             Action::None => {
                 // Home-row nav fallback: content L/R swipes cycle
-                // through home-row apps (not when already on
-                // Panel).
-                if !matches!(self.screen.id(), ScreenId::Panel) {
+                // through home-row apps (not when already on an
+                // overlay).
+                if !matches!(self.screen.id(),
+                    ScreenId::QuickAccess | ScreenId::AppDrawer)
+                {
                     if let SystemEvent::Swipe { dir, region: SwipeRegion::Content } = event {
                         match dir {
                             SwipeDir::Right => {
@@ -363,12 +388,40 @@ impl Model {
             }
             Action::Redraw => self.needs_redraw = true,
             Action::SwitchScreen(id) => {
-                // Modal replace-top: when leaving Panel the
-                // pre-panel screen is already on the nav stack.
-                if !matches!(self.screen.id(), ScreenId::Panel) {
+                // Modal replace-top: when leaving an overlay the
+                // pre-overlay screen is already on the nav stack.
+                let current_is_overlay = matches!(
+                    self.screen.id(),
+                    ScreenId::QuickAccess | ScreenId::AppDrawer,
+                );
+                if !current_is_overlay {
                     self.nav_stack.push(self.screen.id());
                 }
-                self.screen.switch_to(id, &self.cached_data);
+                // Overlay targets route through their dedicated
+                // constructors so the overlay gets the right
+                // `previous` context. `switch_to` would call
+                // `ActiveScreen::new(overlay_id)`, which panics on
+                // purpose (overlays can't be built without a
+                // previous).
+                match id {
+                    ScreenId::QuickAccess => {
+                        let prev = if current_is_overlay {
+                            self.nav_stack.peek_or_home()
+                        } else {
+                            // We just pushed `self.screen.id()` above,
+                            // so that's the pre-overlay screen.
+                            self.nav_stack.peek_or_home()
+                        };
+                        self.screen.open_quick_access(prev, &self.cached_data);
+                    }
+                    ScreenId::AppDrawer => {
+                        let prev = self.nav_stack.peek_or_home();
+                        self.screen.open_app_drawer(prev, &self.cached_data);
+                    }
+                    _ => {
+                        self.screen.switch_to(id, &self.cached_data);
+                    }
+                }
                 self.needs_redraw = true;
             }
             Action::Back => {
