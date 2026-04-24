@@ -634,3 +634,108 @@ pub fn moon<D: DrawTarget<Color = Rgb565>>(
         (radius * 2) as u32,
     ).into_styled(carve).draw(display).ok();
 }
+
+// -- Status-bar mini glyphs --------------------------------------------------
+//
+// Tiny 10 px variants drawn for the 18 px top status bar. The regular
+// signal / bluetooth glyphs (if/when added in the future) would size
+// for tile use; these two stay small and readable at ~10 px.
+
+/// Signal-strength glyph: 3 ascending vertical bars. Reads at ~10 px.
+/// `radius` is half the glyph's visible size (so a 10 px icon is
+/// radius = 5).
+pub fn signal_small<D: DrawTarget<Color = Rgb565>>(
+    display: &mut D, cx: i32, cy: i32, radius: i32, color: Rgb565,
+) {
+    let fill = PrimitiveStyle::with_fill(color);
+    let bar_w = 2i32;
+    let gap = 1i32;
+    let total_w = 3 * bar_w + 2 * gap;
+    let start_x = cx - total_w / 2;
+    let base_y = cy + radius;
+    let heights = [radius, radius * 3 / 2, radius * 2];
+    for (i, h) in heights.iter().enumerate() {
+        let x = start_x + i as i32 * (bar_w + gap);
+        let y = base_y - *h;
+        Rectangle::new(Point::new(x, y), Size::new(bar_w as u32, *h as u32))
+            .into_styled(fill).draw(display).ok();
+    }
+}
+
+/// Bluetooth glyph: stylised "B" rune formed by a vertical spine
+/// and two pairs of diagonals creating the upper and lower lobes.
+/// Readable at ~10 px.
+pub fn bluetooth_small<D: DrawTarget<Color = Rgb565>>(
+    display: &mut D, cx: i32, cy: i32, radius: i32, color: Rgb565,
+) {
+    let stroke = PrimitiveStyle::with_stroke(color, 1);
+    let r = radius;
+    // Vertical spine.
+    Line::new(Point::new(cx, cy - r), Point::new(cx, cy + r))
+        .into_styled(stroke).draw(display).ok();
+    // Upper lobe: (cx-r, cy-r/2) -> (cx+r/2, cy-r) -> (cx, cy)
+    Line::new(Point::new(cx - r, cy - r / 2), Point::new(cx + r / 2, cy - r))
+        .into_styled(stroke).draw(display).ok();
+    Line::new(Point::new(cx + r / 2, cy - r), Point::new(cx, cy))
+        .into_styled(stroke).draw(display).ok();
+    // Lower lobe: (cx-r, cy+r/2) -> (cx+r/2, cy+r) -> (cx, cy)
+    Line::new(Point::new(cx - r, cy + r / 2), Point::new(cx + r / 2, cy + r))
+        .into_styled(stroke).draw(display).ok();
+    Line::new(Point::new(cx + r / 2, cy + r), Point::new(cx, cy))
+        .into_styled(stroke).draw(display).ok();
+}
+
+/// Lightning-bolt glyph: classic filled zigzag. Used as the flash /
+/// flashlight icon.
+pub fn bolt<D: DrawTarget<Color = Rgb565>>(
+    display: &mut D, cx: i32, cy: i32, radius: i32, color: Rgb565,
+) {
+    let stroke = PrimitiveStyle::with_stroke(color, 2);
+    // 3-segment zigzag from upper-right down through middle-left,
+    // middle-right, to lower-left apex.
+    let r = radius;
+    Line::new(Point::new(cx + r / 2, cy - r), Point::new(cx - r / 2, cy))
+        .into_styled(stroke).draw(display).ok();
+    Line::new(Point::new(cx - r / 2, cy), Point::new(cx + r / 2, cy))
+        .into_styled(stroke).draw(display).ok();
+    Line::new(Point::new(cx + r / 2, cy), Point::new(cx - r / 2, cy + r))
+        .into_styled(stroke).draw(display).ok();
+}
+
+/// Lock glyph: padlock body (filled rect) with a shackle arc above
+/// drawn as three line segments approximating a half-circle.
+pub fn lock<D: DrawTarget<Color = Rgb565>>(
+    display: &mut D, cx: i32, cy: i32, radius: i32, color: Rgb565,
+) {
+    let stroke = PrimitiveStyle::with_stroke(color, 2);
+    let fill = PrimitiveStyle::with_fill(color);
+
+    // Body: filled rectangle in the lower half.
+    let body_w = radius * 7 / 4;
+    let body_h = radius * 5 / 4;
+    let body_x = cx - body_w / 2;
+    let body_y = cy;
+    Rectangle::new(
+        Point::new(body_x, body_y),
+        Size::new(body_w as u32, body_h as u32),
+    ).into_styled(fill).draw(display).ok();
+
+    // Shackle: three strokes forming a U inverted above the body.
+    let sh_hw = radius * 3 / 4;
+    let sh_top = cy - radius * 3 / 2;
+    // Left vertical.
+    Line::new(
+        Point::new(cx - sh_hw, cy),
+        Point::new(cx - sh_hw, sh_top + 2),
+    ).into_styled(stroke).draw(display).ok();
+    // Top curve approximated as a horizontal line.
+    Line::new(
+        Point::new(cx - sh_hw, sh_top + 2),
+        Point::new(cx + sh_hw, sh_top + 2),
+    ).into_styled(stroke).draw(display).ok();
+    // Right vertical.
+    Line::new(
+        Point::new(cx + sh_hw, sh_top + 2),
+        Point::new(cx + sh_hw, cy),
+    ).into_styled(stroke).draw(display).ok();
+}

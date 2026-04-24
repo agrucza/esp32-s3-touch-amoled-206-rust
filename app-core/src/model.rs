@@ -100,8 +100,13 @@ pub enum Effect {
     /// Persist the current `Config` to `/system/config/config.bin`
     /// on flash. Triggered by `Action::PersistConfig` after any
     /// change to `cached_data.config`.
-    #[allow(dead_code)] // wired once a Config field becomes user-editable
     SaveConfig,
+
+    /// Apply a new display brightness immediately. Value is the
+    /// hardware register range (0..=255) after Model maps the
+    /// slider percent. Fired by `Action::SetBrightness` so the
+    /// change is visible before the next SaveConfig persists it.
+    SetDisplayBrightness(u8),
 }
 
 /// Application state machine.
@@ -119,6 +124,12 @@ pub struct Model {
     sleeping: bool,
     needs_redraw: bool,
     config: Config,
+    /// True when `config` has been mutated since the last
+    /// `SaveConfig` emit. Any action that changes config flips
+    /// this; the next `TouchReleased` flushes it to flash. Keeps
+    /// flash writes down to one per gesture rather than one per
+    /// drag-pixel.
+    config_dirty: bool,
     buzz: Option<BuzzPattern>,
 }
 
@@ -127,7 +138,12 @@ impl Model {
     /// config. The initial screen is Clock; its `on_mount` hook is
     /// fired so any state it seeds from `cached_data` is ready
     /// before the first render.
-    pub fn new(cached_data: SystemData, config: Config, now: Instant) -> Self {
+    pub fn new(mut cached_data: SystemData, config: Config, now: Instant) -> Self {
+        // Seed the SystemData config snapshot so screens can read
+        // current config through `data.config.*` without any
+        // per-screen plumbing. Model keeps this in sync on every
+        // config mutation from here on.
+        cached_data.config = config;
         let mut screen = ActiveScreen::new(ScreenId::Clock);
         screen.mount(&cached_data);
         Self {
@@ -139,6 +155,7 @@ impl Model {
             sleeping: false,
             needs_redraw: true, // first frame always draws
             config,
+            config_dirty: false,
             buzz: None,
         }
     }
@@ -271,6 +288,16 @@ impl Model {
         // 5. Forward to the active screen and dispatch its Action.
         let action = self.screen.on_event(event, &mut self.cached_data);
         self.dispatch_action(event, action, &mut out);
+
+        // 6. Config flush: any action above may have dirtied the
+        // config (e.g. `SetBrightness`). We deliberately defer the
+        // flash write until the gesture ends so a drag scrub hits
+        // flash once on release instead of once per pixel.
+        if self.config_dirty && matches!(event, SystemEvent::TouchReleased) {
+            let _ = out.push(Effect::SaveConfig);
+            self.config_dirty = false;
+        }
+
         out
     }
 
@@ -511,7 +538,49 @@ impl Model {
                 let _ = out.push(Effect::SaveConfig);
                 self.needs_redraw = true;
             }
+            Action::SetBrightness { percent } => {
+                // Apply to hardware + in-memory config immediately,
+                // mark config dirty. The save is deferred to the
+                // next `TouchReleased` so a drag scrub doesn't
+                // hammer flash.
+                self.apply_brightness(percent, out);
+                self.config_dirty = true;
+                self.needs_redraw = true;
+            }
+            Action::ToggleNightMode => {
+                self.config.display.night_mode = !self.config.display.night_mode;
+                // Re-apply the current brightness through the shared
+                // path so the new `max_brightness_pct` clamps the
+                // value (turn-on caps down, turn-off is a no-op).
+                let current_pct =
+                    (self.config.display.brightness_active as u16 * 100 / 255) as u8;
+                self.apply_brightness(current_pct, out);
+                self.config_dirty = true;
+                self.needs_redraw = true;
+            }
         }
+    }
+
+    /// Shared "apply a new brightness" path used by both the
+    /// preview and commit brightness actions. Clamps the slider
+    /// percent (5..=100), maps to the panel's 0..=255 register,
+    /// updates the live `Config` and its `SystemData` snapshot so
+    /// screens see the new value on the next render, and queues
+    /// the `SetDisplayBrightness` effect so firmware applies it
+    /// to the panel immediately. Does NOT emit `SaveConfig` - the
+    /// caller decides whether this change is a preview (no save)
+    /// or a commit (`SaveConfig` emitted alongside).
+    fn apply_brightness(&mut self, percent: u8, out: &mut Effects) {
+        // Slider range depends on night_mode (5..30 on, 5..100 off),
+        // so the clamp here honours the current mode. The stored
+        // `brightness_active` is always the real effective value -
+        // no separate "user intent vs hardware" split.
+        let max_pct = self.config.display.max_brightness_pct();
+        let pct = percent.clamp(5, max_pct);
+        let hw = (pct as u16 * 255 / 100) as u8;
+        self.config.display.brightness_active = hw;
+        self.cached_data.config = self.config;
+        let _ = out.push(Effect::SetDisplayBrightness(hw));
     }
 
     /// Enter low-power sleep. Idempotent. Queues the display-Off

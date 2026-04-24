@@ -161,11 +161,23 @@ pub enum Action {
     /// need to emit both.
     PersistAlarms,
     /// Persist the current `Config` to flash. Same subsumes-Redraw
-    /// semantics as `PersistAlarms`. No current callers; wired so
-    /// the first display/theme setting that gains edit UI can just
-    /// return this.
-    #[allow(dead_code)] // wired once a Config field becomes user-editable
+    /// semantics as `PersistAlarms`. Emitted internally by the
+    /// Model after a `SetBrightness`-style mutation; screens can
+    /// also return this directly after editing other Config fields.
     PersistConfig,
+
+    /// Set the display brightness to `percent` (5..=100 slider range).
+    /// Applies live to the panel and updates the in-memory `Config`
+    /// + `SystemData` snapshot. Model also marks config dirty; the
+    /// eventual save happens on the next `TouchReleased`, so finger
+    /// scrubbing doesn't hammer flash.
+    SetBrightness { percent: u8 },
+
+    /// Flip `config.display.night_mode`. Model applies the new
+    /// effective brightness to the panel immediately (night mode
+    /// caps at `DisplayConfig::NIGHT_MODE_MAX_HW`) and marks config
+    /// dirty so the change persists on the next `TouchReleased`.
+    ToggleNightMode,
 }
 
 // -- Persistent app state ----------------------------------------------------
@@ -530,6 +542,12 @@ pub struct SystemData {
     /// `usize`. Updated by the main loop whenever a
     /// [`SystemEvent::SelfTestUpdated`] arrives.
     pub self_tests: [SelfTestResult; NUM_SELF_TESTS],
+    /// Read-only snapshot of the runtime `Config`. Kept in sync by
+    /// the Model so any screen can render `data.config.*` without
+    /// its own backing store or constructor parameter. Mutation
+    /// goes through `Action::PersistConfig` / `Action::SetBrightness`
+    /// etc., never by a screen editing this field.
+    pub config: crate::config::Config,
 }
 
 // -- Screen trait -------------------------------------------------------------

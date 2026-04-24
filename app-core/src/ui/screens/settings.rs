@@ -29,17 +29,26 @@ use crate::ui::types::{
     Action, Screen, SelfTestId, SelfTestResult, SystemData, SystemEvent,
 };
 use crate::ui::widgets::{
-    card, chamfered_panel, header, header_icon_hit, row, tag_label, value_body,
-    CardStyle, RowControl,
-    Numpad, NumpadAction, NOTCH, ROW_H, MAX_DIGITS,
+    card, chamfered_panel, header, header_icon_hit, home_indicator, row, status_bar,
+    tag_label, value_body, CardStyle, RowControl,
+    Numpad, NumpadAction, NOTCH, ROW_H, STATUS_BAR_H, MAX_DIGITS,
 };
 
 // -- Settings chrome helpers -------------------------------------------------
 
-/// Top of the Nightwatch header bar on settings sub-views.
-const HDR_TOP: i32 = 30;
+/// Y of the top status bar shared by every sub-view.
+const STATUS_Y: i32 = 0;
+/// Horizontal inset for status-bar content to clear the bezel arc.
+const STATUS_X_INSET: i32 = 85;
+
+/// Top of the Nightwatch header bar on settings sub-views. Sits
+/// below the status bar with an 8 px gap so the two read as
+/// separated.
+const HDR_TOP: i32 = STATUS_Y + STATUS_BAR_H + 8;
 /// Height of the Nightwatch header bar (see [`widgets::HEADER_H`]).
 const HDR_H: i32 = 28;
+/// Y of the bottom home-indicator bar.
+const HOME_BAR_Y: i32 = theme::SCREEN_H as i32 - 18;
 
 /// Header rect shared by every settings sub-view.
 fn hdr_rect() -> Rectangle {
@@ -49,13 +58,32 @@ fn hdr_rect() -> Rectangle {
     )
 }
 
-/// Draw the standard Nightwatch settings header with `title` and a
-/// fixed `SYS.CFG` telemetry on the right. `accent` tints the
-/// chevron, title, and hairline.
+/// Draw the full Settings chrome: top status bar (tinted by `accent`,
+/// carrying live HH:MM + battery% from `data`), Nightwatch header
+/// with `title` + `SYS.CFG` telemetry, and bottom home-indicator bar.
 fn draw_header<D: DrawTarget<Color = Rgb565>>(
-    display: &mut D, title: &str, accent: Rgb565,
+    display: &mut D,
+    data: &SystemData,
+    title: &str,
+    accent: Rgb565,
 ) {
+    let mut time_buf: heapless::String<8> = heapless::String::new();
+    let _ = core::fmt::Write::write_fmt(
+        &mut time_buf,
+        format_args!("{:02}:{:02}", data.time.hour, data.time.minute),
+    );
+    status_bar(
+        display,
+        STATUS_Y,
+        time_buf.as_str(),
+        data.power.battery_percent,
+        accent,
+        STATUS_X_INSET,
+    );
+
     header(display, hdr_rect(), title, "SYS.CFG", accent);
+
+    home_indicator(display, HOME_BAR_Y, accent);
 }
 
 /// Y of the first row below the settings header.
@@ -291,10 +319,6 @@ const NUMPAD_TIME_Y: i32 = 90;
 pub struct SettingsScreen {
     view: SettingsView,
     numpad: Numpad,
-    /// Screen-local Night Mode flag. Not persisted - this row is a
-    /// demo of the Nightwatch toggle widget; wire to `config.night_mode`
-    /// once that preference is added to `Config`.
-    night_mode: bool,
 }
 
 impl SettingsScreen {
@@ -302,7 +326,6 @@ impl SettingsScreen {
         Self {
             view: SettingsView::Index,
             numpad: Numpad::new(6),
-            night_mode: false,
         }
     }
 }
@@ -353,19 +376,20 @@ impl SettingsScreen {
     fn render_index<D: DrawTarget<Color = Rgb565>>(
         &self, display: &mut D, data: &SystemData,
     ) {
-        draw_header(display, "SETTINGS", theme::SIGNAL);
+        draw_header(display, data, "SETTINGS", theme::SIGNAL);
         render_rows(display, data, INDEX_ROWS);
 
-        // Night Mode toggle row. Not backed by persisted config yet;
-        // kept in-session on the SettingsScreen struct so we can
-        // demo the Nightwatch toggle widget live.
+        // Night Mode toggle row, backed by `data.config.display.night_mode`.
+        // Tapping fires `Action::ToggleNightMode` so the Model flips
+        // the config, clamps brightness if needed, and persists on
+        // the next `TouchReleased`.
         let rect = row_rect(INDEX_ROWS.len());
         row(
             display, rect,
             |d, cx, cy, c| draw_row_icon(d, RowIcon::NightMode, cx, cy, c),
             theme::CYAN,
             "NIGHT MODE",
-            RowControl::Toggle(self.night_mode),
+            RowControl::Toggle(data.config.display.night_mode),
         );
     }
 
@@ -382,8 +406,7 @@ impl SettingsScreen {
                 // Night Mode row lives at index INDEX_ROWS.len().
                 let pt = Point::new(*x as i32, *y as i32);
                 if row_rect(INDEX_ROWS.len()).contains(pt) {
-                    self.night_mode = !self.night_mode;
-                    return Action::Redraw;
+                    return Action::ToggleNightMode;
                 }
                 Action::None
             }
@@ -438,7 +461,7 @@ impl SettingsScreen {
     fn render_clock<D: DrawTarget<Color = Rgb565>>(
         &self, display: &mut D, data: &SystemData,
     ) {
-        draw_header(display, "CLOCK", theme::SIGNAL);
+        draw_header(display, data, "CLOCK", theme::SIGNAL);
 
         // Time card.
         let rect = layout::content_card_rect(0);
@@ -514,9 +537,9 @@ impl SettingsScreen {
 
 impl SettingsScreen {
     fn render_time_entry<D: DrawTarget<Color = Rgb565>>(
-        &self, display: &mut D, _data: &SystemData,
+        &self, display: &mut D, data: &SystemData,
     ) {
-        draw_header(display, "SET TIME", theme::SIGNAL);
+        draw_header(display, data, "SET TIME", theme::SIGNAL);
 
         // HH:MM:SS label from digits.
         let p = pad_digits(&self.numpad.digits, 6);
@@ -585,9 +608,9 @@ impl SettingsScreen {
 
 impl SettingsScreen {
     fn render_date_entry<D: DrawTarget<Color = Rgb565>>(
-        &self, display: &mut D, _data: &SystemData,
+        &self, display: &mut D, data: &SystemData,
     ) {
-        draw_header(display, "SET DATE", theme::SIGNAL);
+        draw_header(display, data, "SET DATE", theme::SIGNAL);
 
         // DD.MM.YYYY label from digits.
         let p = pad_digits(&self.numpad.digits, 8);
@@ -660,7 +683,7 @@ impl SettingsScreen {
         display: &mut D,
         data: &SystemData,
     ) {
-        draw_header(display, "6-AXIS IMU", theme::SIGNAL);
+        draw_header(display, data, "6-AXIS IMU", theme::SIGNAL);
 
         for (i, test) in IMU_TESTS.iter().enumerate() {
             let rect = layout::content_card_rect(i);
@@ -718,7 +741,7 @@ impl SettingsScreen {
         display: &mut D,
         data: &SystemData,
     ) {
-        draw_header(display, "BATTERY", theme::SIGNAL);
+        draw_header(display, data, "BATTERY", theme::SIGNAL);
 
         // Status card: current percent + voltage (from the live
         // PowerData snapshot, not from the history). History is for
@@ -785,7 +808,7 @@ impl SettingsScreen {
         display: &mut D,
         data: &SystemData,
     ) {
-        draw_header(display, "STORAGE", theme::SIGNAL);
+        draw_header(display, data, "STORAGE", theme::SIGNAL);
         render_rows(display, data, STORAGE_INDEX_ROWS);
     }
 
@@ -821,7 +844,7 @@ impl SettingsScreen {
         display: &mut D,
         data: &SystemData,
     ) {
-        draw_header(display, "FLASH", theme::SIGNAL);
+        draw_header(display, data, "FLASH", theme::SIGNAL);
 
         // Chamfered HUD panel with a hanging FLASH tag ribbon - the
         // spec's "tag-labelled panel" idiom. Body carries the usage
@@ -890,7 +913,7 @@ impl SettingsScreen {
         display: &mut D,
         data: &SystemData,
     ) {
-        draw_header(display, "SD CARD", theme::SIGNAL);
+        draw_header(display, data, "SD CARD", theme::SIGNAL);
 
         // Card 0: status line. Green dot when online, yellow when
         // not. Read-only; the button below triggers the probe.
@@ -942,7 +965,7 @@ impl SettingsScreen {
         display: &mut D,
         data: &SystemData,
     ) {
-        draw_header(display, "RESTORE FROM SD", theme::SIGNAL);
+        draw_header(display, data, "RESTORE FROM SD", theme::SIGNAL);
 
         // Card 0: summary of what happens. Always present so the
         // user has context whether SD is online or not.
@@ -1022,9 +1045,9 @@ impl SettingsScreen {
     fn render_storage_factory_reset<D: DrawTarget<Color = Rgb565>>(
         &self,
         display: &mut D,
-        _data: &SystemData,
+        data: &SystemData,
     ) {
-        draw_header(display, "FACTORY RESET", theme::DANGER);
+        draw_header(display, data, "FACTORY RESET", theme::DANGER);
 
         // Card 0: warning summary (read-only).
         let warn_rect = layout::content_card_rect(0);

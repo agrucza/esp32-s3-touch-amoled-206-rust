@@ -28,7 +28,7 @@ use embedded_graphics::{
     geometry::{Point, Size},
     pixelcolor::Rgb565,
     prelude::Primitive,
-    primitives::{Line, PrimitiveStyle, Rectangle},
+    primitives::{PrimitiveStyle, Rectangle},
     Drawable,
 };
 use heapless::String;
@@ -49,6 +49,11 @@ const PAD_X: i32 = 22;
 const HINT_Y: i32 = 8;
 const HINT_W: i32 = 36;
 const HINT_H: i32 = 2;
+/// Height of the top tap-zone that opens Quick Access. Matches the
+/// spec's "36 px invisible hit zone" covering the visible cyan hint
+/// bar and a bit of air above/below it. Full screen width - taps
+/// don't have to land on the 36 px visible bar specifically.
+const QA_TAP_H: i32 = 36;
 
 /// Y of the telemetry strip's glyph tops.
 const TELE_Y: i32 = PAD_TOP;
@@ -94,10 +99,19 @@ impl Screen for ClockScreen {
             // A seconds tick forces a redraw so `:SS` and the MM
             // digit keep in sync with the RTC.
             SystemEvent::TimeUpdated { .. } => Action::Redraw,
-            // Tap anywhere on the face → open the app drawer. A
-            // future revision could narrow this to a hero-band hit
-            // test so the bottom pills can carry their own taps.
-            SystemEvent::Tap { .. } => Action::SwitchScreen(ScreenId::AppDrawer),
+            // Dual tap zones per spec:
+            // - Top 36 px (the swipe-hint band) → Quick Access
+            // - Anywhere else → App Drawer
+            // The 36 px top zone matches the visible HINT_W bar but
+            // runs full width (`y < QA_TAP_H`), so the user doesn't
+            // have to land on the thin cyan line precisely.
+            SystemEvent::Tap { y, .. } => {
+                if (*y as i32) < QA_TAP_H {
+                    Action::SwitchScreen(ScreenId::QuickAccess)
+                } else {
+                    Action::SwitchScreen(ScreenId::AppDrawer)
+                }
+            }
             _ => Action::None,
         }
     }
@@ -129,7 +143,7 @@ fn draw_telemetry_strip<D: DrawTarget<Color = Rgb565>>(
     // telemetry to report yet.
     fonts::draw_at(
         display, &font,
-        "SYS-ID 232.29CB",
+        "SYS-ID 232.29CB.98B",
         PAD_X, TELE_Y,
         theme::CYAN,
     );

@@ -1,48 +1,31 @@
-//! Content body helpers - layouts that draw into a `Rectangle` or
-//! at a coordinate.
+//! Content body layouts - what goes inside containers.
 //!
-//! Body helpers are the "what goes inside" counterpart to
-//! [`containers`]. They take a rect (or center point) and draw a
-//! specific content layout into it. They don't own state, don't
-//! draw backgrounds, don't care what (if anything) is under them.
-//! Use them composed with a [`card`] for the standard look, or
-//! standalone on a bare rect for inline values without a panel.
-//!
-//! [`containers`]: super::containers
-//! [`card`]: super::containers::card
+//! Body helpers take a rect (or center point) and draw a specific
+//! content layout into it. They don't own state and don't draw
+//! backgrounds, so screens can compose them with any container or
+//! use them standalone on a bare rect.
 
 use embedded_graphics::{
     draw_target::DrawTarget,
+    geometry::Point,
     pixelcolor::Rgb565,
-    primitives::Rectangle,
+    prelude::Primitive,
+    primitives::{Line, PrimitiveStyle, Rectangle},
+    Drawable,
 };
 
 use crate::ui::{fonts, layout, primitives, theme};
 
+use super::controls::{toggle, TOGGLE_H, TOGGLE_W};
+
 // -- value_body --------------------------------------------------------------
 
-// Tuned against the "All Bookings" reference visual: small grey
-// label sitting near the top of the card, large bold value centered
-// below it in the lower half. Offsets are from the top of the rect.
-
-/// Vertical position of the label text (top of glyphs), measured
-/// from the top of the card rect.
 const LABEL_TOP_OFFSET: i32 = 20;
-
-/// Vertical position of the value text (top of glyphs), measured
-/// from the top of the card rect.
 const VALUE_TOP_OFFSET: i32 = 44;
 
-/// Render a "small grey label over large value" layout into `rect`.
-///
-/// * `label` is drawn in the [`fonts::body`] style in [`theme::FG_MUTED`],
-///   horizontally centered near the top of the rect.
-/// * `value` is drawn in the [`fonts::value`] style (bold) in
-///   `value_color`, horizontally centered below the label.
-///
-/// The `value_color` parameter lets the screen tint the value for
-/// semantic meaning (white neutral, green pass, red fail, amber
-/// warning). Labels always use `FG_MUTED` so the value pops.
+/// Render a "small label over large value" layout into `rect`.
+/// Label uses `FG_MUTED`; value uses the caller-supplied color so
+/// rows can tint pass/fail/warn semantics.
 pub fn value_body<D: DrawTarget<Color = Rgb565>>(
     display: &mut D,
     rect: Rectangle,
@@ -68,20 +51,7 @@ pub fn value_body<D: DrawTarget<Color = Rgb565>>(
 
 // -- icon_button -------------------------------------------------------------
 
-/// Render a tappable icon button: a filled circle with an icon
-/// glyph inside and a caption label below.
-///
-/// Uses the standard circle radius, glyph radius, and label gap
-/// from [`layout`] so every icon button across the UI is visually
-/// consistent.
-///
-/// This is the shared pattern used by:
-/// - Clock home face (hourglass/TIMER, bell/ALARM circles)
-/// - Stopwatch (play-pause/START-PAUSE, stop/RESET circles)
-/// - Panel app picker (app icon circles with active/inactive state)
-///
-/// The `glyph` closure receives `(display, cx, cy, glyph_radius,
-/// glyph_color)` and should call one of the `glyphs::*` functions.
+/// Render a tappable circle button: filled circle + icon glyph + caption.
 pub fn icon_button<D, F>(
     display: &mut D,
     cx: i32, cy: i32,
@@ -108,4 +78,101 @@ where
         cx, cy + layout::CIRCLE_RADIUS + layout::CIRCLE_LABEL_GAP,
         label_color,
     );
+}
+
+// -- row ---------------------------------------------------------------------
+
+/// Height of one settings-style row.
+pub const ROW_H: i32 = 52;
+
+/// Horizontal padding inside a row (left and right edges).
+pub const ROW_PAD: i32 = 18;
+
+/// Icon column width. Label starts after `ROW_PAD + ROW_ICON_COL_W`.
+pub const ROW_ICON_COL_W: i32 = 40;
+
+/// Right-side control on a `row`. Keeps the hot path allocation-free:
+/// callers pick a variant and the renderer picks the draw code.
+pub enum RowControl<'a> {
+    /// Right-pointing chevron. Signals "tap to navigate".
+    Chevron(Rgb565),
+    /// Toggle switch (on/off state).
+    Toggle(bool),
+    /// Short inline text (e.g. `STABLE`, `14/32K`).
+    Inline(&'a str, Rgb565),
+}
+
+/// Draw one settings-style row inside `rect`.
+///
+/// Layout:
+/// - 16 px icon (caller-supplied closure), left column, vertically centered.
+/// - Uppercase label in `FG`, starting `ROW_ICON_COL_W` px past the icon column.
+/// - Right control per `control`, right-aligned to `rect.right - ROW_PAD`.
+/// - 1 px steel hairline along the full width of the bottom.
+pub fn row<D, F>(
+    display: &mut D,
+    rect: Rectangle,
+    icon: F,
+    icon_color: Rgb565,
+    label: &str,
+    control: RowControl,
+)
+where
+    D: DrawTarget<Color = Rgb565>,
+    F: FnOnce(&mut D, i32, i32, Rgb565),
+{
+    let x = rect.top_left.x;
+    let y = rect.top_left.y;
+    let w = rect.size.width as i32;
+    let h = rect.size.height as i32;
+    let cy = y + h / 2;
+
+    let icon_cx = x + ROW_PAD + 8;
+    icon(display, icon_cx, cy, icon_color);
+
+    let label_font = fonts::body();
+    let label_h = 14;
+    fonts::draw_at(
+        display, &label_font, label,
+        x + ROW_PAD + ROW_ICON_COL_W, cy - label_h / 2,
+        theme::FG,
+    );
+
+    match control {
+        RowControl::Chevron(color) => {
+            let right_x = x + w - ROW_PAD;
+            let stroke = PrimitiveStyle::with_stroke(color, 2);
+            Line::new(
+                Point::new(right_x - 6, cy - 5),
+                Point::new(right_x, cy),
+            ).into_styled(stroke).draw(display).ok();
+            Line::new(
+                Point::new(right_x, cy),
+                Point::new(right_x - 6, cy + 5),
+            ).into_styled(stroke).draw(display).ok();
+        }
+        RowControl::Toggle(on) => {
+            let top = Point::new(
+                x + w - ROW_PAD - TOGGLE_W,
+                cy - TOGGLE_H / 2,
+            );
+            toggle(display, top, on);
+        }
+        RowControl::Inline(text, color) => {
+            // Match the label's body font (helvR14) so both sides of
+            // the row read at the same weight.
+            let font = fonts::body();
+            fonts::draw_right(
+                display, &font, text,
+                x + w - ROW_PAD, cy - 7,
+                color,
+            );
+        }
+    }
+
+    Line::new(
+        Point::new(x, y + h - 1),
+        Point::new(x + w - 1, y + h - 1),
+    ).into_styled(PrimitiveStyle::with_stroke(theme::STEEL, 1))
+    .draw(display).ok();
 }

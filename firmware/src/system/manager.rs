@@ -681,6 +681,9 @@ impl SystemManager<'static> {
                     );
                     self.refresh_storage_usage().await;
                 }
+                Effect::SetDisplayBrightness(value) => {
+                    self.display.set_brightness(value).await;
+                }
             }
         }
     }

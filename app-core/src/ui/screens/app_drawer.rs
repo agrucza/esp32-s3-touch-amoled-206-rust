@@ -30,7 +30,7 @@ use core::fmt::Write;
 use crate::events::{SwipeDir, SystemEvent};
 use crate::ui::{fonts, glyphs, theme};
 use crate::ui::types::{Action, Screen, ScreenId, SystemData};
-use crate::ui::widgets::tile;
+use crate::ui::widgets::{home_indicator, status_bar, tile, STATUS_BAR_H};
 
 // -- Icon dispatch -----------------------------------------------------------
 //
@@ -110,14 +110,19 @@ const TILES: [TileDef; 9] = [
 
 // -- Layout constants --------------------------------------------------------
 
-const HEADER_Y: i32 = 44;
-const GRID_TOP: i32 = 78;
+/// Y of the top status bar. Bar ends at STATUS_Y + STATUS_BAR_H = 18.
+const STATUS_Y: i32 = 0;
+/// Horizontal inset for the status bar content so time / battery clear
+/// the bezel arc at y~3..15.
+const STATUS_X_INSET: i32 = 85;
+
+const HEADER_Y: i32 = STATUS_Y + STATUS_BAR_H + 26;
+const GRID_TOP: i32 = HEADER_Y + 34;
 const GRID_PAD_X: i32 = 24;
 const GRID_GAP: i32 = 8;
-/// Bottom indicator bar geometry.
+
+/// Y of the bottom home-indicator bar.
 const HOME_BAR_Y: i32 = theme::SCREEN_H as i32 - 18;
-const HOME_BAR_W: i32 = 56;
-const HOME_BAR_H: i32 = 2;
 const GRID_BOTTOM: i32 = HOME_BAR_Y - 24;
 
 fn tile_rect(row: usize, col: usize) -> Rectangle {
@@ -152,7 +157,22 @@ impl AppDrawerScreen {
 }
 
 impl Screen for AppDrawerScreen {
-    fn render<D: DrawTarget<Color = Rgb565>>(&self, display: &mut D, _data: &SystemData) {
+    fn render<D: DrawTarget<Color = Rgb565>>(&self, display: &mut D, data: &SystemData) {
+        // Top status bar: HH:MM on the left, signal / BT / battery % on
+        // the right, signal-red tint.
+        let mut time_buf: heapless::String<8> = heapless::String::new();
+        let _ = core::fmt::Write::write_fmt(
+            &mut time_buf,
+            format_args!("{:02}:{:02}", data.time.hour, data.time.minute),
+        );
+        status_bar(
+            display,
+            STATUS_Y,
+            time_buf.as_str(),
+            data.power.battery_percent,
+            theme::SIGNAL,
+            STATUS_X_INSET,
+        );
         // Header row.
         let font_title = fonts::value();
         fonts::draw_at(
@@ -215,14 +235,7 @@ impl Screen for AppDrawerScreen {
             );
         }
 
-        // Home indicator bar.
-        let cx = theme::SCREEN_W as i32 / 2;
-        Rectangle::new(
-            Point::new(cx - HOME_BAR_W / 2, HOME_BAR_Y),
-            Size::new(HOME_BAR_W as u32, HOME_BAR_H as u32),
-        )
-        .into_styled(PrimitiveStyle::with_fill(theme::SIGNAL))
-        .draw(display).ok();
+        home_indicator(display, HOME_BAR_Y, theme::SIGNAL);
     }
 
     fn on_event(&mut self, event: &SystemEvent, _data: &mut SystemData) -> Action {

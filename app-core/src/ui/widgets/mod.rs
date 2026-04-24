@@ -1,31 +1,27 @@
-//! Reusable UI widgets.
+//! Reusable UI widgets, grouped by kind.
 //!
-//! Four layers:
-//!
-//! * [`containers`] - rounded-card visual wrappers. Used by the
-//!   stopwatch / timer / alarm / status / numpad screens.
-//! * [`bodies`] - content layouts (label + value, icon + label) that
-//!   draw into a `Rectangle`. Composable with any container.
-//! * [`chrome`] - legacy screen-level decorations (rounded header
-//!   bar, vertical page scrollbar) for the card-style screens.
-//! * [`nightwatch`] - sharp HUD-panel vocabulary for the watch face,
-//!   app grid, and settings screens: chamfered hex outlines, hanging
-//!   tag labels, red-hairline headers, toggles, 1-row dividers.
-//!
-//! Screens pick exactly one chrome style - card or nightwatch - to
-//! avoid mixing rounded and sharp on the same surface.
+//! * [`containers`] - surfaces that content lives inside: rounded
+//!   `card`, chamfered `chamfered_panel`, `tile`, `tag_label`.
+//! * [`bodies`] - content layouts drawn into a rect: `value_body`,
+//!   `icon_button`, `row`.
+//! * [`chrome`] - screen-level decorations: legacy `header_bar`, the
+//!   Nightwatch `header`, top `status_bar`, bottom `home_indicator`,
+//!   `page_scrollbar`.
+//! * [`controls`] - interactive primitives: `toggle`.
+//! * [`numpad`] - multi-digit entry widget for set-time / set-duration
+//!   flows.
 
-pub mod containers;
 pub mod bodies;
 pub mod chrome;
-pub mod nightwatch;
+pub mod containers;
+pub mod controls;
 pub mod numpad;
 
-pub use containers::{card, CardStyle};
-pub use bodies::{icon_button, value_body};
-pub use chrome::{header_bar, page_scrollbar, HeaderIcon, HEADER_ICON_HIT_WIDTH};
-pub use nightwatch::{
-    chamfered_panel, header, header_icon_hit, row, tile, toggle, tag_label,
-    RowControl, NOTCH, HEADER_H, ROW_H, TAG_LABEL_H,
+pub use bodies::{icon_button, row, value_body, RowControl, ROW_H};
+pub use chrome::{
+    header, header_bar, header_icon_hit, home_indicator, page_scrollbar, status_bar,
+    HeaderIcon, HEADER_H, HEADER_ICON_HIT_WIDTH, HOME_INDICATOR_H, STATUS_BAR_H,
 };
+pub use containers::{card, chamfered_panel, tag_label, tile, CardStyle, NOTCH, TAG_LABEL_H};
+pub use controls::toggle;
 pub use numpad::{Numpad, NumpadAction, MAX_DIGITS};

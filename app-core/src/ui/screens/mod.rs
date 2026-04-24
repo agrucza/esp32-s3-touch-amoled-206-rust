@@ -83,8 +83,8 @@ impl ActiveScreen {
         }
     }
 
-    /// Create the Quick Access overlay, remembering which screen
-    /// it should return to on close.
+    /// Create the Quick Access overlay, remembering which screen it
+    /// should return to on close.
     pub fn new_quick_access(previous: ScreenId) -> Self {
         Self::QuickAccess(quick_access::QuickAccessScreen::new(previous))
     }
