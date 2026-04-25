@@ -274,3 +274,96 @@ impl VStack {
         self.next_y += height;
     }
 }
+
+// -- ScrollState -------------------------------------------------------------
+
+/// Vertical-scroll state for a screen (or sub-region of a screen)
+/// whose content can be longer than its viewport.
+///
+/// Owned per scrollable region - a screen with two independent
+/// scroll areas holds two `ScrollState`s. Drag tracking is internal:
+/// the screen's event handler forwards `TouchPressed { y }` deltas
+/// to [`ScrollState::drag`] and `TouchReleased` to
+/// [`ScrollState::release`].
+///
+/// The viewport rect is owned by the screen (its position depends
+/// on chrome geometry above and below); only the 1-D vertical
+/// offset and drag math live here. The current `max` (typically
+/// `content_h - viewport_h`) is passed into [`Self::drag`] each
+/// call, so the state struct never has to be mutated from `render`,
+/// where the screen is `&self`.
+///
+/// ## Usage sketch
+///
+/// ```ignore
+/// // In on_event:
+/// SystemEvent::TouchPressed { y, .. } => {
+///     let max = (content_h - viewport_h).max(0);
+///     if scroll.drag(*y as i32, max) { return Action::Redraw; }
+/// }
+/// SystemEvent::TouchReleased => scroll.release(),
+///
+/// // In render:
+/// // ... draw fixed chrome ...
+/// let mut clipped = display.clipped(&viewport_rect);
+/// // ... draw scrollable content with y - scroll.offset() ...
+/// ```
+#[derive(Debug, Default)]
+pub struct ScrollState {
+    offset: i32,
+    last_drag_y: Option<i32>,
+}
+
+impl ScrollState {
+    /// Fresh state - offset 0, no active drag.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Current scroll offset in pixels. 0 = top of content aligned
+    /// with viewport top. Positive = content scrolled up (rows
+    /// below come into view).
+    pub fn offset(&self) -> i32 {
+        self.offset
+    }
+
+    /// Process a `TouchPressed` during a drag, clamped to
+    /// `0..=max`. The first call of a gesture just records the
+    /// starting y; subsequent calls translate finger motion into
+    /// scroll-offset deltas (drag up = scroll forward into content).
+    /// Returns `true` if the offset changed (the screen should
+    /// redraw).
+    pub fn drag(&mut self, y: i32, max: i32) -> bool {
+        let max = max.max(0);
+        match self.last_drag_y {
+            None => {
+                self.last_drag_y = Some(y);
+                // Clamp once on touch-down in case `max` shrank
+                // since the last gesture.
+                let new_offset = self.offset.clamp(0, max);
+                if new_offset != self.offset {
+                    self.offset = new_offset;
+                    return true;
+                }
+                false
+            }
+            Some(last) => {
+                let delta = y - last;
+                self.last_drag_y = Some(y);
+                let new_offset = (self.offset - delta).clamp(0, max);
+                if new_offset != self.offset {
+                    self.offset = new_offset;
+                    true
+                } else {
+                    false
+                }
+            }
+        }
+    }
+
+    /// Reset drag tracking on `TouchReleased`. The offset stays
+    /// where the finger left it (no inertia / momentum).
+    pub fn release(&mut self) {
+        self.last_drag_y = None;
+    }
+}

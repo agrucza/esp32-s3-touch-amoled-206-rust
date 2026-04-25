@@ -774,3 +774,28 @@ pub fn power<D: DrawTarget<Color = Rgb565>>(
     ).into_styled(PrimitiveStyle::with_stroke(color, 3))
         .draw(display).ok();
 }
+
+/// Zigbee glyph: hexagon outline. Six lines tracing a regular
+/// hexagon, the classic Zigbee branding shape and a clean way to
+/// signal "mesh network" at row-icon scale.
+pub fn zigbee<D: DrawTarget<Color = Rgb565>>(
+    display: &mut D, cx: i32, cy: i32, radius: i32, color: Rgb565,
+) {
+    let stroke = PrimitiveStyle::with_stroke(color, 2);
+    let half_w = radius * 7 / 8;
+    let qtr_h  = radius / 2;
+    let pts = [
+        (cx,            cy - radius),
+        (cx + half_w,   cy - qtr_h),
+        (cx + half_w,   cy + qtr_h),
+        (cx,            cy + radius),
+        (cx - half_w,   cy + qtr_h),
+        (cx - half_w,   cy - qtr_h),
+    ];
+    for i in 0..6 {
+        let (x1, y1) = pts[i];
+        let (x2, y2) = pts[(i + 1) % 6];
+        Line::new(Point::new(x1, y1), Point::new(x2, y2))
+            .into_styled(stroke).draw(display).ok();
+    }
+}

@@ -16,7 +16,7 @@
 //! better than a flat row list.
 
 use embedded_graphics::{
-    draw_target::DrawTarget,
+    draw_target::{DrawTarget, DrawTargetExt},
     geometry::{Point, Size},
     pixelcolor::Rgb565,
     primitives::{Line, PrimitiveStyle, Rectangle, StyledDrawable},
@@ -89,14 +89,17 @@ fn draw_header<D: DrawTarget<Color = Rgb565>>(
 /// Y of the first row below the settings header.
 const ROWS_TOP: i32 = HDR_TOP + HDR_H + 8;
 
-/// Rect for the Nth row in the settings Index / Storage sub-index.
+/// Rect for the Nth row in the settings Index / Storage sub-index,
+/// adjusted by the current scroll offset. `scroll = 0` returns the
+/// row's natural position; positive `scroll` shifts everything up
+/// (rows below come into view).
 ///
 /// Rows span the full screen width; the `row` widget's internal
 /// `ROW_PAD` keeps the icon, label, and hairline visually inset from
 /// the bezel arc on its own. Letting the rect go edge-to-edge means
 /// the row reads as a real list row rather than a floating panel.
-fn row_rect(index: usize) -> Rectangle {
-    let y = ROWS_TOP + index as i32 * ROW_H;
+fn row_rect(index: usize, scroll: i32) -> Rectangle {
+    let y = ROWS_TOP + index as i32 * ROW_H - scroll;
     Rectangle::new(
         Point::new(0, y),
         Size::new(theme::SCREEN_W as u32, ROW_H as u32),
@@ -125,6 +128,19 @@ enum SettingsView {
     StorageSd,
     StorageRestoreFlash,
     StorageFactoryReset,
+    /// Display preferences (brightness slider + auto-lock). Stub
+    /// for now; real contents land in W3d.
+    Display,
+    /// Wi-Fi configuration / status. Stub for now; real contents
+    /// land when networking is wired up.
+    Wifi,
+    /// Bluetooth pairing / status. Stub for now; real contents
+    /// land when BLE is wired up.
+    Bluetooth,
+    /// Zigbee mesh status. Only meaningful on the C6 board variant
+    /// (S3 has no 802.15.4 radio); shown as a stub on S3 for now,
+    /// to be feature-gated when the C6 build path lands.
+    Zigbee,
 }
 
 // -- Index row metadata ------------------------------------------------------
@@ -147,6 +163,10 @@ enum RowIcon {
     Sounds,
     Dnd,
     AlwaysOn,
+    Display,
+    Wifi,
+    Bluetooth,
+    Zigbee,
 }
 
 fn draw_row_icon<D: DrawTarget<Color = Rgb565>>(
@@ -166,6 +186,10 @@ fn draw_row_icon<D: DrawTarget<Color = Rgb565>>(
         RowIcon::Sounds    => glyphs::bell(display, cx, cy, r, color),
         RowIcon::Dnd       => glyphs::dnd(display, cx, cy, r, color),
         RowIcon::AlwaysOn  => glyphs::power(display, cx, cy, r, color),
+        RowIcon::Display   => glyphs::bolt(display, cx, cy, r, color),
+        RowIcon::Wifi      => glyphs::signal_small(display, cx, cy, r, color),
+        RowIcon::Bluetooth => glyphs::bluetooth_small(display, cx, cy, r, color),
+        RowIcon::Zigbee    => glyphs::zigbee(display, cx, cy, r, color),
     }
 }
 
@@ -299,8 +323,17 @@ const STORAGE_INDEX_ROWS: &[IndexRow] = &[
     },
 ];
 
+/// Empty inline value - causes navigate rows to render a chevron
+/// instead of an inline string.
+fn empty_value(_data: &SystemData) -> String<20> { String::new() }
+
 const INDEX_ROWS: &[IndexRow] = &[
-    // Spec prefs (toggles first - most-used live up top).
+    // Spec prefs first - most-used live up top.
+    IndexRow {
+        label: "DISPLAY",
+        icon: RowIcon::Display,
+        kind: RowKind::Navigate { target: SettingsView::Display, value_fn: empty_value },
+    },
     IndexRow {
         label: "SOUNDS",
         icon: RowIcon::Sounds,
@@ -320,6 +353,21 @@ const INDEX_ROWS: &[IndexRow] = &[
         label: "NIGHT MODE",
         icon: RowIcon::NightMode,
         kind: RowKind::Toggle { is_on: night_mode_is_on, action: Action::ToggleNightMode },
+    },
+    IndexRow {
+        label: "WIFI",
+        icon: RowIcon::Wifi,
+        kind: RowKind::Navigate { target: SettingsView::Wifi, value_fn: empty_value },
+    },
+    IndexRow {
+        label: "BLUETOOTH",
+        icon: RowIcon::Bluetooth,
+        kind: RowKind::Navigate { target: SettingsView::Bluetooth, value_fn: empty_value },
+    },
+    IndexRow {
+        label: "ZIGBEE",
+        icon: RowIcon::Zigbee,
+        kind: RowKind::Navigate { target: SettingsView::Zigbee, value_fn: empty_value },
     },
     // Diagnostic / drill rows.
     IndexRow {
@@ -341,6 +389,14 @@ const INDEX_ROWS: &[IndexRow] = &[
         label: "STORAGE",
         icon: RowIcon::Storage,
         kind: RowKind::Navigate { target: SettingsView::Storage, value_fn: storage_value },
+    },
+    // Destructive action - last, danger-tinted icon. Re-uses the
+    // existing Factory Reset sub-view (the spec's Purge+Reset and
+    // our Factory Reset are the same destructive action).
+    IndexRow {
+        label: "PURGE+RESET",
+        icon: RowIcon::Skull,
+        kind: RowKind::Navigate { target: SettingsView::StorageFactoryReset, value_fn: empty_value },
     },
 ];
 
@@ -374,6 +430,10 @@ const NUMPAD_TIME_Y: i32 = 90;
 pub struct SettingsScreen {
     view: SettingsView,
     numpad: Numpad,
+    /// Vertical scroll state for the index sub-view. Other sub-views
+    /// don't currently scroll; if they ever do, give them their own
+    /// `ScrollState` instance.
+    index_scroll: layout::ScrollState,
 }
 
 impl SettingsScreen {
@@ -381,6 +441,7 @@ impl SettingsScreen {
         Self {
             view: SettingsView::Index,
             numpad: Numpad::new(6),
+            index_scroll: layout::ScrollState::new(),
         }
     }
 }
@@ -401,6 +462,10 @@ impl Screen for SettingsScreen {
             SettingsView::StorageSd => self.render_storage_sd(display, data),
             SettingsView::StorageRestoreFlash => self.render_storage_restore(display, data),
             SettingsView::StorageFactoryReset => self.render_storage_factory_reset(display, data),
+            SettingsView::Display   => self.render_stub(display, data, "DISPLAY"),
+            SettingsView::Wifi      => self.render_stub(display, data, "WIFI"),
+            SettingsView::Bluetooth => self.render_stub(display, data, "BLUETOOTH"),
+            SettingsView::Zigbee    => self.render_stub(display, data, "ZIGBEE"),
         }
     }
 
@@ -421,6 +486,10 @@ impl Screen for SettingsScreen {
             SettingsView::StorageSd => self.storage_sd_event(event, data),
             SettingsView::StorageRestoreFlash => self.storage_restore_event(event, data),
             SettingsView::StorageFactoryReset => self.storage_factory_reset_event(event, data),
+            SettingsView::Display
+            | SettingsView::Wifi
+            | SettingsView::Bluetooth
+            | SettingsView::Zigbee => self.stub_event(event, data),
         }
     }
 }
@@ -431,8 +500,18 @@ impl SettingsScreen {
     fn render_index<D: DrawTarget<Color = Rgb565>>(
         &self, display: &mut D, data: &SystemData,
     ) {
+        // Chrome (status bar, header, home indicator) renders against
+        // the un-clipped target so it stays fixed regardless of scroll.
         draw_header(display, data, "SETTINGS", theme::SIGNAL);
-        render_rows(display, data, INDEX_ROWS);
+
+        // Rows render into a clipped sub-target spanning the area
+        // between the header bottom and the home indicator. Anything
+        // that scrolls past those bounds is hard-clipped at the
+        // hardware level.
+        let viewport = index_viewport_rect();
+        let scroll = self.index_scroll.offset();
+        let mut clipped = display.clipped(&viewport);
+        render_rows(&mut clipped, data, INDEX_ROWS, scroll);
     }
 
     fn index_event(&mut self, event: &SystemEvent, _data: &mut SystemData) -> Action {
@@ -441,9 +520,28 @@ impl SettingsScreen {
                 Action::Back
             }
             SystemEvent::Tap { x, y } => {
-                if let Some(action) = row_hit(*x, *y, INDEX_ROWS, &mut self.view) {
+                if let Some(action) = row_hit(
+                    *x, *y, INDEX_ROWS,
+                    self.index_scroll.offset(),
+                    &index_viewport_rect(),
+                    &mut self.view,
+                ) {
                     return action;
                 }
+                Action::None
+            }
+            // Finger drag on the index scrolls the row list. First
+            // TouchPressed of a gesture records the y; subsequent
+            // ones translate finger motion into scroll deltas.
+            SystemEvent::TouchPressed { y, .. } => {
+                let max = index_scroll_max();
+                if self.index_scroll.drag(*y as i32, max) {
+                    return Action::Redraw;
+                }
+                Action::None
+            }
+            SystemEvent::TouchReleased => {
+                self.index_scroll.release();
                 Action::None
             }
             _ => Action::None,
@@ -451,16 +549,36 @@ impl SettingsScreen {
     }
 }
 
+/// Visible-row viewport rect for the index. Spans from just below
+/// the header hairline to just above the home-indicator bar.
+fn index_viewport_rect() -> Rectangle {
+    let top = ROWS_TOP;
+    let bot = HOME_BAR_Y - 4;
+    Rectangle::new(
+        Point::new(0, top),
+        Size::new(theme::SCREEN_W as u32, (bot - top) as u32),
+    )
+}
+
+/// Maximum valid scroll offset for the index based on the current
+/// row count and viewport height. Zero when content fits.
+fn index_scroll_max() -> i32 {
+    let viewport_h = index_viewport_rect().size.height as i32;
+    let content_h = INDEX_ROWS.len() as i32 * ROW_H;
+    (content_h - viewport_h).max(0)
+}
+
 // -- Shared row rendering / hit-testing for index + storage sub-index --------
 
 /// Render a stack of [`IndexRow`]s using `nightwatch::row`. Navigate
 /// rows show an inline value (or a chevron when the value is empty);
-/// toggle rows show a Nightwatch toggle.
+/// toggle rows show a Nightwatch toggle. `scroll` shifts each row's
+/// y by `-scroll` so the caller can render into a clipped viewport.
 fn render_rows<D: DrawTarget<Color = Rgb565>>(
-    display: &mut D, data: &SystemData, rows: &[IndexRow],
+    display: &mut D, data: &SystemData, rows: &[IndexRow], scroll: i32,
 ) {
     for (i, r) in rows.iter().enumerate() {
-        let rect = row_rect(i);
+        let rect = row_rect(i, scroll);
         let kind = r.icon;
         match r.kind {
             RowKind::Navigate { value_fn, .. } => {
@@ -491,16 +609,22 @@ fn render_rows<D: DrawTarget<Color = Rgb565>>(
     }
 }
 
-/// Row hit test: returns the `Action` the tap should produce, or
-/// `None` if the tap missed every row. Navigate rows update the
-/// caller's `view` via the `&mut SettingsView` and return
-/// `Action::Redraw`; toggle rows return their own action variant.
+/// Row hit test, scroll-aware. Returns the `Action` the tap should
+/// produce, or `None` if the tap missed every row. Taps outside
+/// `viewport` are rejected (so a tap landing on the chrome area
+/// doesn't accidentally trigger a row that happens to be scrolled
+/// into the chrome's pixels). Navigate rows update the caller's
+/// `view` via the `&mut SettingsView` and return `Action::Redraw`;
+/// toggle rows return their own action variant.
 fn row_hit(
-    x: u16, y: u16, rows: &[IndexRow], view: &mut SettingsView,
+    x: u16, y: u16, rows: &[IndexRow],
+    scroll: i32, viewport: &Rectangle,
+    view: &mut SettingsView,
 ) -> Option<Action> {
     let pt = Point::new(x as i32, y as i32);
+    if !viewport.contains(pt) { return None; }
     for (i, r) in rows.iter().enumerate() {
-        if !row_rect(i).contains(pt) { continue; }
+        if !row_rect(i, scroll).contains(pt) { continue; }
         return Some(match r.kind {
             RowKind::Navigate { target, .. } => {
                 *view = target;
@@ -537,7 +661,7 @@ impl SettingsScreen {
         value_body(display, rect, "DATE", date_buf.as_str(), theme::FG);
     }
 
-    fn clock_event(&mut self, event: &SystemEvent, data: &SystemData) -> Action {
+    fn clock_event(&mut self, event: &SystemEvent, data: &mut SystemData) -> Action {
         match event {
             // Keep the display fresh.
             SystemEvent::TimeUpdated { .. } => Action::Redraw,
@@ -937,7 +1061,10 @@ impl SettingsScreen {
         data: &SystemData,
     ) {
         draw_header(display, data, "STORAGE", theme::SIGNAL);
-        render_rows(display, data, STORAGE_INDEX_ROWS);
+        // Storage sub-index doesn't scroll today (4 rows always
+        // fit). Scroll = 0; if more storage rows land later,
+        // give SettingsScreen a second `ScrollState` and viewport.
+        render_rows(display, data, STORAGE_INDEX_ROWS, 0);
     }
 
     fn storage_index_event(&mut self, event: &SystemEvent, _data: &mut SystemData) -> Action {
@@ -954,7 +1081,11 @@ impl SettingsScreen {
                 Action::Redraw
             }
             SystemEvent::Tap { x, y } => {
-                if let Some(action) = row_hit(*x, *y, STORAGE_INDEX_ROWS, &mut self.view) {
+                if let Some(action) = row_hit(
+                    *x, *y, STORAGE_INDEX_ROWS,
+                    0, &index_viewport_rect(),
+                    &mut self.view,
+                ) {
                     return action;
                 }
                 Action::None
@@ -1254,6 +1385,54 @@ impl SettingsScreen {
                     return Action::FactoryReset;
                 }
                 Action::None
+            }
+            _ => Action::None,
+        }
+    }
+
+    // -- Stub sub-views (Display / Wifi / Bluetooth / Zigbee) --------------
+    //
+    // Placeholders so the Settings index can navigate to these rows
+    // before their real contents land. Renders a grey tag-labeled
+    // panel saying "WIP" with the view's title; back chevron and
+    // right-swipe both pop to the index.
+
+    fn render_stub<D: DrawTarget<Color = Rgb565>>(
+        &self,
+        display: &mut D,
+        data: &SystemData,
+        title: &str,
+    ) {
+        draw_header(display, data, title, theme::SIGNAL);
+        let mut s = layout::VStack::new(LEAF_TOP_Y);
+        let panel = s.slot(80);
+        chamfered_panel(display, panel, NOTCH, theme::STEEL, 1);
+        tag_label(
+            display,
+            panel.top_left.x,
+            panel.top_left.y,
+            "WIP",
+            theme::STEEL,
+            NOTCH,
+        );
+        fonts::draw_centered_in_rect(
+            display, &fonts::value(),
+            "TODO", panel, theme::FG_DIM,
+        );
+    }
+
+    fn stub_event(&mut self, event: &SystemEvent, _data: &mut SystemData) -> Action {
+        match event {
+            SystemEvent::Tap { x, y } if header_back_hit(*x, *y) => {
+                self.view = SettingsView::Index;
+                Action::Redraw
+            }
+            SystemEvent::Swipe {
+                dir: crate::events::SwipeDir::Right,
+                region: crate::events::SwipeRegion::Content,
+            } => {
+                self.view = SettingsView::Index;
+                Action::Redraw
             }
             _ => Action::None,
         }
