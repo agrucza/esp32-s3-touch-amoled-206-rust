@@ -1,28 +1,41 @@
 //! Quick Access pull-down overlay.
 //!
 //! Reached by swiping down from the top edge (the Model routes that
-//! gesture via `open_quick_access`). Contents are **visual only** for
-//! now - no driver calls, no persistence. Tile state and brightness
-//! live on the screen struct and reset to defaults every time the
-//! overlay reopens.
+//! gesture via `open_quick_access`). Brightness slider and four of
+//! the eight tiles back real config; the remaining four are visual
+//! stubs until their underlying drivers land.
 //!
 //! Layout (410x502 canvas):
 //! - Top row: `QUICK.ACCESS` title in cyan + `↓ PULL` telemetry hint.
-//! - Brightness section: `BRIGHTNESS` label + current value + a
-//!   clickable / draggable horizontal bar.
-//! - Toggle grid: 4 across x 2 rows = 8 tiles
-//!   (DND / AIR / FLASH / SAVER / BT / WIFI / SYNC / LOCK), each with
-//!   an icon over its label. Off = steel border + chrome caption.
-//!   On = signal fill + signal border + black icon/caption.
+//! - Brightness section: `BRIGHTNESS` label and a clickable /
+//!   draggable horizontal slider with right-aligned value readout.
+//! - Toggle grid: 4 across x 2 rows = 8 tiles, each with an icon
+//!   over its label. Off = steel border + chrome caption. On =
+//!   signal fill + signal border + black icon/caption.
 //! - Bottom: 2px signal-red home-indicator bar, centered.
 //!
+//! ## Tile kinds
+//!
+//! Each tile is one of three [`TileKind`]s:
+//! - [`Toggle`]: backed by a `config` bool. The on-state comes from
+//!   `is_on(data)` and tap fires `action`.
+//! - [`Momentary`]: no on-state. Tap fires `action` and the tile
+//!   resets to chrome.
+//! - [`Stub`]: ephemeral, on-state stored in `tiles_on`. Tap flips
+//!   it locally; nothing real changes. For tiles whose real backing
+//!   isn't built yet (AIR / FLASH / BT / WIFI).
+//!
+//! [`Toggle`]: TileKind::Toggle
+//! [`Momentary`]: TileKind::Momentary
+//! [`Stub`]: TileKind::Stub
+//!
 //! Interactions:
-//! - Tap / drag on the brightness bar: compute the x-offset within
-//!   the bar, clamp to [5, 100], store locally, redraw. Both taps
-//!   and `TouchPressed` drags are honoured so scrubbing works.
-//! - Tap on a toggle tile: flip the bool for that tile.
+//! - Tap / drag on the brightness bar: scrub via [`SetBrightness`].
+//! - Tap on a tile: dispatch per its [`TileKind`].
 //! - Swipe up from anywhere: close overlay, return to the pre-overlay
 //!   screen.
+//!
+//! [`SetBrightness`]: Action::SetBrightness
 
 use embedded_graphics::{
     draw_target::DrawTarget,
@@ -48,19 +61,19 @@ use crate::ui::widgets::{
 /// AMOLED at room light, so the slider clips the bottom 5 %.
 const BRIGHT_MIN_PCT: u8 = 5;
 
-// -- Toggle tile metadata ----------------------------------------------------
+// -- Tile metadata -----------------------------------------------------------
 
-/// Icon kind for a toggle tile. Enum-dispatched to the concrete glyph
-/// at render time (same pattern the App Drawer uses).
+/// Icon kind for a tile. Enum-dispatched to the concrete glyph at
+/// render time (same pattern the App Drawer uses).
 #[derive(Clone, Copy)]
 enum TileIcon {
-    Dnd,      // moon (close-enough placeholder for do-not-disturb)
-    Airplane, // play triangle (placeholder; no dedicated airplane glyph yet)
-    Flash,    // lightning bolt
-    Saver,    // battery
+    Dnd,
+    Airplane,  // play triangle (placeholder; no dedicated airplane glyph yet)
+    Flash,     // lightning bolt
+    Sounds,    // bell
     Bluetooth,
-    Wifi,     // signal bars (close-enough placeholder)
-    Sync,     // stopwatch dial (placeholder)
+    Wifi,
+    NightMode, // moon
     Lock,
 }
 
@@ -69,32 +82,64 @@ fn draw_tile_icon<D: DrawTarget<Color = Rgb565>>(
 ) {
     let r = 9;
     match kind {
-        TileIcon::Dnd       => glyphs::moon(display, cx, cy, r, color),
+        TileIcon::Dnd       => glyphs::dnd(display, cx, cy, r, color),
         TileIcon::Airplane  => glyphs::play(display, cx, cy, r, color),
         TileIcon::Flash     => glyphs::bolt(display, cx, cy, r, color),
-        TileIcon::Saver     => glyphs::battery(display, cx, cy, r, color),
+        TileIcon::Sounds    => glyphs::bell(display, cx, cy, r, color),
         TileIcon::Bluetooth => glyphs::bluetooth_small(display, cx, cy, r, color),
         TileIcon::Wifi      => glyphs::signal_small(display, cx, cy, r, color),
-        TileIcon::Sync      => glyphs::stopwatch(display, cx, cy, r, color),
+        TileIcon::NightMode => glyphs::moon(display, cx, cy, r, color),
         TileIcon::Lock      => glyphs::lock(display, cx, cy, r, color),
     }
 }
 
+/// What a tile does on tap, plus how it sources its on-state.
 #[derive(Clone, Copy)]
-struct ToggleDef {
-    label: &'static str,
-    icon: TileIcon,
+enum TileKind {
+    /// Backed by a real config bool. `is_on(data)` paints the visual
+    /// state; tap fires `action` (typically `Action::Toggle*`).
+    Toggle { is_on: fn(&SystemData) -> bool, action: Action },
+    /// One-shot button: no on-state; tap fires `action` once.
+    Momentary { action: Action },
+    /// No backing yet. On-state lives on the screen struct in
+    /// [`QuickAccessScreen::tiles_on`]; tap flips it locally so the
+    /// tile still feels responsive while we wait for the underlying
+    /// driver / feature to land.
+    Stub,
 }
 
-const TOGGLES: [ToggleDef; 8] = [
-    ToggleDef { label: "DND",   icon: TileIcon::Dnd       },
-    ToggleDef { label: "AIR",   icon: TileIcon::Airplane  },
-    ToggleDef { label: "FLASH", icon: TileIcon::Flash     },
-    ToggleDef { label: "SAVER", icon: TileIcon::Saver     },
-    ToggleDef { label: "BT",    icon: TileIcon::Bluetooth },
-    ToggleDef { label: "WIFI",  icon: TileIcon::Wifi      },
-    ToggleDef { label: "SYNC",  icon: TileIcon::Sync      },
-    ToggleDef { label: "LOCK",  icon: TileIcon::Lock      },
+#[derive(Clone, Copy)]
+struct TileDef {
+    label: &'static str,
+    icon: TileIcon,
+    kind: TileKind,
+}
+
+fn dnd_is_on(d: &SystemData) -> bool { d.config.dnd }
+fn haptics_is_on(d: &SystemData) -> bool { d.config.haptics_enabled }
+fn night_mode_is_on(d: &SystemData) -> bool { d.config.display.night_mode }
+
+const TILES: [TileDef; 8] = [
+    TileDef {
+        label: "DND", icon: TileIcon::Dnd,
+        kind: TileKind::Toggle { is_on: dnd_is_on, action: Action::ToggleDnd },
+    },
+    TileDef { label: "AIR",    icon: TileIcon::Airplane,  kind: TileKind::Stub },
+    TileDef { label: "FLASH",  icon: TileIcon::Flash,     kind: TileKind::Stub },
+    TileDef {
+        label: "SOUNDS", icon: TileIcon::Sounds,
+        kind: TileKind::Toggle { is_on: haptics_is_on, action: Action::ToggleHaptics },
+    },
+    TileDef { label: "BT",     icon: TileIcon::Bluetooth, kind: TileKind::Stub },
+    TileDef { label: "WIFI",   icon: TileIcon::Wifi,      kind: TileKind::Stub },
+    TileDef {
+        label: "NIGHT", icon: TileIcon::NightMode,
+        kind: TileKind::Toggle { is_on: night_mode_is_on, action: Action::ToggleNightMode },
+    },
+    TileDef {
+        label: "LOCK", icon: TileIcon::Lock,
+        kind: TileKind::Momentary { action: Action::Sleep },
+    },
 ];
 
 // -- Layout constants --------------------------------------------------------
@@ -119,8 +164,6 @@ const TOGGLE_GAP: i32 = 6;
 /// Bottom indicator bar.
 const HOME_BAR_Y: i32 = theme::SCREEN_H as i32 - 18;
 
-const GRID_BOTTOM: i32 = HOME_BAR_Y - 30;
-
 fn bright_bar_rect() -> Rectangle {
     Rectangle::new(
         Point::new(PAD_X, BRIGHT_BAR_Y),
@@ -131,20 +174,20 @@ fn bright_bar_rect() -> Rectangle {
     )
 }
 
+/// Side length of a square toggle tile, sized so 4 tiles + 3 gaps
+/// fill the row's available width.
+fn tile_size() -> i32 {
+    let total_w = theme::SCREEN_W as i32 - PAD_X * 2;
+    (total_w - TOGGLE_GAP * 3) / 4
+}
+
 fn toggle_rect(idx: usize) -> Rectangle {
     let row = idx / 4;
     let col = idx % 4;
-    let total_w = theme::SCREEN_W as i32 - PAD_X * 2;
-    let tile_w = (total_w - TOGGLE_GAP * 3) / 4;
-    let total_h = GRID_BOTTOM - TOGGLE_TOP;
-    let tile_h = (total_h - TOGGLE_GAP) / 2;
-
-    let x = PAD_X + col as i32 * (tile_w + TOGGLE_GAP);
-    let y = TOGGLE_TOP + row as i32 * (tile_h + TOGGLE_GAP);
-    Rectangle::new(
-        Point::new(x, y),
-        Size::new(tile_w as u32, tile_h as u32),
-    )
+    let s = tile_size();
+    let x = PAD_X + col as i32 * (s + TOGGLE_GAP);
+    let y = TOGGLE_TOP + row as i32 * (s + TOGGLE_GAP);
+    Rectangle::new(Point::new(x, y), Size::new(s as u32, s as u32))
 }
 
 // -- Screen ------------------------------------------------------------------
@@ -155,8 +198,10 @@ pub struct QuickAccessScreen {
     /// Field kept for future use (e.g. a "launched from X" hint).
     #[allow(dead_code)]
     previous: ScreenId,
-    /// Per-tile on/off state. Purely in-session - the overlay is
-    /// ephemeral and the tiles don't back real prefs yet.
+    /// Ephemeral on/off state for [`TileKind::Stub`] tiles only.
+    /// Resets every time the overlay reopens, since stub tiles don't
+    /// back any real config yet. Indices align with [`TILES`]; values
+    /// at non-Stub indices are unread.
     tiles_on: [bool; 8],
 }
 
@@ -232,10 +277,14 @@ impl Screen for QuickAccessScreen {
             Some(label.as_str()),
         );
 
-        // Toggle grid.
-        for (i, t) in TOGGLES.iter().enumerate() {
+        // Tile grid.
+        for (i, t) in TILES.iter().enumerate() {
             let rect = toggle_rect(i);
-            let on = self.tiles_on[i];
+            let on = match t.kind {
+                TileKind::Toggle { is_on, .. } => is_on(data),
+                TileKind::Momentary { .. }     => false,
+                TileKind::Stub                 => self.tiles_on[i],
+            };
 
             // Off: chrome label + chrome icon + steel border, no fill.
             // On: black label + black icon on a signal fill, signal border.
@@ -319,11 +368,16 @@ impl Screen for QuickAccessScreen {
                 ).is_some() {
                     return Action::None;
                 }
-                for i in 0..TOGGLES.len() {
-                    if toggle_rect(i).contains(pt) {
-                        self.tiles_on[i] = !self.tiles_on[i];
-                        return Action::Redraw;
-                    }
+                for (i, t) in TILES.iter().enumerate() {
+                    if !toggle_rect(i).contains(pt) { continue; }
+                    return match t.kind {
+                        TileKind::Toggle { action, .. } => action,
+                        TileKind::Momentary { action }  => action,
+                        TileKind::Stub => {
+                            self.tiles_on[i] = !self.tiles_on[i];
+                            Action::Redraw
+                        }
+                    };
                 }
                 Action::None
             }

@@ -179,10 +179,8 @@ enum RowIcon {
     SdCard,
     Restore,
     Skull,
-    NightMode,
     Sounds,
     Dnd,
-    AlwaysOn,
     Display,
     Wifi,
     Bluetooth,
@@ -202,10 +200,8 @@ fn draw_row_icon<D: DrawTarget<Color = Rgb565>>(
         RowIcon::SdCard    => glyphs::sd_card(display, cx, cy, r, color),
         RowIcon::Restore   => glyphs::chip(display, cx, cy, r, color),
         RowIcon::Skull     => glyphs::skull(display, cx, cy, r, color),
-        RowIcon::NightMode => glyphs::moon(display, cx, cy, r, color),
         RowIcon::Sounds    => glyphs::bell(display, cx, cy, r, color),
         RowIcon::Dnd       => glyphs::dnd(display, cx, cy, r, color),
-        RowIcon::AlwaysOn  => glyphs::power(display, cx, cy, r, color),
         RowIcon::Display   => glyphs::bolt(display, cx, cy, r, color),
         RowIcon::Wifi      => glyphs::signal_small(display, cx, cy, r, color),
         RowIcon::Bluetooth => glyphs::bluetooth_small(display, cx, cy, r, color),
@@ -302,14 +298,6 @@ fn storage_restore_value(data: &SystemData) -> String<20> {
     let mut buf = String::new();
     let _ = buf.push_str(if data.storage.sd_online { "" } else { "SD NOT PRESENT" });
     buf
-}
-
-fn night_mode_is_on(data: &SystemData) -> bool {
-    data.config.display.night_mode
-}
-
-fn always_on_is_on(data: &SystemData) -> bool {
-    data.config.display.always_on
 }
 
 fn haptics_is_on(data: &SystemData) -> bool {

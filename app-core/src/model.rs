@@ -586,6 +586,19 @@ impl Model {
                 self.config_dirty = true;
                 self.needs_redraw = true;
             }
+            Action::Sleep => {
+                // Close any active overlay so the next wake lands on
+                // the underlying app, not the still-open QA.
+                if matches!(
+                    self.screen.id(),
+                    ScreenId::QuickAccess | ScreenId::AppDrawer,
+                ) {
+                    let target = self.nav_stack.pop_or_home();
+                    self.screen.switch_to(target, &self.cached_data);
+                }
+                let _ = out.push(Effect::MotorPulse { duration_ms: 100 });
+                self.sleep(out);
+            }
             Action::SetAutoLock { secs } => {
                 self.config.display.off_timeout_s = secs as u64;
                 // Dim fires ~2/3 of the way into the idle window, so

@@ -199,6 +199,14 @@ pub enum Action {
     /// of `secs` (floored at 5s) so the dim stage scales with it.
     /// Marks config dirty; persisted on the next `TouchReleased`.
     SetAutoLock { secs: u32 },
+
+    /// Enter idle-sleep immediately. Same effect as the BOOT button
+    /// while awake (haptic pulse + display off + SLEEP_WATCH
+    /// broadcast). Emitted by Quick Access's LOCK tile so the user
+    /// can sleep the watch without reaching for the side button.
+    /// The Model closes any active overlay before sleeping so the
+    /// next wake lands on the underlying app, not the dismissed QA.
+    Sleep,
 }
 
 // -- Persistent app state ----------------------------------------------------
