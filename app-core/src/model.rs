@@ -121,6 +121,9 @@ pub struct Model {
     nav_stack: NavStack,
     display_state: DisplayState,
     last_activity: Instant,
+    /// Boot timestamp captured in `Model::new`. Source of truth for
+    /// `cached_data.uptime_secs`, recomputed on every `tick`.
+    boot: Instant,
     sleeping: bool,
     needs_redraw: bool,
     config: Config,
@@ -152,6 +155,7 @@ impl Model {
             nav_stack: NavStack::new(),
             display_state: DisplayState::Active,
             last_activity: now,
+            boot: now,
             sleeping: false,
             needs_redraw: true, // first frame always draws
             config,
@@ -308,6 +312,12 @@ impl Model {
         self.tick_buzz(now, &mut out);
         self.apply_dim_state(now, &mut out);
         self.check_idle_sleep(now, &mut out);
+        // Update the uptime snapshot screens render. Cheap (one
+        // duration_since + cast); keeps `data.uptime_secs` accurate
+        // to the current tick without screens needing access to
+        // `Instant::now()` themselves.
+        self.cached_data.uptime_secs =
+            now.duration_since(self.boot).as_secs() as u32;
         out
     }
 
@@ -558,6 +568,24 @@ impl Model {
                 self.config_dirty = true;
                 self.needs_redraw = true;
             }
+            Action::ToggleAlwaysOn => {
+                self.config.display.always_on = !self.config.display.always_on;
+                self.cached_data.config = self.config;
+                self.config_dirty = true;
+                self.needs_redraw = true;
+            }
+            Action::ToggleHaptics => {
+                self.config.haptics_enabled = !self.config.haptics_enabled;
+                self.cached_data.config = self.config;
+                self.config_dirty = true;
+                self.needs_redraw = true;
+            }
+            Action::ToggleDnd => {
+                self.config.dnd = !self.config.dnd;
+                self.cached_data.config = self.config;
+                self.config_dirty = true;
+                self.needs_redraw = true;
+            }
         }
     }
 
@@ -631,9 +659,21 @@ impl Model {
 
     /// Apply the Active <-> Dim transition when awake. No-op when
     /// sleeping (display is Off and [`Self::sleep`] / [`Self::wake`]
-    /// handle that).
+    /// handle that), and no-op when `config.display.always_on` is
+    /// true (the user opted out of idle-dim).
     fn apply_dim_state(&mut self, now: Instant, out: &mut Effects) {
         if self.sleeping {
+            return;
+        }
+        if self.config.display.always_on {
+            // Force Active and skip the timer.
+            if self.display_state != DisplayState::Active {
+                let _ = out.push(Effect::TransitionDisplay {
+                    from: self.display_state,
+                    to: DisplayState::Active,
+                });
+                self.display_state = DisplayState::Active;
+            }
             return;
         }
         let idle = now.duration_since(self.last_activity);
@@ -652,9 +692,9 @@ impl Model {
     }
 
     /// Trigger sleep if the idle timer has expired. No-op if
-    /// already sleeping.
+    /// already sleeping or if `config.display.always_on` is set.
     fn check_idle_sleep(&mut self, now: Instant, out: &mut Effects) {
-        if self.sleeping {
+        if self.sleeping || self.config.display.always_on {
             return;
         }
         let idle = now.duration_since(self.last_activity);

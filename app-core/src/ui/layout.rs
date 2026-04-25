@@ -189,3 +189,88 @@ pub fn header_icon_hit(x: u16, y: u16) -> bool {
         && px < h.top_left.x + crate::ui::widgets::HEADER_ICON_HIT_WIDTH
         && py < h.top_left.y + h.size.height as i32
 }
+
+// -- VStack vertical-stack cursor --------------------------------------------
+
+/// Side margin shared by the standard centered content band on every
+/// sub-view (Battery / IMU / Storage / Vitals / Notifications / ...).
+/// Picked so the band clears the 98 px bezel-corner arc at the rows'
+/// y-band.
+pub const VSTACK_SIDE_MARGIN: i32 = 28;
+
+/// Vertical-stack layout cursor.
+///
+/// State: the next available y-coordinate. Each call advances the
+/// cursor by the requested height, returns the rect at that slot,
+/// and leaves `next_y` ready for the following slot.
+///
+/// Render and event handlers create a VStack with the same `top_y`
+/// and call the same sequence of methods; both sides see identical
+/// rects, so an event-side hit-test can never drift from the
+/// render-side draw rect.
+///
+/// ```ignore
+/// // Same call sequence in render and event handlers:
+/// let mut s = VStack::new(top_y);
+/// let panel = s.slot(100);
+/// s.gap(18);
+/// let (cancel, primary) = s.pair(36, 12);
+/// ```
+pub struct VStack {
+    next_y: i32,
+    x: i32,
+    width: i32,
+}
+
+impl VStack {
+    /// Cursor at `top_y` with the standard centered content band
+    /// ([`VSTACK_SIDE_MARGIN`] inset on each side).
+    pub fn new(top_y: i32) -> Self {
+        let width = theme::SCREEN_W as i32 - VSTACK_SIDE_MARGIN * 2;
+        Self {
+            next_y: top_y,
+            x: VSTACK_SIDE_MARGIN,
+            width,
+        }
+    }
+
+    /// Cursor with a caller-supplied side margin. Use this when a
+    /// sub-view needs a wider or narrower band than the default.
+    #[allow(dead_code)] // surface for future callers; not used yet
+    pub fn with_margin(top_y: i32, side_margin: i32) -> Self {
+        let width = theme::SCREEN_W as i32 - side_margin * 2;
+        Self { next_y: top_y, x: side_margin, width }
+    }
+
+    /// Advance by `height` and return a full-width rect at that slot.
+    pub fn slot(&mut self, height: i32) -> Rectangle {
+        let r = Rectangle::new(
+            Point::new(self.x, self.next_y),
+            Size::new(self.width as u32, height as u32),
+        );
+        self.next_y += height;
+        r
+    }
+
+    /// Advance by `height` and return two side-by-side half-width
+    /// rects with `gap_x` between them. Left rect first, right
+    /// second.
+    pub fn pair(&mut self, height: i32, gap_x: i32) -> (Rectangle, Rectangle) {
+        let half = (self.width - gap_x) / 2;
+        let left = Rectangle::new(
+            Point::new(self.x, self.next_y),
+            Size::new(half as u32, height as u32),
+        );
+        let right = Rectangle::new(
+            Point::new(self.x + half + gap_x, self.next_y),
+            Size::new(half as u32, height as u32),
+        );
+        self.next_y += height;
+        (left, right)
+    }
+
+    /// Advance vertically without producing a rect.
+    pub fn gap(&mut self, height: i32) {
+        self.next_y += height;
+    }
+}

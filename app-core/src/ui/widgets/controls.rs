@@ -10,11 +10,12 @@ use embedded_graphics::{
     geometry::{Point, Size},
     pixelcolor::Rgb565,
     prelude::Primitive,
-    primitives::{PrimitiveStyle, Rectangle},
+    primitives::{Line, PrimitiveStyle, Rectangle},
     Drawable,
 };
 
-use crate::ui::theme;
+use crate::ui::{fonts, theme};
+use crate::ui::widgets::containers::chamfered_panel;
 
 // -- toggle ------------------------------------------------------------------
 
@@ -58,4 +59,85 @@ pub fn toggle<D: DrawTarget<Color = Rgb565>>(
     )
     .into_styled(PrimitiveStyle::with_fill(pill))
     .draw(display).ok();
+}
+
+// -- chamfered_button --------------------------------------------------------
+
+/// Notch size for chamfered buttons. Smaller than the panel notch
+/// (10) so buttons read as a different category of surface.
+pub const BUTTON_NOTCH: i32 = 8;
+
+/// Variant of a [`chamfered_button`].
+#[derive(Clone, Copy)]
+#[allow(dead_code)]
+pub enum ButtonVariant {
+    /// Filled accent background, black text. The "primary action"
+    /// affordance (PURGE, RESTORE, CONFIRM).
+    Primary,
+    /// Steel border, transparent body, FG label. The "cancel /
+    /// non-destructive" affordance.
+    Ghost,
+}
+
+/// Draw a chamfered hex button into `rect`.
+///
+/// `Primary`: interior filled with `accent`, TL+BR corners carved
+///   black to expose the chamfer; label drawn in black so it reads
+///   as printed on the colored body.
+/// `Ghost`: outline-only in steel, label in `theme::FG`.
+pub fn chamfered_button<D: DrawTarget<Color = Rgb565>>(
+    display: &mut D,
+    rect: Rectangle,
+    label: &str,
+    variant: ButtonVariant,
+    accent: Rgb565,
+) {
+    let notch = BUTTON_NOTCH;
+    match variant {
+        ButtonVariant::Primary => {
+            // Fill the whole rect with accent, then carve TL and BR
+            // chamfer corners back to BG so the hex shape reads.
+            Rectangle::new(rect.top_left, rect.size)
+                .into_styled(PrimitiveStyle::with_fill(accent))
+                .draw(display).ok();
+
+            let x = rect.top_left.x;
+            let y = rect.top_left.y;
+            let r = x + rect.size.width as i32 - 1;
+            let b = y + rect.size.height as i32 - 1;
+            for i in 0..notch {
+                // TL chamfer
+                Line::new(
+                    Point::new(x + i, y),
+                    Point::new(x, y + i),
+                )
+                .into_styled(PrimitiveStyle::with_stroke(theme::BG, 1))
+                .draw(display).ok();
+                // BR chamfer
+                Line::new(
+                    Point::new(r - i, b),
+                    Point::new(r, b - i),
+                )
+                .into_styled(PrimitiveStyle::with_stroke(theme::BG, 1))
+                .draw(display).ok();
+            }
+
+            // Outline (so the chamfer reads as a sharp edge, not a
+            // jagged carve).
+            chamfered_panel(display, rect, notch, accent, 1);
+
+            fonts::draw_centered_in_rect(
+                display, &fonts::caption(), label, rect, theme::BG,
+            );
+        }
+        ButtonVariant::Ghost => {
+            // No fill - just the chamfered outline in steel and the
+            // label in FG.
+            chamfered_panel(display, rect, notch, theme::STEEL, 1);
+            let _ = accent; // unused for Ghost
+            fonts::draw_centered_in_rect(
+                display, &fonts::caption(), label, rect, theme::FG,
+            );
+        }
+    }
 }

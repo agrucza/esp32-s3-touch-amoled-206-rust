@@ -629,12 +629,21 @@ impl SystemManager<'static> {
                         }
                     }
                 }
-                Effect::MotorOn => self.power.buzz(),
+                // All three motor effects gate on `config.haptics_enabled`
+                // so the user-facing toggle in Settings actually
+                // suppresses haptic feedback when disabled.
+                Effect::MotorOn => {
+                    if self.model.config().haptics_enabled {
+                        self.power.buzz();
+                    }
+                }
                 Effect::MotorOff => self.power.buzz_stop(),
                 Effect::MotorPulse { duration_ms } => {
-                    self.power.buzz();
-                    Timer::after(Duration::from_millis(duration_ms as u64)).await;
-                    self.power.buzz_stop();
+                    if self.model.config().haptics_enabled {
+                        self.power.buzz();
+                        Timer::after(Duration::from_millis(duration_ms as u64)).await;
+                        self.power.buzz_stop();
+                    }
                 }
                 Effect::RtcCommand(cmd) => RTC_COMMAND.signal(cmd),
                 Effect::ImuCommand(cmd) => IMU_COMMAND.signal(cmd),

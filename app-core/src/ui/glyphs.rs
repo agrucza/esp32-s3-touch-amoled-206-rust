@@ -739,3 +739,38 @@ pub fn lock<D: DrawTarget<Color = Rgb565>>(
         Point::new(cx + sh_hw, cy),
     ).into_styled(stroke).draw(display).ok();
 }
+
+/// Do-not-disturb glyph: outlined circle with a diagonal slash from
+/// upper-left to lower-right. Universal "no" symbol; works as
+/// shorthand at row-icon scale (~16 px) without needing a literal
+/// bell-with-slash composition.
+pub fn dnd<D: DrawTarget<Color = Rgb565>>(
+    display: &mut D, cx: i32, cy: i32, radius: i32, color: Rgb565,
+) {
+    let stroke = PrimitiveStyle::with_stroke(color, 2);
+    Circle::with_center(Point::new(cx, cy), (radius * 2) as u32)
+        .into_styled(stroke).draw(display).ok();
+    Line::new(
+        Point::new(cx - radius * 7 / 10, cy + radius * 7 / 10),
+        Point::new(cx + radius * 7 / 10, cy - radius * 7 / 10),
+    ).into_styled(stroke).draw(display).ok();
+}
+
+/// Power glyph: outlined circle with the top arc broken, plus a
+/// short vertical line in the gap. IEC standby symbol.
+pub fn power<D: DrawTarget<Color = Rgb565>>(
+    display: &mut D, cx: i32, cy: i32, radius: i32, color: Rgb565,
+) {
+    let stroke = PrimitiveStyle::with_stroke(color, 2);
+    // Approximate the broken-top circle with a full circle - at
+    // row-icon scale the overlaid vertical line reads as the gap.
+    Circle::with_center(Point::new(cx, cy + 1), (radius * 2 - 2) as u32)
+        .into_styled(stroke).draw(display).ok();
+    // Vertical bar from above the circle into its top, drawn last
+    // so it covers the circle stroke at the top.
+    Line::new(
+        Point::new(cx, cy - radius - 1),
+        Point::new(cx, cy + 1),
+    ).into_styled(PrimitiveStyle::with_stroke(color, 3))
+        .draw(display).ok();
+}

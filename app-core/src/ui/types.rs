@@ -178,6 +178,20 @@ pub enum Action {
     /// caps at `DisplayConfig::NIGHT_MODE_MAX_HW`) and marks config
     /// dirty so the change persists on the next `TouchReleased`.
     ToggleNightMode,
+
+    /// Flip `config.display.always_on`. Model marks config dirty;
+    /// the manager's idle-dim / idle-off path checks the live config
+    /// each tick so the change takes effect on the next idle window.
+    ToggleAlwaysOn,
+
+    /// Flip `config.haptics_enabled`. Model marks config dirty;
+    /// the manager gates motor effects on the live value.
+    ToggleHaptics,
+
+    /// Flip `config.dnd`. Pure config flip today - the alarm and
+    /// notification routing that should respect this lands when
+    /// those screens get real backing.
+    ToggleDnd,
 }
 
 // -- Persistent app state ----------------------------------------------------
@@ -548,6 +562,10 @@ pub struct SystemData {
     /// goes through `Action::PersistConfig` / `Action::SetBrightness`
     /// etc., never by a screen editing this field.
     pub config: crate::config::Config,
+    /// Seconds since the Model was constructed (i.e., system boot).
+    /// Updated by the Model on every `tick`. Read by screens that
+    /// want to show uptime (Battery, future Vitals).
+    pub uptime_secs: u32,
 }
 
 // -- Screen trait -------------------------------------------------------------

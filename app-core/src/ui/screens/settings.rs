@@ -29,8 +29,8 @@ use crate::ui::types::{
     Action, Screen, SelfTestId, SelfTestResult, SystemData, SystemEvent,
 };
 use crate::ui::widgets::{
-    card, chamfered_panel, header, header_icon_hit, home_indicator, row, status_bar,
-    tag_label, value_body, CardStyle, RowControl,
+    card, chamfered_button, chamfered_panel, header, header_icon_hit, home_indicator, row,
+    status_bar, tag_label, value_body, ButtonVariant, CardStyle, RowControl,
     Numpad, NumpadAction, NOTCH, ROW_H, STATUS_BAR_H, MAX_DIGITS,
 };
 
@@ -144,6 +144,9 @@ enum RowIcon {
     Restore,
     Skull,
     NightMode,
+    Sounds,
+    Dnd,
+    AlwaysOn,
 }
 
 fn draw_row_icon<D: DrawTarget<Color = Rgb565>>(
@@ -160,14 +163,36 @@ fn draw_row_icon<D: DrawTarget<Color = Rgb565>>(
         RowIcon::Restore   => glyphs::chip(display, cx, cy, r, color),
         RowIcon::Skull     => glyphs::skull(display, cx, cy, r, color),
         RowIcon::NightMode => glyphs::moon(display, cx, cy, r, color),
+        RowIcon::Sounds    => glyphs::bell(display, cx, cy, r, color),
+        RowIcon::Dnd       => glyphs::dnd(display, cx, cy, r, color),
+        RowIcon::AlwaysOn  => glyphs::power(display, cx, cy, r, color),
     }
+}
+
+/// What an index row does when tapped, plus how its right-control
+/// renders. Navigate rows open a sub-view and show an inline status
+/// value; toggle rows flip a config bool inline (no nav).
+#[derive(Clone, Copy)]
+enum RowKind {
+    /// Tap opens `target`; the right side shows the inline value
+    /// returned by `value_fn` (empty string => bare row, renders a
+    /// chevron instead).
+    Navigate {
+        target: SettingsView,
+        value_fn: fn(&SystemData) -> String<20>,
+    },
+    /// Tap fires `action` (typically a `Toggle*` config mutation).
+    /// The right side shows a Nightwatch toggle reflecting `is_on`.
+    Toggle {
+        is_on: fn(&SystemData) -> bool,
+        action: Action,
+    },
 }
 
 struct IndexRow {
     label: &'static str,
     icon: RowIcon,
-    value_fn: fn(&SystemData) -> String<20>,
-    target: SettingsView,
+    kind: RowKind,
 }
 
 fn clock_value(data: &SystemData) -> String<20> {
@@ -235,57 +260,87 @@ fn storage_restore_value(data: &SystemData) -> String<20> {
     buf
 }
 
+fn night_mode_is_on(data: &SystemData) -> bool {
+    data.config.display.night_mode
+}
+
+fn always_on_is_on(data: &SystemData) -> bool {
+    data.config.display.always_on
+}
+
+fn haptics_is_on(data: &SystemData) -> bool {
+    data.config.haptics_enabled
+}
+
+fn dnd_is_on(data: &SystemData) -> bool {
+    data.config.dnd
+}
+
 const STORAGE_INDEX_ROWS: &[IndexRow] = &[
     IndexRow {
         label: "FLASH",
         icon: RowIcon::Flash,
-        value_fn: storage_flash_value,
-        target: SettingsView::StorageFlash,
+        kind: RowKind::Navigate { target: SettingsView::StorageFlash, value_fn: storage_flash_value },
     },
     IndexRow {
         label: "SD CARD",
         icon: RowIcon::SdCard,
-        value_fn: storage_sd_value,
-        target: SettingsView::StorageSd,
+        kind: RowKind::Navigate { target: SettingsView::StorageSd, value_fn: storage_sd_value },
     },
     IndexRow {
         label: "RESTORE FROM SD",
         icon: RowIcon::Restore,
-        value_fn: storage_restore_value,
-        target: SettingsView::StorageRestoreFlash,
+        kind: RowKind::Navigate { target: SettingsView::StorageRestoreFlash, value_fn: storage_restore_value },
     },
     IndexRow {
         label: "FACTORY RESET",
         icon: RowIcon::Skull,
-        value_fn: storage_reset_value,
-        target: SettingsView::StorageFactoryReset,
+        kind: RowKind::Navigate { target: SettingsView::StorageFactoryReset, value_fn: storage_reset_value },
     },
 ];
 
 const INDEX_ROWS: &[IndexRow] = &[
+    // Spec prefs (toggles first - most-used live up top).
+    IndexRow {
+        label: "SOUNDS",
+        icon: RowIcon::Sounds,
+        kind: RowKind::Toggle { is_on: haptics_is_on, action: Action::ToggleHaptics },
+    },
+    IndexRow {
+        label: "DND",
+        icon: RowIcon::Dnd,
+        kind: RowKind::Toggle { is_on: dnd_is_on, action: Action::ToggleDnd },
+    },
+    IndexRow {
+        label: "ALWAYS-ON",
+        icon: RowIcon::AlwaysOn,
+        kind: RowKind::Toggle { is_on: always_on_is_on, action: Action::ToggleAlwaysOn },
+    },
+    IndexRow {
+        label: "NIGHT MODE",
+        icon: RowIcon::NightMode,
+        kind: RowKind::Toggle { is_on: night_mode_is_on, action: Action::ToggleNightMode },
+    },
+    // Diagnostic / drill rows.
     IndexRow {
         label: "CLOCK",
         icon: RowIcon::Clock,
-        value_fn: clock_value,
-        target: SettingsView::Clock,
+        kind: RowKind::Navigate { target: SettingsView::Clock, value_fn: clock_value },
     },
     IndexRow {
         label: "BATTERY",
         icon: RowIcon::Battery,
-        value_fn: battery_value,
-        target: SettingsView::Battery,
+        kind: RowKind::Navigate { target: SettingsView::Battery, value_fn: battery_value },
     },
     IndexRow {
         label: "6-AXIS IMU",
         icon: RowIcon::Imu,
-        value_fn: imu_value,
-        target: SettingsView::Imu,
+        kind: RowKind::Navigate { target: SettingsView::Imu, value_fn: imu_value },
     },
     IndexRow {
         label: "STORAGE",
         icon: RowIcon::Storage,
-        value_fn: storage_value,
-        target: SettingsView::Storage,
+        kind: RowKind::Navigate { target: SettingsView::Storage, value_fn: storage_value },
     },
 ];
 
@@ -355,17 +410,17 @@ impl Screen for SettingsScreen {
         }
 
         match self.view {
-            SettingsView::Index => self.index_event(event),
-            SettingsView::Imu => self.imu_event(event),
+            SettingsView::Index => self.index_event(event, data),
+            SettingsView::Imu => self.imu_event(event, data),
             SettingsView::Clock => self.clock_event(event, data),
             SettingsView::TimeEntry => self.time_entry_event(event, data),
             SettingsView::DateEntry => self.date_entry_event(event, data),
-            SettingsView::Battery => self.battery_event(event),
-            SettingsView::Storage => self.storage_index_event(event),
-            SettingsView::StorageFlash => self.storage_flash_event(event),
-            SettingsView::StorageSd => self.storage_sd_event(event),
+            SettingsView::Battery => self.battery_event(event, data),
+            SettingsView::Storage => self.storage_index_event(event, data),
+            SettingsView::StorageFlash => self.storage_flash_event(event, data),
+            SettingsView::StorageSd => self.storage_sd_event(event, data),
             SettingsView::StorageRestoreFlash => self.storage_restore_event(event, data),
-            SettingsView::StorageFactoryReset => self.storage_factory_reset_event(event),
+            SettingsView::StorageFactoryReset => self.storage_factory_reset_event(event, data),
         }
     }
 }
@@ -378,35 +433,16 @@ impl SettingsScreen {
     ) {
         draw_header(display, data, "SETTINGS", theme::SIGNAL);
         render_rows(display, data, INDEX_ROWS);
-
-        // Night Mode toggle row, backed by `data.config.display.night_mode`.
-        // Tapping fires `Action::ToggleNightMode` so the Model flips
-        // the config, clamps brightness if needed, and persists on
-        // the next `TouchReleased`.
-        let rect = row_rect(INDEX_ROWS.len());
-        row(
-            display, rect,
-            |d, cx, cy, c| draw_row_icon(d, RowIcon::NightMode, cx, cy, c),
-            theme::CYAN,
-            "NIGHT MODE",
-            RowControl::Toggle(data.config.display.night_mode),
-        );
     }
 
-    fn index_event(&mut self, event: &SystemEvent) -> Action {
+    fn index_event(&mut self, event: &SystemEvent, _data: &mut SystemData) -> Action {
         match event {
             SystemEvent::Tap { x, y } if header_back_hit(*x, *y) => {
                 Action::Back
             }
             SystemEvent::Tap { x, y } => {
-                if let Some(target) = row_hit(*x, *y, INDEX_ROWS) {
-                    self.view = target;
-                    return Action::Redraw;
-                }
-                // Night Mode row lives at index INDEX_ROWS.len().
-                let pt = Point::new(*x as i32, *y as i32);
-                if row_rect(INDEX_ROWS.len()).contains(pt) {
-                    return Action::ToggleNightMode;
+                if let Some(action) = row_hit(*x, *y, INDEX_ROWS, &mut self.view) {
+                    return action;
                 }
                 Action::None
             }
@@ -417,40 +453,61 @@ impl SettingsScreen {
 
 // -- Shared row rendering / hit-testing for index + storage sub-index --------
 
-/// Render a stack of [`IndexRow`]s using `nightwatch::row`. The right
-/// control is an inline mono value per row; empty strings collapse
-/// into no inline text (bare row) so the row reads as a drill-in
-/// without redundant chevron noise.
+/// Render a stack of [`IndexRow`]s using `nightwatch::row`. Navigate
+/// rows show an inline value (or a chevron when the value is empty);
+/// toggle rows show a Nightwatch toggle.
 fn render_rows<D: DrawTarget<Color = Rgb565>>(
     display: &mut D, data: &SystemData, rows: &[IndexRow],
 ) {
     for (i, r) in rows.iter().enumerate() {
         let rect = row_rect(i);
-        let val = (r.value_fn)(data);
         let kind = r.icon;
-        let control = if val.is_empty() {
-            RowControl::Chevron(theme::CYAN)
-        } else {
-            RowControl::Inline(val.as_str(), theme::FG_MUTED)
-        };
-        row(
-            display, rect,
-            |d, cx, cy, c| draw_row_icon(d, kind, cx, cy, c),
-            theme::CYAN,
-            r.label,
-            control,
-        );
+        match r.kind {
+            RowKind::Navigate { value_fn, .. } => {
+                let val = value_fn(data);
+                let control = if val.is_empty() {
+                    RowControl::Chevron(theme::CYAN)
+                } else {
+                    RowControl::Inline(val.as_str(), theme::FG_MUTED)
+                };
+                row(
+                    display, rect,
+                    |d, cx, cy, c| draw_row_icon(d, kind, cx, cy, c),
+                    theme::CYAN,
+                    r.label,
+                    control,
+                );
+            }
+            RowKind::Toggle { is_on, .. } => {
+                row(
+                    display, rect,
+                    |d, cx, cy, c| draw_row_icon(d, kind, cx, cy, c),
+                    theme::CYAN,
+                    r.label,
+                    RowControl::Toggle(is_on(data)),
+                );
+            }
+        }
     }
 }
 
-/// Row hit test: if `(x, y)` lands in any row's rect, return that
-/// row's target view.
-fn row_hit(x: u16, y: u16, rows: &[IndexRow]) -> Option<SettingsView> {
+/// Row hit test: returns the `Action` the tap should produce, or
+/// `None` if the tap missed every row. Navigate rows update the
+/// caller's `view` via the `&mut SettingsView` and return
+/// `Action::Redraw`; toggle rows return their own action variant.
+fn row_hit(
+    x: u16, y: u16, rows: &[IndexRow], view: &mut SettingsView,
+) -> Option<Action> {
     let pt = Point::new(x as i32, y as i32);
     for (i, r) in rows.iter().enumerate() {
-        if row_rect(i).contains(pt) {
-            return Some(r.target);
-        }
+        if !row_rect(i).contains(pt) { continue; }
+        return Some(match r.kind {
+            RowKind::Navigate { target, .. } => {
+                *view = target;
+                Action::Redraw
+            }
+            RowKind::Toggle { action, .. } => action,
+        });
     }
     None
 }
@@ -685,27 +742,48 @@ impl SettingsScreen {
     ) {
         draw_header(display, data, "6-AXIS IMU", theme::SIGNAL);
 
+        // Per test: a state-display panel (tag-labeled, border + text
+        // tinted by run state) plus a separate primary button below
+        // that triggers the test. Splits "show state" from "do
+        // thing" so the panel is read-only and there's an explicit
+        // tap target.
+        let slots = imu_slots();
         for (i, test) in IMU_TESTS.iter().enumerate() {
-            let rect = layout::content_card_rect(i);
+            let (panel_rect, button_rect) = slots[i];
             let result = data.self_tests[test.id as usize];
+            let (value_buf, _, _) = format_result(&result, test.unit);
+            let accent = imu_result_accent(&result);
 
-            let (value_buf, value_color, dot) = format_result(&result, test.unit);
-            let style = match dot {
-                Some(color) => CardStyle::DEFAULT.with_status_dot(color),
-                None => CardStyle::DEFAULT,
-            };
+            chamfered_panel(display, panel_rect, NOTCH, accent, 1);
+            tag_label(
+                display,
+                panel_rect.top_left.x,
+                panel_rect.top_left.y,
+                test.label,
+                accent,
+                NOTCH,
+            );
+            fonts::draw_centered_in_rect(
+                display, &fonts::value(),
+                value_buf.as_str(), panel_rect, accent,
+            );
 
-            if matches!(result, SelfTestResult::Running) {
-                card(display, rect, dimmed(style));
+            // Button: Primary while idle/finished, Ghost while a test
+            // is running so the user can't re-tap mid-run.
+            let running = matches!(result, SelfTestResult::Running);
+            let variant = if running {
+                ButtonVariant::Ghost
             } else {
-                card(display, rect, style);
-            }
-
-            value_body(display, rect, test.label, value_buf.as_str(), value_color);
+                ButtonVariant::Primary
+            };
+            chamfered_button(
+                display, button_rect, "RUN SELF-TEST",
+                variant, theme::SIGNAL,
+            );
         }
     }
 
-    fn imu_event(&mut self, event: &SystemEvent) -> Action {
+    fn imu_event(&mut self, event: &SystemEvent, data: &mut SystemData) -> Action {
         match event {
             SystemEvent::Tap { x, y } if header_back_hit(*x, *y) => {
                 self.view = SettingsView::Index;
@@ -719,11 +797,16 @@ impl SettingsScreen {
                 Action::Redraw
             }
             SystemEvent::Tap { x, y } => {
+                let pt = Point::new(*x as i32, *y as i32);
+                let slots = imu_slots();
                 for (i, test) in IMU_TESTS.iter().enumerate() {
-                    if !layout::content_card_rect(i)
-                        .contains(Point::new(*x as i32, *y as i32))
-                    {
-                        continue;
+                    let (_, button_rect) = slots[i];
+                    if !button_rect.contains(pt) { continue; }
+                    // The button is rendered in Ghost variant when this
+                    // test is running - mirror that visual by ignoring
+                    // the tap so behavior matches what the user sees.
+                    if matches!(data.self_tests[test.id as usize], SelfTestResult::Running) {
+                        return Action::None;
                     }
                     return Action::RunSelfTest(test.id);
                 }
@@ -743,11 +826,25 @@ impl SettingsScreen {
     ) {
         draw_header(display, data, "BATTERY", theme::SIGNAL);
 
-        // Status card: current percent + voltage (from the live
-        // PowerData snapshot, not from the history). History is for
-        // trend; this line is "what is it right now."
-        let status_rect = layout::content_card_rect(0);
-        card(display, status_rect, CardStyle::DEFAULT);
+        // Top: chamfered tag-labeled BATTERY panel with live
+        // percent/voltage centered inside.
+        let panel_w = theme::SCREEN_W as i32 - 56;
+        let panel_x = (theme::SCREEN_W as i32 - panel_w) / 2;
+        let panel_y = ROWS_TOP + 18;
+        let panel_h = 60i32;
+        let panel_rect = Rectangle::new(
+            Point::new(panel_x, panel_y),
+            Size::new(panel_w as u32, panel_h as u32),
+        );
+        chamfered_panel(display, panel_rect, NOTCH, theme::SIGNAL, 1);
+        tag_label(
+            display,
+            panel_rect.top_left.x,
+            panel_rect.top_left.y,
+            "NOW",
+            theme::SIGNAL,
+            NOTCH,
+        );
         let mut val: String<20> = String::new();
         match (data.power.battery_percent, data.power.battery_voltage_mv) {
             (Some(pct), Some(mv)) => {
@@ -756,18 +853,49 @@ impl SettingsScreen {
             (Some(pct), None) => { let _ = write!(val, "{}%", pct); }
             _                  => { let _ = val.push_str("--"); }
         }
-        value_body(display, status_rect, "NOW", val.as_str(), theme::FG);
+        fonts::draw_centered_in_rect(
+            display, &fonts::value(),
+            val.as_str(), panel_rect, theme::FG,
+        );
 
-        // Graph panel below the status card. Custom geometry: a
-        // single wide rect that holds gridlines + polyline. Height
-        // picked to fit the remaining content band without pushing
-        // into the bezel corners.
-        let g = graph_rect();
-        card(display, g, CardStyle::DEFAULT);
-        draw_battery_graph(display, g, &data.battery_history);
+        // Sparkline: full screen width, edge-to-edge, no card around.
+        let graph_y = panel_y + panel_h + 14;
+        let graph_h = 96i32;
+        let graph_rect = Rectangle::new(
+            Point::new(0, graph_y),
+            Size::new(theme::SCREEN_W as u32, graph_h as u32),
+        );
+        draw_battery_sparkline(display, graph_rect, &data.battery_history);
+
+        // Below the sparkline: UPTIME stat in a smaller chamfered
+        // tag-labeled panel.
+        let uptime_y = graph_y + graph_h + 14;
+        let uptime_rect = Rectangle::new(
+            Point::new(panel_x, uptime_y),
+            Size::new(panel_w as u32, panel_h as u32),
+        );
+        chamfered_panel(display, uptime_rect, NOTCH, theme::CYAN, 1);
+        tag_label(
+            display,
+            uptime_rect.top_left.x,
+            uptime_rect.top_left.y,
+            "UPTIME",
+            theme::CYAN,
+            NOTCH,
+        );
+        let mut up_buf: String<16> = String::new();
+        let total = data.uptime_secs;
+        let h = total / 3600;
+        let m = (total % 3600) / 60;
+        let s = total % 60;
+        let _ = write!(up_buf, "{:02}:{:02}:{:02}", h, m, s);
+        fonts::draw_centered_in_rect(
+            display, &fonts::value(),
+            up_buf.as_str(), uptime_rect, theme::FG,
+        );
     }
 
-    fn battery_event(&mut self, event: &SystemEvent) -> Action {
+    fn battery_event(&mut self, event: &SystemEvent, _data: &mut SystemData) -> Action {
         match event {
             SystemEvent::Tap { x, y } if header_back_hit(*x, *y) => {
                 self.view = SettingsView::Index;
@@ -812,7 +940,7 @@ impl SettingsScreen {
         render_rows(display, data, STORAGE_INDEX_ROWS);
     }
 
-    fn storage_index_event(&mut self, event: &SystemEvent) -> Action {
+    fn storage_index_event(&mut self, event: &SystemEvent, _data: &mut SystemData) -> Action {
         match event {
             SystemEvent::Tap { x, y } if header_back_hit(*x, *y) => {
                 self.view = SettingsView::Index;
@@ -826,9 +954,8 @@ impl SettingsScreen {
                 Action::Redraw
             }
             SystemEvent::Tap { x, y } => {
-                if let Some(target) = row_hit(*x, *y, STORAGE_INDEX_ROWS) {
-                    self.view = target;
-                    return Action::Redraw;
+                if let Some(action) = row_hit(*x, *y, STORAGE_INDEX_ROWS, &mut self.view) {
+                    return action;
                 }
                 Action::None
             }
@@ -888,7 +1015,7 @@ impl SettingsScreen {
         );
     }
 
-    fn storage_flash_event(&mut self, event: &SystemEvent) -> Action {
+    fn storage_flash_event(&mut self, event: &SystemEvent, _data: &mut SystemData) -> Action {
         match event {
             SystemEvent::Tap { x, y } if header_back_hit(*x, *y) => {
                 self.view = SettingsView::Storage;
@@ -915,25 +1042,39 @@ impl SettingsScreen {
     ) {
         draw_header(display, data, "SD CARD", theme::SIGNAL);
 
-        // Card 0: status line. Green dot when online, yellow when
-        // not. Read-only; the button below triggers the probe.
-        let status_rect = layout::content_card_rect(0);
-        let (dot, status_text, status_color) = if data.storage.sd_online {
-            (theme::GREEN, "ONLINE",      theme::FG)
+        // Status: chamfered tag-labelled panel. Border + tag tint
+        // tracks online/offline (green/signal). Read-only - the
+        // button below triggers the probe.
+        let (status_rect, probe_rect) = storage_sd_slots();
+        let (accent, status_text) = if data.storage.sd_online {
+            (theme::GREEN, "ONLINE")
         } else {
-            (theme::SIGNAL, "NOT PRESENT", theme::SIGNAL)
+            (theme::SIGNAL, "NOT PRESENT")
         };
-        card(display, status_rect, CardStyle::DEFAULT.with_status_dot(dot));
-        value_body(display, status_rect, "STATUS", status_text, status_color);
+        chamfered_panel(display, status_rect, NOTCH, accent, 1);
+        tag_label(
+            display,
+            status_rect.top_left.x,
+            status_rect.top_left.y,
+            "STATUS",
+            accent,
+            NOTCH,
+        );
+        fonts::draw_centered_in_rect(
+            display, &fonts::value(),
+            status_text, status_rect, accent,
+        );
 
-        // Card 1: tap target to (re-)probe.
-        let probe_rect = layout::content_card_rect(1);
-        card(display, probe_rect, CardStyle::DEFAULT);
-        let probe_text = if data.storage.sd_online { "TAP TO REPROBE" } else { "TAP TO INITIALIZE" };
-        value_body(display, probe_rect, "PROBE", probe_text, theme::FG);
+        // Probe action button (chamfered Primary), label depends on
+        // state (initialize vs reprobe).
+        let probe_text = if data.storage.sd_online { "REPROBE" } else { "INITIALIZE" };
+        chamfered_button(
+            display, probe_rect, probe_text,
+            ButtonVariant::Primary, theme::SIGNAL,
+        );
     }
 
-    fn storage_sd_event(&mut self, event: &SystemEvent) -> Action {
+    fn storage_sd_event(&mut self, event: &SystemEvent, _data: &mut SystemData) -> Action {
         match event {
             SystemEvent::Tap { x, y } if header_back_hit(*x, *y) => {
                 self.view = SettingsView::Storage;
@@ -948,7 +1089,8 @@ impl SettingsScreen {
             }
             SystemEvent::Tap { x, y } => {
                 let pt = Point::new(*x as i32, *y as i32);
-                if layout::content_card_rect(1).contains(pt) {
+                let (_, probe_rect) = storage_sd_slots();
+                if probe_rect.contains(pt) {
                     return Action::InitSd;
                 }
                 Action::None
@@ -967,39 +1109,45 @@ impl SettingsScreen {
     ) {
         draw_header(display, data, "RESTORE FROM SD", theme::SIGNAL);
 
-        // Card 0: summary of what happens. Always present so the
-        // user has context whether SD is online or not.
-        let warn_rect = layout::content_card_rect(0);
-        card(display, warn_rect, CardStyle::DEFAULT.with_status_dot(theme::SIGNAL));
-        value_body(
+        // Warning panel: signal-bordered chamfered panel with a
+        // RESTORE tag. Body explains what the action does.
+        let (warn_rect, cancel_rect, primary_rect) = confirmation_slots();
+        chamfered_panel(display, warn_rect, NOTCH, theme::SIGNAL, 1);
+        tag_label(
             display,
-            warn_rect,
-            "OVERWRITES",
-            "FLASH CONFIG + REBOOT",
+            warn_rect.top_left.x,
+            warn_rect.top_left.y,
+            "RESTORE",
             theme::SIGNAL,
+            NOTCH,
+        );
+        let body = if data.storage.sd_online {
+            "FLASH CONFIG // REBOOT"
+        } else {
+            "SD NOT PRESENT"
+        };
+        let body_color = if data.storage.sd_online { theme::FG } else { theme::FG_DIM };
+        fonts::draw_centered_in_rect(
+            display, &fonts::body(),
+            body, warn_rect, body_color,
         );
 
-        // Card 1: confirm target. Disabled (dimmed, different label)
-        // when the SD mirror isn't online - matches the InitSd row's
-        // gating idea but flipped: here offline is the blocker.
-        let confirm_rect = layout::content_card_rect(1);
+        // CANCEL / RESTORE buttons. Restore disabled (Ghost variant)
+        // when SD isn't online.
+        
+        chamfered_button(
+            display, cancel_rect, "CANCEL",
+            ButtonVariant::Ghost, theme::STEEL,
+        );
         if data.storage.sd_online {
-            card(display, confirm_rect, CardStyle::DEFAULT.with_status_dot(theme::SIGNAL));
-            value_body(
-                display,
-                confirm_rect,
-                "CONFIRM",
-                "TAP TO RESTORE",
-                theme::SIGNAL,
+            chamfered_button(
+                display, primary_rect, "RESTORE",
+                ButtonVariant::Primary, theme::SIGNAL,
             );
         } else {
-            card(display, confirm_rect, dimmed(CardStyle::DEFAULT));
-            value_body(
-                display,
-                confirm_rect,
-                "CONFIRM",
-                "SD NOT PRESENT",
-                theme::FG_DIM,
+            chamfered_button(
+                display, primary_rect, "RESTORE",
+                ButtonVariant::Ghost, theme::STEEL,
             );
         }
     }
@@ -1007,7 +1155,7 @@ impl SettingsScreen {
     fn storage_restore_event(
         &mut self,
         event: &SystemEvent,
-        data: &SystemData,
+        data: &mut SystemData,
     ) -> Action {
         match event {
             SystemEvent::Tap { x, y } if header_back_hit(*x, *y) => {
@@ -1022,15 +1170,15 @@ impl SettingsScreen {
                 Action::Redraw
             }
             SystemEvent::Tap { x, y } => {
-                if !data.storage.sd_online {
-                    return Action::None;
-                }
                 let pt = Point::new(*x as i32, *y as i32);
-                if layout::content_card_rect(1).contains(pt) {
+                let (_, cancel_rect, primary_rect) = confirmation_slots();
+                if cancel_rect.contains(pt) {
+                    self.view = SettingsView::Storage;
+                    return Action::Redraw;
+                }
+                if primary_rect.contains(pt) && data.storage.sd_online {
                     // No bounce-back - the manager will software-
-                    // reset shortly after this returns, so the
-                    // next frame never draws. Leaving `view` on
-                    // StorageRestoreFlash is fine.
+                    // reset shortly after this returns.
                     return Action::RestoreFromSd;
                 }
                 Action::None
@@ -1049,30 +1197,36 @@ impl SettingsScreen {
     ) {
         draw_header(display, data, "FACTORY RESET", theme::DANGER);
 
-        // Card 0: warning summary (read-only).
-        let warn_rect = layout::content_card_rect(0);
-        card(display, warn_rect, CardStyle::DEFAULT.with_status_dot(theme::DANGER));
-        value_body(
+        // Warning panel: danger-tinted chamfered panel with PURGE
+        // tag and irreversible-action copy.
+        let (warn_rect, cancel_rect, primary_rect) = confirmation_slots();
+        chamfered_panel(display, warn_rect, NOTCH, theme::DANGER, 1);
+        tag_label(
             display,
-            warn_rect,
-            "WARNING",
-            "WIPES CONFIG + LOGS",
+            warn_rect.top_left.x,
+            warn_rect.top_left.y,
+            "PURGE",
             theme::DANGER,
+            NOTCH,
+        );
+        fonts::draw_centered_in_rect(
+            display, &fonts::body(),
+            "WIPES CONFIG // LOGS", warn_rect, theme::FG,
         );
 
-        // Card 1: confirmation tap target.
-        let confirm_rect = layout::content_card_rect(1);
-        card(display, confirm_rect, CardStyle::DEFAULT.with_status_dot(theme::DANGER));
-        value_body(
-            display,
-            confirm_rect,
-            "CONFIRM",
-            "TAP TO WIPE",
-            theme::DANGER,
+        // CANCEL (ghost) + PURGE (filled danger) button pair.
+        
+        chamfered_button(
+            display, cancel_rect, "CANCEL",
+            ButtonVariant::Ghost, theme::STEEL,
+        );
+        chamfered_button(
+            display, primary_rect, "PURGE",
+            ButtonVariant::Primary, theme::DANGER,
         );
     }
 
-    fn storage_factory_reset_event(&mut self, event: &SystemEvent) -> Action {
+    fn storage_factory_reset_event(&mut self, event: &SystemEvent, _data: &mut SystemData) -> Action {
         match event {
             SystemEvent::Tap { x, y } if header_back_hit(*x, *y) => {
                 self.view = SettingsView::Storage;
@@ -1087,7 +1241,12 @@ impl SettingsScreen {
             }
             SystemEvent::Tap { x, y } => {
                 let pt = Point::new(*x as i32, *y as i32);
-                if layout::content_card_rect(1).contains(pt) {
+                let (_, cancel_rect, primary_rect) = confirmation_slots();
+                if cancel_rect.contains(pt) {
+                    self.view = SettingsView::Storage;
+                    return Action::Redraw;
+                }
+                if primary_rect.contains(pt) {
                     // Bounce back to Storage sub-index on confirm
                     // so the user sees the refreshed usage counts
                     // land naturally.
@@ -1145,44 +1304,97 @@ fn format_result(
     }
 }
 
-fn dimmed(mut style: CardStyle) -> CardStyle {
-    style.bg = theme::FG_DIM;
-    style
+// -- Sub-view layout helpers -------------------------------------------------
+//
+// Each non-trivial leaf sub-view has a `*_slots()` function that
+// returns ALL its rects via a [`layout::VStack`] cursor. Render and
+// event handlers both call the same `*_slots()` function and
+// destructure into named rects, so they're guaranteed to agree on
+// geometry - no chance of the event-side hit-test rect drifting from
+// the render-side draw rect.
+
+/// Top y for every leaf sub-view's first slot. Sits below the
+/// header hairline with breathing room.
+const LEAF_TOP_Y: i32 = ROWS_TOP + 18;
+
+// -- IMU sub-view: per-test stacked (panel, button) pairs -------------------
+
+/// One IMU test slot: `(panel_rect, run_button_rect)`.
+type ImuSlot = (Rectangle, Rectangle);
+
+/// IMU sub-view rects, indexed by test number. Each entry is a
+/// `(panel, button)` pair so render and event loops can index by
+/// test order.
+fn imu_slots() -> [ImuSlot; 2] {
+    let mut s = layout::VStack::new(LEAF_TOP_Y);
+    let p0 = s.slot(80); s.gap(8); let b0 = s.slot(36);
+    s.gap(16);
+    let p1 = s.slot(80); s.gap(8); let b1 = s.slot(36);
+    [(p0, b0), (p1, b1)]
+}
+
+// -- Storage SD: status panel + single full-width action button ------------
+
+/// Storage-SD sub-view rects: (status_panel, action_button).
+fn storage_sd_slots() -> (Rectangle, Rectangle) {
+    let mut s = layout::VStack::new(LEAF_TOP_Y);
+    let panel = s.slot(100);
+    s.gap(18);
+    let button = s.slot(36);
+    (panel, button)
+}
+
+// -- Storage Restore / Factory Reset: panel + CANCEL/CONFIRM pair ----------
+
+/// Restore / Factory-Reset sub-view rects: (warning_panel, cancel,
+/// primary). Same layout for both; they differ only in colors and
+/// labels.
+fn confirmation_slots() -> (Rectangle, Rectangle, Rectangle) {
+    let mut s = layout::VStack::new(LEAF_TOP_Y);
+    let panel = s.slot(100);
+    s.gap(18);
+    let (cancel, primary) = s.pair(36, 12);
+    (panel, cancel, primary)
+}
+
+/// Pick the accent color (panel border + tag + result text) for a
+/// given IMU test result. Visualises run state at a glance:
+/// steel = inactive, signal = running, green = pass, danger =
+/// fail/error.
+fn imu_result_accent(result: &SelfTestResult) -> Rgb565 {
+    match result {
+        SelfTestResult::NotRun => theme::STEEL,
+        SelfTestResult::Running => theme::SIGNAL,
+        SelfTestResult::PassAxes3(_) => theme::GREEN,
+        SelfTestResult::FailAxes3(_) | SelfTestResult::Error(_) => theme::DANGER,
+    }
 }
 
 // -- Battery-graph helpers ---------------------------------------------------
 
-/// Bounding rect for the battery-history graph panel. Sits below
-/// the status card in the battery sub-view, centered in the same
-/// horizontal band as the card stack.
-fn graph_rect() -> Rectangle {
-    // Start one card-slot below the status card (content_card_rect(0)),
-    // stretch down to the bezel-safe content bottom so the graph
-    // has the whole remaining screen height to itself.
-    let top = layout::content_card_rect(1).top_left.y;
-    let bot = theme::CONTENT_BOTTOM;
-    Rectangle::new(
-        Point::new(layout::CARD_MARGIN_X, top),
-        Size::new(layout::CARD_WIDTH as u32, (bot - top) as u32),
-    )
-}
-
-/// Render the battery history as a polyline inside `rect`. Draws
-/// faint horizontal gridlines at 25/50/75% and connects consecutive
-/// samples with short line segments in the battery color. Empty history gets a
-/// centered "NO DATA" caption instead.
-fn draw_battery_graph<D: DrawTarget<Color = Rgb565>>(
+/// Render the battery history as an edge-to-edge polyline inside
+/// `rect`. Draws faint horizontal gridlines at 25/50/75% and
+/// connects consecutive samples with short segments in the battery
+/// color. Empty history gets a centered "NO DATA" caption.
+///
+/// `rect` is the full sparkline area (no surrounding card); the
+/// polyline insets by a small horizontal margin so endpoints don't
+/// land at the screen edge but is otherwise full width.
+fn draw_battery_sparkline<D: DrawTarget<Color = Rgb565>>(
     display: &mut D,
     rect: Rectangle,
     history: &crate::data::BatteryHistory,
 ) {
-    // Inset the drawable area so strokes don't kiss the card border.
-    const INSET: i32 = 10;
+    // Small horizontal inset so the leftmost / rightmost samples
+    // don't sit at the bezel arc; vertical inset is just visual
+    // breathing room.
+    const H_INSET: i32 = 24;
+    const V_INSET: i32 = 6;
     let plot = Rectangle::new(
-        Point::new(rect.top_left.x + INSET, rect.top_left.y + INSET),
+        Point::new(rect.top_left.x + H_INSET, rect.top_left.y + V_INSET),
         Size::new(
-            (rect.size.width as i32 - 2 * INSET) as u32,
-            (rect.size.height as i32 - 2 * INSET) as u32,
+            (rect.size.width as i32 - 2 * H_INSET) as u32,
+            (rect.size.height as i32 - 2 * V_INSET) as u32,
         ),
     );
 

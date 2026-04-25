@@ -37,6 +37,11 @@ pub struct DisplayConfig {
     /// in `brightness_active`; only the hardware register is limited.
     #[cfg_attr(feature = "serde", serde(default))]
     pub night_mode: bool,
+    /// When true, the display stays Active indefinitely - the
+    /// idle-dim and idle-off timers are skipped. Tradeoff: higher
+    /// average current draw on the wrist.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub always_on: bool,
 }
 
 impl DisplayConfig {
@@ -58,6 +63,17 @@ impl DisplayConfig {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Config {
     pub display: DisplayConfig,
+    /// Master haptic-feedback enable. When false, the manager skips
+    /// every motor-pulse / buzz Effect. Defaults on.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub haptics_enabled: bool,
+    /// Do-not-disturb. When true, alarms / notifications still fire
+    /// in the model layer (they're still scheduled and recorded) but
+    /// the manager suppresses their hardware side effects (haptics,
+    /// audible buzz). Pure UI state today; proper alarm/notification
+    /// routing lands when those screens get real backing.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub dnd: bool,
 }
 
 impl Config {
@@ -73,7 +89,10 @@ impl Config {
             brightness_active: 80,
             brightness_dim: 16,
             night_mode: false,
+            always_on: false,
         },
+        haptics_enabled: true,
+        dnd: false,
     };
 }
 
