@@ -236,10 +236,30 @@ impl VStack {
 
     /// Cursor with a caller-supplied side margin. Use this when a
     /// sub-view needs a wider or narrower band than the default.
-    #[allow(dead_code)] // surface for future callers; not used yet
     pub fn with_margin(top_y: i32, side_margin: i32) -> Self {
         let width = theme::SCREEN_W as i32 - side_margin * 2;
         Self { next_y: top_y, x: side_margin, width }
+    }
+
+    /// Cursor scoped to the interior of `parent`, inset horizontally
+    /// by `inset_x` and starting at `top_y`. Use this when an inner
+    /// stack of items lives inside a chamfered panel - the inner
+    /// VStack's `slot` / `pair` / `row` methods then return rects
+    /// within the panel automatically, so callers don't recompute
+    /// `panel.x + inset` math at every call site.
+    pub fn inside(parent: Rectangle, inset_x: i32, top_y: i32) -> Self {
+        Self {
+            next_y: top_y,
+            x: parent.top_left.x + inset_x,
+            width: parent.size.width as i32 - inset_x * 2,
+        }
+    }
+
+    /// Current cursor y. Lets a caller chain a second [`VStack`] at
+    /// the bottom of the first (e.g. switch from a margined band to
+    /// a full-width band) without recomputing total heights by hand.
+    pub fn cursor_y(&self) -> i32 {
+        self.next_y
     }
 
     /// Advance by `height` and return a full-width rect at that slot.
@@ -267,6 +287,35 @@ impl VStack {
         );
         self.next_y += height;
         (left, right)
+    }
+
+    /// Advance by `height` and return `N` evenly-split cells laid
+    /// out horizontally, with `gap_x` between adjacent cells. The
+    /// generalised form of [`Self::pair`] for buttons-in-a-row /
+    /// segmented-control-style layouts. `N` is a const generic so
+    /// the array shape is part of the call site - destructure or
+    /// index directly without a length check.
+    ///
+    /// Panics in debug builds on `N == 0`; release builds return
+    /// an empty array.
+    pub fn row<const N: usize>(
+        &mut self, height: i32, gap_x: i32,
+    ) -> [Rectangle; N] {
+        debug_assert!(N > 0, "VStack::row needs at least one cell");
+        let cell_w = if N == 0 {
+            0
+        } else {
+            (self.width - gap_x * (N as i32 - 1)) / N as i32
+        };
+        let y = self.next_y;
+        let cells = core::array::from_fn(|i| {
+            Rectangle::new(
+                Point::new(self.x + i as i32 * (cell_w + gap_x), y),
+                Size::new(cell_w as u32, height as u32),
+            )
+        });
+        self.next_y += height;
+        cells
     }
 
     /// Advance vertically without producing a rect.

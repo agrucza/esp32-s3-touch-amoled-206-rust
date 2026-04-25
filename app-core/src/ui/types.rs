@@ -192,6 +192,13 @@ pub enum Action {
     /// notification routing that should respect this lands when
     /// those screens get real backing.
     ToggleDnd,
+
+    /// Set the idle "auto-lock" duration. `secs` is the new value
+    /// for `config.display.off_timeout_s` (when the display blanks);
+    /// the Model also recomputes `dim_timeout_s` to a 2/3 fraction
+    /// of `secs` (floored at 5s) so the dim stage scales with it.
+    /// Marks config dirty; persisted on the next `TouchReleased`.
+    SetAutoLock { secs: u32 },
 }
 
 // -- Persistent app state ----------------------------------------------------

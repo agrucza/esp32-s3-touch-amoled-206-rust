@@ -586,6 +586,19 @@ impl Model {
                 self.config_dirty = true;
                 self.needs_redraw = true;
             }
+            Action::SetAutoLock { secs } => {
+                self.config.display.off_timeout_s = secs as u64;
+                // Dim fires ~2/3 of the way into the idle window, so
+                // the dim stage scales with the auto-lock setting
+                // rather than sitting at a fixed offset. Floored at
+                // 5s so the dim isn't instantaneous on a short
+                // auto-lock.
+                self.config.display.dim_timeout_s =
+                    ((secs as u64 * 2 / 3)).max(5);
+                self.cached_data.config = self.config;
+                self.config_dirty = true;
+                self.needs_redraw = true;
+            }
         }
     }
 

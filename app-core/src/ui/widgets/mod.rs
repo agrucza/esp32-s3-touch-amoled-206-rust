@@ -23,5 +23,7 @@ pub use chrome::{
     HeaderIcon, HEADER_H, HEADER_ICON_HIT_WIDTH, HOME_INDICATOR_H, STATUS_BAR_H,
 };
 pub use containers::{card, chamfered_panel, tag_label, tile, CardStyle, NOTCH, TAG_LABEL_H};
-pub use controls::{chamfered_button, toggle, ButtonVariant};
+pub use controls::{
+    chamfered_button, slider, slider_value_from_x, toggle, ButtonVariant, SLIDER_BAR_H,
+};
 pub use numpad::{Numpad, NumpadAction, MAX_DIGITS};

@@ -39,8 +39,14 @@ use crate::events::{SwipeDir, SystemEvent};
 use crate::ui::{fonts, glyphs, theme};
 use crate::ui::types::{Action, Screen, ScreenId, SystemData};
 use crate::ui::widgets::{
-    chamfered_panel, home_indicator, status_bar, NOTCH, STATUS_BAR_H,
+    chamfered_panel, home_indicator, slider, slider_value_from_x, status_bar,
+    NOTCH, SLIDER_BAR_H, STATUS_BAR_H,
 };
+
+/// Slider lower bound for brightness. The hardware can render
+/// below this but in practice anything dimmer is unreadable on
+/// AMOLED at room light, so the slider clips the bottom 5 %.
+const BRIGHT_MIN_PCT: u8 = 5;
 
 // -- Toggle tile metadata ----------------------------------------------------
 
@@ -105,7 +111,6 @@ const HEADER_Y: i32 = STATUS_Y + STATUS_BAR_H + 26;
 /// Brightness bar block.
 const BRIGHT_LABEL_Y: i32 = HEADER_Y + 46;
 const BRIGHT_BAR_Y:   i32 = BRIGHT_LABEL_Y + 26;
-const BRIGHT_BAR_H:   i32 = 12;
 
 /// Toggle grid: 4 tiles per row, 2 rows.
 const TOGGLE_TOP: i32 = BRIGHT_BAR_Y + 54;
@@ -121,7 +126,7 @@ fn bright_bar_rect() -> Rectangle {
         Point::new(PAD_X, BRIGHT_BAR_Y),
         Size::new(
             (theme::SCREEN_W as i32 - PAD_X * 2) as u32,
-            BRIGHT_BAR_H as u32,
+            SLIDER_BAR_H as u32,
         ),
     )
 }
@@ -163,32 +168,12 @@ impl QuickAccessScreen {
         }
     }
 
-    /// Clamp an x-coordinate to the brightness bar and return the
-    /// matching brightness percent, using the slider's current max
-    /// (5..100 normally, 5..30 when night_mode is on). `None` if the
-    /// point falls outside the bar's vertical range with slack.
-    fn brightness_from_x(x: i32, y: i32, max_pct: u8) -> Option<u8> {
-        let bar = bright_bar_rect();
-        let vslop = 12i32;
-        if y < bar.top_left.y - vslop
-            || y >= bar.top_left.y + bar.size.height as i32 + vslop
-        {
-            return None;
-        }
-        let left = bar.top_left.x;
-        let right = left + bar.size.width as i32;
-        let clamped = x.clamp(left, right - 1);
-        let range = (max_pct as i32 - 5).max(1);
-        let frac = (clamped - left) as i32 * range / (bar.size.width as i32 - 1);
-        Some((5 + frac).clamp(5, max_pct as i32) as u8)
-    }
-
     /// Current brightness percent as read from the live config on
     /// `data`. Converts the hardware 0..=255 back into the 5..=100
     /// slider range.
     fn brightness_pct(data: &SystemData) -> u8 {
         let hw = data.config.display.brightness_active as u16;
-        ((hw * 100 / 255) as u8).clamp(5, 100)
+        ((hw * 100 / 255) as u8).clamp(BRIGHT_MIN_PCT, 100)
     }
 }
 
@@ -224,9 +209,8 @@ impl Screen for QuickAccessScreen {
             theme::FG_MUTED,
         );
 
-        // Brightness label + current value - computed once from
-        // `data.config`, used for both the "NN%" readout and the
-        // bar's fill width. No cached state on the screen.
+        // Brightness label - the slider widget handles its own value
+        // readout, this just paints the section title on the left.
         let brightness = Self::brightness_pct(data);
         fonts::draw_at(
             display, &fonts::caption(),
@@ -234,38 +218,19 @@ impl Screen for QuickAccessScreen {
             PAD_X, BRIGHT_LABEL_Y,
             theme::CYAN,
         );
-        let mut buf: String<8> = String::new();
-        let _ = write!(buf, "{:02}%", brightness);
-        fonts::draw_right(
-            display, &fonts::caption(),
-            buf.as_str(),
-            theme::SCREEN_W as i32 - PAD_X, BRIGHT_LABEL_Y,
-            theme::SIGNAL,
-        );
 
-        // Brightness bar: steel trough + signal fill to current %.
-        // The bar's full width represents the slider's current range
-        // (5..100 normally, 5..30 when night_mode is on), so a
-        // value at the top of the range fills the bar completely
-        // regardless of night_mode.
-        let bar = bright_bar_rect();
-        Rectangle::new(bar.top_left, bar.size)
-            .into_styled(PrimitiveStyle::with_fill(theme::INK_3))
-            .draw(display).ok();
-        Rectangle::new(bar.top_left, bar.size)
-            .into_styled(PrimitiveStyle::with_stroke(theme::STEEL, 1))
-            .draw(display).ok();
-        let max_pct = data.config.display.max_brightness_pct() as i32;
-        let range = (max_pct - 5).max(1);
-        let fill_w = ((brightness as i32 - 5).max(0) * (bar.size.width as i32 - 2)) / range;
-        if fill_w > 0 {
-            Rectangle::new(
-                Point::new(bar.top_left.x + 1, bar.top_left.y + 1),
-                Size::new(fill_w as u32, (bar.size.height - 2) as u32),
-            )
-            .into_styled(PrimitiveStyle::with_fill(theme::SIGNAL))
-            .draw(display).ok();
-        }
+        // Brightness bar: generic slider widget. Bar full width
+        // represents `5..=max_pct`, where `max_pct` honours night
+        // mode (30 % cap when on, 100 % otherwise), so a value at
+        // the top of the range fills the bar regardless of mode.
+        let max_pct = data.config.display.max_brightness_pct();
+        let mut label: String<8> = String::new();
+        let _ = write!(label, "{:02}%", brightness);
+        slider(
+            display, bright_bar_rect(),
+            brightness, BRIGHT_MIN_PCT, max_pct,
+            Some(label.as_str()),
+        );
 
         // Toggle grid.
         for (i, t) in TOGGLES.iter().enumerate() {
@@ -327,7 +292,10 @@ impl Screen for QuickAccessScreen {
             // `data.config`.
             SystemEvent::TouchPressed { x, y } => {
                 let max_pct = data.config.display.max_brightness_pct();
-                if let Some(v) = Self::brightness_from_x(*x as i32, *y as i32, max_pct) {
+                if let Some(v) = slider_value_from_x(
+                    bright_bar_rect(), *x as i32, *y as i32,
+                    BRIGHT_MIN_PCT, max_pct,
+                ) {
                     if v != Self::brightness_pct(data) {
                         return Action::SetBrightness { percent: v };
                     }
@@ -345,7 +313,10 @@ impl Screen for QuickAccessScreen {
                 let pt = Point::new(*x as i32, *y as i32);
                 let max_pct = data.config.display.max_brightness_pct();
                 // Ignore taps that land on the brightness bar.
-                if Self::brightness_from_x(*x as i32, *y as i32, max_pct).is_some() {
+                if slider_value_from_x(
+                    bright_bar_rect(), *x as i32, *y as i32,
+                    BRIGHT_MIN_PCT, max_pct,
+                ).is_some() {
                     return Action::None;
                 }
                 for i in 0..TOGGLES.len() {
