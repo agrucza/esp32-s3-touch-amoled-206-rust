@@ -159,6 +159,50 @@ pub const fn content_card_rect(index: usize) -> Rectangle {
     )
 }
 
+// -- Bottom tile row ---------------------------------------------------------
+
+/// Side padding for the bottom tile row.
+pub const BOTTOM_TILE_PAD_X: i32 = 22;
+
+/// Height of a tile in the bottom tile row.
+pub const BOTTOM_TILE_H: i32 = 38;
+
+/// Horizontal gap between adjacent bottom tiles.
+pub const BOTTOM_TILE_GAP: i32 = 6;
+
+/// Y of the top edge of the bottom tile row. Anchored against the
+/// shared [`theme::BOTTOM_SAFE_MARGIN`] so tiles, CTA buttons, and
+/// other bottom-parked controls share one baseline.
+pub const BOTTOM_TILE_Y: i32 =
+    theme::SCREEN_H as i32 - theme::BOTTOM_SAFE_MARGIN - BOTTOM_TILE_H;
+
+/// Return `N` evenly-split slot rects for a screen's bottom tile row,
+/// padded by [`BOTTOM_TILE_PAD_X`] on each side and separated by
+/// [`BOTTOM_TILE_GAP`]. Pair each rect with
+/// [`crate::ui::widgets::info_tile`] (or anything else of matching
+/// height) to fill the row.
+///
+/// Panics in debug builds on `N == 0`; release builds return an empty
+/// array.
+pub fn bottom_tile_row<const N: usize>() -> [Rectangle; N] {
+    debug_assert!(N > 0, "bottom_tile_row needs at least one cell");
+    let total_w = theme::SCREEN_W as i32 - BOTTOM_TILE_PAD_X * 2;
+    let cell_w = if N == 0 {
+        0
+    } else {
+        (total_w - BOTTOM_TILE_GAP * (N as i32 - 1)) / N as i32
+    };
+    core::array::from_fn(|i| {
+        Rectangle::new(
+            Point::new(
+                BOTTOM_TILE_PAD_X + i as i32 * (cell_w + BOTTOM_TILE_GAP),
+                BOTTOM_TILE_Y,
+            ),
+            Size::new(cell_w as u32, BOTTOM_TILE_H as u32),
+        )
+    })
+}
+
 // -- Page scrollbar ----------------------------------------------------------
 
 /// Width of the vertical page-indicator scrollbar (pill track).

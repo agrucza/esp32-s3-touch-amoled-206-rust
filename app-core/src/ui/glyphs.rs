@@ -317,31 +317,6 @@ pub fn heart<D: DrawTarget<Color = Rgb565>>(
     ).into_styled(stroke).draw(display).ok();
 }
 
-/// Envelope (message) glyph: rectangle with flap lines forming an X
-/// top half. Outline only.
-pub fn message<D: DrawTarget<Color = Rgb565>>(
-    display: &mut D, cx: i32, cy: i32, radius: i32, color: Rgb565,
-) {
-    let stroke = PrimitiveStyle::with_stroke(color, 2);
-    let w = radius * 2;
-    let h = radius * 3 / 2;
-    let x = cx - w / 2;
-    let y = cy - h / 2;
-
-    // Body outline.
-    Rectangle::new(Point::new(x, y), Size::new(w as u32, h as u32))
-        .into_styled(stroke).draw(display).ok();
-    // Flap: two lines from top corners to the center of the top edge.
-    Line::new(
-        Point::new(x, y),
-        Point::new(cx, y + h / 2),
-    ).into_styled(stroke).draw(display).ok();
-    Line::new(
-        Point::new(x + w, y),
-        Point::new(cx, y + h / 2),
-    ).into_styled(stroke).draw(display).ok();
-}
-
 /// Map-pin glyph: teardrop outline with a hollow dot at the center.
 pub fn map_pin<D: DrawTarget<Color = Rgb565>>(
     display: &mut D, cx: i32, cy: i32, radius: i32, color: Rgb565,

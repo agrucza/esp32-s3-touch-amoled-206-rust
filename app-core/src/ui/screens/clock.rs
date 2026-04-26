@@ -36,9 +36,9 @@ use core::fmt::Write;
 use u8g2_fonts::FontRenderer;
 
 use crate::events::SystemEvent;
-use crate::ui::{fonts, glyphs, theme};
+use crate::ui::{fonts, glyphs, layout, theme};
 use crate::ui::types::{Action, Screen, ScreenId, SystemData};
-use crate::ui::widgets::{chamfered_panel, NOTCH};
+use crate::ui::widgets::info_tile;
 
 // -- Geometry ---------------------------------------------------------------
 
@@ -49,24 +49,13 @@ const PAD_X: i32 = 22;
 const HINT_Y: i32 = 8;
 const HINT_W: i32 = 36;
 const HINT_H: i32 = 2;
-/// Height of the top tap-zone that opens Quick Access. Matches the
-/// spec's "36 px invisible hit zone" covering the visible cyan hint
-/// bar and a bit of air above/below it. Full screen width - taps
-/// don't have to land on the 36 px visible bar specifically.
-const QA_TAP_H: i32 = 36;
 
 /// Y of the telemetry strip's glyph tops.
 const TELE_Y: i32 = PAD_TOP;
 
-/// Bottom pill band.
-const PILL_H: i32 = 38;
-const PILL_BOTTOM_MARGIN: i32 = 36;
-const PILL_GAP: i32 = 6;
-const PILL_Y: i32 = theme::SCREEN_H as i32 - PILL_BOTTOM_MARGIN - PILL_H;
-
 /// Hero HH/MM block - vertically centered between the telemetry strip
-/// and the pill row with a slight upward bias so the meta row under
-/// MM sits in the visual midline.
+/// and the bottom tile row with a slight upward bias so the meta row
+/// under MM sits in the visual midline.
 const HERO_HH_TOP: i32 = 120;
 /// Spacing between HH baseline and MM baseline. Slight overlap
 /// compared to a natural line-height so the two numerals read as one
@@ -90,7 +79,7 @@ impl Screen for ClockScreen {
         draw_swipe_hint(display);
         draw_hero_numerals(display, data);
         draw_meta_row(display, data);
-        draw_bottom_tiles(display);
+        draw_bottom_tiles(display, data);
     }
 
     fn on_event(&mut self, event: &SystemEvent, _data: &mut SystemData) -> Action {
@@ -99,22 +88,34 @@ impl Screen for ClockScreen {
             // A seconds tick forces a redraw so `:SS` and the MM
             // digit keep in sync with the RTC.
             SystemEvent::TimeUpdated { .. } => Action::Redraw,
-            // Dual tap zones per spec:
-            // - Top 36 px (the swipe-hint band) → Quick Access
-            // - Anywhere else → App Drawer
-            // The 36 px top zone matches the visible HINT_W bar but
-            // runs full width (`y < QA_TAP_H`), so the user doesn't
-            // have to land on the thin cyan line precisely.
-            SystemEvent::Tap { y, .. } => {
-                if (*y as i32) < QA_TAP_H {
-                    Action::SwitchScreen(ScreenId::QuickAccess)
+            // Bottom tiles route to their target apps; everywhere else
+            // is a no-op. Quick Access opens via swipe-down-from-top
+            // and App Drawer via swipe-up-from-bottom (both routed at
+            // the Model level, not here).
+            SystemEvent::Tap { x, y } => {
+                let [left, right] = layout::bottom_tile_row::<2>();
+                if rect_hit(left, *x, *y) {
+                    Action::SwitchScreen(ScreenId::Alarm)
+                } else if rect_hit(right, *x, *y) {
+                    Action::SwitchScreen(ScreenId::Timer)
                 } else {
-                    Action::SwitchScreen(ScreenId::AppDrawer)
+                    Action::None
                 }
             }
             _ => Action::None,
         }
     }
+}
+
+fn rect_hit(rect: Rectangle, x: u16, y: u16) -> bool {
+    let px = x as i32;
+    let py = y as i32;
+    let rx = rect.top_left.x;
+    let ry = rect.top_left.y;
+    px >= rx
+        && px < rx + rect.size.width as i32
+        && py >= ry
+        && py < ry + rect.size.height as i32
 }
 
 // -- Draw helpers -----------------------------------------------------------
@@ -210,87 +211,43 @@ fn draw_meta_row<D: DrawTarget<Color = Rgb565>>(
         left_x + ss_w + gap, META_Y, theme::FG_MUTED);
 }
 
-fn draw_bottom_tiles<D: DrawTarget<Color = Rgb565>>(display: &mut D) {
-    let total_w = theme::SCREEN_W as i32 - PAD_X * 2;
-    let tile_w = (total_w - PILL_GAP) / 2;
+fn draw_bottom_tiles<D: DrawTarget<Color = Rgb565>>(
+    display: &mut D, data: &SystemData,
+) {
+    let [left, right] = layout::bottom_tile_row::<2>();
 
-    let left = Rectangle::new(
-        Point::new(PAD_X, PILL_Y),
-        Size::new(tile_w as u32, PILL_H as u32),
+    // -- Alarm tile: next enabled alarm time, or OFF -----------------------
+    let weekday = crate::ui::screens::alarm::day_of_week(
+        data.time.year as i32,
+        data.time.month as i32,
+        data.time.day as i32,
     );
-    let right = Rectangle::new(
-        Point::new(PAD_X + tile_w + PILL_GAP, PILL_Y),
-        Size::new(tile_w as u32, PILL_H as u32),
-    );
+    let mut alarm_buf: String<8> = String::new();
+    let alarm_value: &str = match data.alarms.next_alarm(
+        data.time.hour, data.time.minute, weekday,
+    ) {
+        Some(idx) => {
+            let entry = &data.alarms.entries[idx];
+            let _ = write!(alarm_buf, "{:02}:{:02}", entry.hour, entry.minute);
+            alarm_buf.as_str()
+        }
+        None => "OFF",
+    };
+    info_tile(display, left, glyphs::bell, alarm_value, "ALARM", theme::YELLOW);
 
-    // Smaller notch on pills so the chamfer reads at this height.
-    let tile_notch = NOTCH - 2;
-
-    // Left tile: heart glyph + 062 + BPM. Signal-red border, signal
-    // text, chrome unit suffix.
-    chamfered_panel(display, left, tile_notch, theme::SIGNAL, 1);
-    draw_tile_contents(
-        display, left,
-        glyphs::heart, theme::SIGNAL,
-        "062", "BPM",
-        theme::SIGNAL,
-    );
-
-    // Right tile: envelope + x03 + UNREAD. Cyan border/text.
-    chamfered_panel(display, right, tile_notch, theme::CYAN, 1);
-    draw_tile_contents(
-        display, right,
-        glyphs::message, theme::CYAN,
-        "x03", "UNREAD",
-        theme::CYAN,
-    );
-}
-
-/// Shared layout for the two bottom tiles: small glyph on the left,
-/// mono-ish value in the center, uppercase suffix on the right. All
-/// three vertically centered on the tile.
-fn draw_tile_contents<D, F>(
-    display: &mut D,
-    rect: Rectangle,
-    icon: F,
-    icon_color: Rgb565,
-    value: &str,
-    suffix: &str,
-    value_color: Rgb565,
-)
-where
-    D: DrawTarget<Color = Rgb565>,
-    F: FnOnce(&mut D, i32, i32, i32, Rgb565),
-{
-    let x = rect.top_left.x;
-    let y = rect.top_left.y;
-    let w = rect.size.width as i32;
-    let h = rect.size.height as i32;
-    let cy = y + h / 2;
-
-    let pad = 14i32;
-    let icon_cx = x + pad + 6;
-    let icon_r = 7i32;
-
-    icon(display, icon_cx, cy, icon_r, icon_color);
-
-    let val_font = fonts::body();
-    let suf_font = fonts::caption();
-    let suf_w = fonts::measure_width(&suf_font, suffix);
-
-    // Value sits flush-left after the icon column. Suffix sits flush-
-    // right against the inner padding.
-    fonts::draw_at(
-        display, &val_font, value,
-        x + pad + 22, cy - 8, value_color,
-    );
-    fonts::draw_right(
-        display, &suf_font, suffix,
-        x + w - pad, cy - 6, theme::FG_MUTED,
-    );
-    // Ignore suf_w - we intentionally right-align rather than
-    // computing a joint x.
-    let _ = suf_w;
+    // -- Timer tile: remaining time, or OFF when idle/zero -----------------
+    let mut timer_buf: String<8> = String::new();
+    let secs = data.timer.remaining().as_secs();
+    let timer_value: &str = if secs == 0 {
+        "OFF"
+    } else if secs < 3600 {
+        let _ = write!(timer_buf, "{:02}:{:02}", secs / 60, secs % 60);
+        timer_buf.as_str()
+    } else {
+        let _ = write!(timer_buf, "{:02}:{:02}", secs / 3600, (secs / 60) % 60);
+        timer_buf.as_str()
+    };
+    info_tile(display, right, glyphs::hourglass, timer_value, "TIMER", theme::ORANGE);
 }
 
 // -- Small date helpers -----------------------------------------------------

@@ -73,7 +73,6 @@ pub const YELLOW: Rgb565 = Rgb565::new(31, 59, 0);
 pub const GREEN:  Rgb565 = Rgb565::new(0, 63, 19);
 
 /// Orange (#FF8A00). Media, data streams, secondary warning.
-#[allow(dead_code)]
 pub const ORANGE: Rgb565 = Rgb565::new(31, 34, 0);
 
 // -- Semantic aliases -------------------------------------------------------
@@ -123,6 +122,14 @@ pub const CONTENT_TOP: i32 = CORNER_R;
 pub const CONTENT_BOTTOM: i32 = (SCREEN_H as i32) - CORNER_R;
 /// Full-width-safe content band height (306 px).
 pub const CONTENT_H: i32 = CONTENT_BOTTOM - CONTENT_TOP;
+
+/// Distance from the bottom screen edge that a bottom-anchored
+/// element's bottom edge should sit at to clear the bezel arc with
+/// breathing room. Use for CTA button rows, info tiles, status pills,
+/// or any other UI parked at the foot of a screen. Not meant for the
+/// natural bottom of a scrolling list - those scroll past the bezel
+/// and rely on clipping, not on a clearance margin.
+pub const BOTTOM_SAFE_MARGIN: i32 = 64;
 
 /// Side margin for content area.
 #[allow(dead_code)]

@@ -252,3 +252,56 @@ where
         theme::FG,
     );
 }
+
+// -- info_tile ---------------------------------------------------------------
+
+/// Chamfer notch for an `info_tile`. One step smaller than the panel
+/// `NOTCH` so the chamfer reads at the tile's compact height.
+pub const INFO_TILE_NOTCH: i32 = NOTCH - 2;
+
+/// Glyph radius for an `info_tile`'s leading icon.
+const INFO_TILE_ICON_R: i32 = 9;
+
+/// Inner horizontal padding for an `info_tile`.
+const INFO_TILE_PAD: i32 = 14;
+
+/// Draw a chamfered info tile: leading glyph on the left, value text
+/// after it, right-aligned caption suffix. Border + value share
+/// `accent`; the suffix renders in `theme::FG_MUTED`.
+///
+/// Pair with [`crate::ui::layout::bottom_tile_row`] for the watch
+/// face's bottom-tile band or any future N-up info row.
+pub fn info_tile<D, F>(
+    display: &mut D,
+    rect: Rectangle,
+    icon: F,
+    value: &str,
+    suffix: &str,
+    accent: Rgb565,
+)
+where
+    D: DrawTarget<Color = Rgb565>,
+    F: FnOnce(&mut D, i32, i32, i32, Rgb565),
+{
+    chamfered_panel(display, rect, INFO_TILE_NOTCH, accent, 1);
+
+    let x = rect.top_left.x;
+    let y = rect.top_left.y;
+    let w = rect.size.width as i32;
+    let h = rect.size.height as i32;
+    let cy = y + h / 2;
+
+    let icon_cx = x + INFO_TILE_PAD + 6;
+    icon(display, icon_cx, cy, INFO_TILE_ICON_R, accent);
+
+    let val_font = fonts::body();
+    let suf_font = fonts::caption();
+    fonts::draw_at(
+        display, &val_font, value,
+        x + INFO_TILE_PAD + 22, cy - 8, accent,
+    );
+    fonts::draw_right(
+        display, &suf_font, suffix,
+        x + w - INFO_TILE_PAD, cy - 6, theme::FG_MUTED,
+    );
+}
