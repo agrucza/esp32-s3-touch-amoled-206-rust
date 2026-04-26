@@ -74,6 +74,13 @@ pub fn init_seq_from_flash(store: &mut Store) {
         }
         ControlFlow::Continue(())
     });
+
+    // Probe the append path. If the file's metadata is damaged from
+    // a prior fault, opening WRITE|APPEND will surface `LfsError::Corrupt`,
+    // which `Store::append_line` self-heals by deleting the file and
+    // retrying. After this call returns, the file is either intact
+    // (probe is a no-op) or freshly reset (seq counter restarts at 1).
+    store.append_line(LOG_PATH, b"");
     NEXT_SEQ.store(max_seq.wrapping_add(1), Ordering::Relaxed);
     log::info!("event_log: resumed at seq {}", max_seq + 1);
 }

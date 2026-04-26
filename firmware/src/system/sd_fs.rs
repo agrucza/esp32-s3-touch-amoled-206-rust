@@ -21,7 +21,7 @@ use alloc::vec::Vec;
 use app_core::log::{LogEntry, parse_log_line};
 use core::ops::ControlFlow;
 use drivers::sdcard::{
-    DirEntry, FileMode, RawDirectory, RawFile, SdCardError, SdmmcError, VolumeIdx,
+    DirEntry, FileMode, RawDirectory, RawFile, RawVolume, SdCardError, SdmmcError, VolumeIdx,
 };
 
 /// Directories under `/system/` that [`SdFs::reset_user_data`]
@@ -48,21 +48,54 @@ const READ_LINE_CAP: usize = 96;
 /// to detect presence. All file ops are best-effort; the caller
 /// (typically via the composite `Store`'s online flag) decides
 /// whether to attempt them.
+///
+/// ## Session caching
+///
+/// `open_raw_volume` reads the MBR + FAT root on every call. Doing
+/// that for every event-log line append is both slow and a hot crash
+/// surface (see Problem 2 in the panic notes). [`Self::session`]
+/// caches the open volume + root-dir handles across calls; per-op
+/// dir walks happen below the cached root. The cache is dropped on:
+///
+/// * any device-level error during a per-op walk ([`is_card_error`]),
+/// * an explicit [`Self::probe`] (which also calls
+///   [`SdCard::mark_card_uninit`] so a hot-swapped card re-acquires
+///   from CMD0 instead of being talked to with the old card's
+///   geometry),
+/// * `SdFs` being dropped.
 pub struct SdFs<'d> {
     vol: EspVolumeManager<'d>,
+    session: Option<OpenSession>,
+}
+
+/// Cached pair of long-lived `open_raw_volume` / `open_root_dir`
+/// handles. Held inside [`SdFs::session`] so file ops don't re-do
+/// the volume + root walk on every call.
+#[derive(Clone, Copy)]
+struct OpenSession {
+    vol_handle: RawVolume,
+    root: RawDirectory,
 }
 
 impl<'d> SdFs<'d> {
     pub fn new(vol: EspVolumeManager<'d>) -> Self {
-        Self { vol }
+        Self { vol, session: None }
     }
 
-    /// Open + close volume 0. Returns `true` if a card is present
-    /// and the FAT MBR is readable.
+    /// Re-probe the card from a known-clean state. Drops any cached
+    /// session, calls `mark_card_uninit` so the SD driver re-runs
+    /// the SPI init sequence (CMD0 / CMD8 / ACMD41) on the next
+    /// command, then opens volume 0 + root dir to confirm the card
+    /// is readable. The freshly-opened handles stay cached.
+    ///
+    /// Forcing re-init is what lets a hot-swap from one card to a
+    /// different card work without rebooting: the cached `card_type`
+    /// inside `SdCard` would otherwise stick at the old card's value.
     pub fn probe(&mut self) -> bool {
-        match self.vol.open_raw_volume(VolumeIdx(0)) {
-            Ok(vol) => {
-                let _ = self.vol.close_volume(vol);
+        self.invalidate_session();
+        self.vol.device().mark_card_uninit();
+        match self.ensure_session() {
+            Ok(_) => {
                 log::info!("SD card: present (volume 0 readable)");
                 true
             }
@@ -70,6 +103,42 @@ impl<'d> SdFs<'d> {
                 log::info!("SD card: absent or unreadable ({:?})", e);
                 false
             }
+        }
+    }
+
+    /// Drop cached handles. Safe to call when no session is open.
+    fn invalidate_session(&mut self) {
+        if let Some(s) = self.session.take() {
+            let _ = self.vol.close_dir(s.root);
+            let _ = self.vol.close_volume(s.vol_handle);
+        }
+    }
+
+    /// Return the cached session, opening + caching one on first use.
+    fn ensure_session(&mut self) -> Result<OpenSession, SdmmcError<SdCardError>> {
+        if let Some(s) = self.session {
+            return Ok(s);
+        }
+        let vol_handle = self.vol.open_raw_volume(VolumeIdx(0))?;
+        let root = match self.vol.open_root_dir(vol_handle) {
+            Ok(d) => d,
+            Err(e) => {
+                let _ = self.vol.close_volume(vol_handle);
+                return Err(e);
+            }
+        };
+        let session = OpenSession { vol_handle, root };
+        self.session = Some(session);
+        Ok(session)
+    }
+
+    /// On a card-level error, drop the cached session so the next
+    /// op re-acquires. Other error variants (NotFound, FileAlreadyOpen,
+    /// FormatError, ...) keep the cache - they don't indicate the
+    /// card itself is gone.
+    fn invalidate_on_card_error(&mut self, e: &SdmmcError<SdCardError>) {
+        if is_card_error(e) {
+            self.invalidate_session();
         }
     }
 
@@ -243,8 +312,9 @@ impl<'d> SdFs<'d> {
 
     /// Open `path` for reading/writing with the given mode, walking
     /// and (optionally) creating parent directories. Runs `f` with
-    /// the open file handle; guarantees every opened handle is
-    /// closed on every exit path.
+    /// the open file handle; guarantees every transient handle is
+    /// closed on every exit path. The volume + root dir come from
+    /// the cached session and stay open across calls.
     fn with_file<T, F>(
         &mut self,
         path: &str,
@@ -268,19 +338,19 @@ impl<'d> SdFs<'d> {
         }
         let Some(filename) = components.pop() else { return Err(SdmmcError::NotFound) };
 
-        let vol_handle = self.vol.open_raw_volume(VolumeIdx(0))?;
-        let root = match self.vol.open_root_dir(vol_handle) {
-            Ok(d) => d,
+        let session = match self.ensure_session() {
+            Ok(s) => s,
             Err(e) => {
-                let _ = self.vol.close_volume(vol_handle);
+                self.invalidate_on_card_error(&e);
                 return Err(e);
             }
         };
 
         // Walk directories. Stash each handle so we can close in
-        // reverse order regardless of which step fails.
+        // reverse order regardless of which step fails. Volume +
+        // root remain cached on the SdFs and are NOT closed here.
         let mut dirs: heapless::Vec<RawDirectory, MAX_DEPTH> = heapless::Vec::new();
-        let mut parent = root;
+        let mut parent = session.root;
         for name in &components {
             match open_or_create_dir(&mut self.vol, parent, name, create_dirs) {
                 Ok(d) => {
@@ -288,7 +358,8 @@ impl<'d> SdFs<'d> {
                     let _ = dirs.push(d);
                 }
                 Err(e) => {
-                    close_all(&mut self.vol, &dirs, root, vol_handle);
+                    close_dirs(&mut self.vol, &dirs);
+                    self.invalidate_on_card_error(&e);
                     return Err(e);
                 }
             }
@@ -297,7 +368,8 @@ impl<'d> SdFs<'d> {
         let file = match self.vol.open_file_in_dir(parent, filename, mode) {
             Ok(f) => f,
             Err(e) => {
-                close_all(&mut self.vol, &dirs, root, vol_handle);
+                close_dirs(&mut self.vol, &dirs);
+                self.invalidate_on_card_error(&e);
                 return Err(e);
             }
         };
@@ -305,30 +377,29 @@ impl<'d> SdFs<'d> {
         let result = f(&mut self.vol, file);
 
         let _ = self.vol.close_file(file);
-        close_all(&mut self.vol, &dirs, root, vol_handle);
+        close_dirs(&mut self.vol, &dirs);
+        if let Err(ref e) = result {
+            self.invalidate_on_card_error(e);
+        }
         result
     }
 
     fn walk_reset(&mut self) -> Result<u32, SdmmcError<SdCardError>> {
-        let vol_handle = self.vol.open_raw_volume(VolumeIdx(0))?;
-        let root = match self.vol.open_root_dir(vol_handle) {
-            Ok(d) => d,
+        let session = match self.ensure_session() {
+            Ok(s) => s,
             Err(e) => {
-                let _ = self.vol.close_volume(vol_handle);
+                self.invalidate_on_card_error(&e);
                 return Err(e);
             }
         };
-        let sysdir = match self.vol.open_dir(root, SYSTEM_DIR) {
+        let sysdir = match self.vol.open_dir(session.root, SYSTEM_DIR) {
             Ok(d) => d,
             Err(SdmmcError::NotFound) => {
                 // Card has no /system/ - nothing to wipe.
-                let _ = self.vol.close_dir(root);
-                let _ = self.vol.close_volume(vol_handle);
                 return Ok(0);
             }
             Err(e) => {
-                let _ = self.vol.close_dir(root);
-                let _ = self.vol.close_volume(vol_handle);
+                self.invalidate_on_card_error(&e);
                 return Err(e);
             }
         };
@@ -365,10 +436,21 @@ impl<'d> SdFs<'d> {
         }
 
         let _ = self.vol.close_dir(sysdir);
-        let _ = self.vol.close_dir(root);
-        let _ = self.vol.close_volume(vol_handle);
         Ok(removed)
     }
+}
+
+impl<'d> Drop for SdFs<'d> {
+    fn drop(&mut self) {
+        self.invalidate_session();
+    }
+}
+
+/// Distinguish "card disappeared / SPI transport broke" from "FAT
+/// said no" so the cache invalidation path doesn't pessimistically
+/// kick the session on every NotFound.
+fn is_card_error(e: &SdmmcError<SdCardError>) -> bool {
+    matches!(e, SdmmcError::DeviceError(_))
 }
 
 /// Open `name` inside `parent`. If `NotFound` and `create` is true,
@@ -390,20 +472,17 @@ fn open_or_create_dir(
     }
 }
 
-/// Close every directory handle in `dirs` (reverse order) plus the
-/// root directory and volume. Errors during cleanup are swallowed
+/// Close every directory handle in `dirs` in reverse order. Used
+/// only for the per-op directory walk; the cached session's volume
+/// + root stay open across calls. Errors during cleanup are swallowed
 /// since we're already unwinding.
-fn close_all(
+fn close_dirs(
     vol: &mut EspVolumeManager,
     dirs: &heapless::Vec<RawDirectory, MAX_DEPTH>,
-    root: RawDirectory,
-    vol_handle: drivers::sdcard::RawVolume,
 ) {
     for d in dirs.iter().rev() {
         let _ = vol.close_dir(*d);
     }
-    let _ = vol.close_dir(root);
-    let _ = vol.close_volume(vol_handle);
 }
 
 // -- Storage trait impl -----------------------------------------------------

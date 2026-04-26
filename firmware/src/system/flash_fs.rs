@@ -53,9 +53,10 @@ use embedded_storage::nor_flash::{NorFlash, ReadNorFlash};
 use esp_hal::peripherals::FLASH;
 use esp_storage::{FlashStorage, FlashStorageError};
 use littlefs_rust::{
-    Config as LfsConfig, Error as LfsError, FileType, Filesystem, OpenFlags,
+    Config as LfsConfig, FileType, Filesystem, OpenFlags,
     Storage as LfsStorage,
 };
+pub use littlefs_rust::Error as LfsError;
 use serde::{Deserialize, Serialize};
 
 use crate::system::fs::{unwrap_blob, wrap_blob};
@@ -346,6 +347,17 @@ impl<'d> FlashFs<'d> {
     /// creates the `/system/` tree up front).
     pub fn write_file(&mut self, path: &str, bytes: &[u8]) -> Result<(), LfsError> {
         self.fs.write_file(path, bytes)
+    }
+
+    /// Delete the file at `path`. Treats "already gone" as success
+    /// so callers in recovery paths don't have to special-case the
+    /// missing-file race. Used by [`Store::append_line`] to clear a
+    /// `LfsError::Corrupt` file before retrying the append.
+    pub fn reset_file(&mut self, path: &str) -> Result<(), LfsError> {
+        match self.fs.remove(path) {
+            Ok(()) | Err(LfsError::NoEntry) => Ok(()),
+            Err(e) => Err(e),
+        }
     }
 
     /// Directories whose contents get deleted by [`Self::reset_user_data`].

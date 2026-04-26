@@ -33,7 +33,7 @@ use esp_hal::peripherals::FLASH;
 use serde::{Deserialize, Serialize};
 
 use crate::sdcard_hal;
-use crate::system::flash_fs::{FlashFs, FsUsage};
+use crate::system::flash_fs::{FlashFs, FsUsage, LfsError};
 use crate::system::fs::{unwrap_blob, wrap_blob};
 use crate::system::sd_fs::SdFs;
 
@@ -104,6 +104,19 @@ impl<'d> Store<'d> {
     }
 
     // -- Probe + backfill ---------------------------------------------------
+
+    /// Best-effort re-probe used by the periodic recovery hook in
+    /// `SystemManager::tick`. No-op when SD is already believed
+    /// online; otherwise calls [`Self::probe_sd`] which forces a
+    /// fresh card init (so a hot-replug or different-card swap
+    /// recovers without the user pressing the Settings button).
+    /// Returns `true` if SD is now online.
+    pub fn try_recover_sd(&mut self) -> bool {
+        if self.sd_online() {
+            return true;
+        }
+        self.probe_sd()
+    }
 
     /// Re-probe the SD slot and update the online flag. On a
     /// successful probe, back-fill both directions of the mirror:
@@ -293,9 +306,35 @@ impl<'d> Store<'d> {
     /// Append `bytes` to `path` on flash (always) and on SD (if
     /// the mirror is online). First SD failure flips the mirror
     /// offline.
+    ///
+    /// Flash-side `LfsError::Corrupt` is self-healing: the file is
+    /// deleted and the append retried once. On a successful retry
+    /// the prior contents are lost (nothing else we can do - the
+    /// metadata chain was unrecoverable), but the file is back to a
+    /// writable state for every subsequent call.
     pub fn append_line(&mut self, path: &str, bytes: &[u8]) {
-        if let Err(e) = self.flash.append_line(path, bytes) {
-            log::warn!("store: flash append {} failed: {:?}", path, e);
+        match self.flash.append_line(path, bytes) {
+            Ok(()) => {}
+            Err(LfsError::Corrupt) => {
+                log::warn!(
+                    "store: flash {} corrupt, resetting file and retrying", path,
+                );
+                if let Err(e) = self.flash.reset_file(path) {
+                    log::warn!("store: reset {} failed: {:?}", path, e);
+                } else if let Err(e) = self.flash.append_line(path, bytes) {
+                    log::warn!(
+                        "store: retry append {} after reset failed: {:?}", path, e,
+                    );
+                } else {
+                    log::info!(
+                        "store: flash {} reset after corruption (prior entries lost)",
+                        path,
+                    );
+                }
+            }
+            Err(e) => {
+                log::warn!("store: flash append {} failed: {:?}", path, e);
+            }
         }
         if !self.sd_online() {
             return;

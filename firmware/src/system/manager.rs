@@ -217,7 +217,18 @@ pub struct SystemManager<'d> {
     // actually differs. Keeps the fire-hose out of the event
     // pipeline.
     last_storage_usage: app_core::data::StorageUsage,
+
+    // Last time the periodic SD-recovery hook (in `tick`) attempted
+    // a re-probe. Throttles the probe so we don't hammer the slot
+    // every tick when the card is genuinely absent. `None` until
+    // the first attempt fires.
+    last_sd_recover_attempt: Option<Instant>,
 }
+
+/// How often the tick loop will retry an SD probe when the mirror
+/// is currently believed offline. Tuned so a hot-replug recovers
+/// within a few seconds without flooding the slot with probes.
+const SD_RECOVER_INTERVAL: Duration = Duration::from_secs(5);
 
 // `NAV_STACK_DEPTH` and the `NavStack` type live in
 // `app_core::nav` so the stack's push/pop semantics are
@@ -521,6 +532,7 @@ impl SystemManager<'static> {
             rtc,
             store,
             last_storage_usage: initial_usage,
+            last_sd_recover_attempt: None,
         };
 
         let bundle = TaskBundle {
@@ -694,6 +706,28 @@ impl SystemManager<'static> {
                     self.display.set_brightness(value).await;
                 }
             }
+        }
+    }
+
+    /// Periodic SD-recovery: when the mirror is currently offline,
+    /// re-probe the slot at most once per `SD_RECOVER_INTERVAL`. On
+    /// a successful recovery, push a `StorageUsageUpdated` event so
+    /// the UI's "SD online" indicator updates without waiting for
+    /// the next save.
+    async fn try_sd_auto_recovery(&mut self) {
+        if self.store.sd_online() {
+            return;
+        }
+        let now = Instant::now();
+        if let Some(last) = self.last_sd_recover_attempt {
+            if now.duration_since(last) < SD_RECOVER_INTERVAL {
+                return;
+            }
+        }
+        self.last_sd_recover_attempt = Some(now);
+        if self.store.try_recover_sd() {
+            log::info!("SD: auto-recovered (card detected)");
+            self.refresh_storage_usage().await;
         }
     }
 
@@ -902,6 +936,13 @@ impl SystemManager<'static> {
         // sleep transitions) and execute the resulting effects.
         let effects = self.model.tick(Instant::now());
         self.execute_effects(effects).await;
+
+        // Auto-recovery for SD: when the mirror is offline, re-probe
+        // every SD_RECOVER_INTERVAL so a hot-replug or different-card
+        // swap comes back online without the user pressing the
+        // Settings button. Throttled because a probe involves a full
+        // CMD0/CMD8/ACMD41 sequence + MBR read.
+        self.try_sd_auto_recovery().await;
 
         if !self.model.sleeping() && self.model.needs_redraw() {
             set_cpu_freq(CpuFreq::Mhz160);
