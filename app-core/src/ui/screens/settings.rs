@@ -29,10 +29,11 @@ use crate::ui::types::{
     Action, Screen, SelfTestId, SelfTestResult, SystemData, SystemEvent,
 };
 use crate::ui::widgets::{
-    chamfered_button, chamfered_panel, handle_scroll_drag, header, header_icon_hit,
-    home_indicator, render_scrolled, row, slider, slider_value_from_x, status_bar,
-    tag_label, ButtonVariant, RowControl, Numpad, NumpadAction, NOTCH, ROW_H,
-    SCROLLBAR_GUTTER, SLIDER_BAR_H, STATUS_BAR_H, TAG_LABEL_H, MAX_DIGITS,
+    action_row_rects, chamfered_button, chamfered_panel, fmt_2digit, handle_scroll_drag,
+    header, header_icon_hit, home_indicator, render_action_row, render_scrolled, row,
+    slider, slider_value_from_x, status_bar, tag_label, ButtonVariant, Picker, RowControl,
+    Wheel, NOTCH, ROW_H, SCROLLBAR_GUTTER, SLIDER_BAR_H, STATUS_BAR_H, TAG_LABEL_H,
+    WHEEL_TOTAL_H,
 };
 
 /// Slider lower bound for brightness in the Display sub-view -
@@ -420,15 +421,38 @@ const IMU_TESTS: &[ImuTestRow] = &[
     },
 ];
 
-// -- Numpad time label Y (same as timer) -------------------------------------
+// -- Picker layout ----------------------------------------------------------
 
-const NUMPAD_TIME_Y: i32 = 90;
+/// Top y of the wheel picker in time/date entry views, vertically
+/// centred between the header bottom and the action row.
+const PICKER_TOP: i32 = HDR_TOP + HDR_H + 8
+    + (layout::BOTTOM_TILE_Y - (HDR_TOP + HDR_H + 8) - WHEEL_TOTAL_H) / 2;
+
+/// Width of one wheel column in the time/date picker.
+const PICKER_COL_W: i32 = 72;
+
+/// Horizontal gap between adjacent picker columns.
+const PICKER_GAP: i32 = 28;
+
+/// Total horizontal extent of a three-column picker.
+const PICKER_TOTAL_W: i32 = PICKER_COL_W * 3 + PICKER_GAP * 2;
+
+/// Year range surfaced in the date picker. PCF85063 is good past
+/// 2099 but the year wheel scrolls become tedious past then; pick
+/// the same century the firmware was built in.
+const DATE_YEAR_MIN: i32 = 2000;
+const DATE_YEAR_MAX: i32 = 2099;
 
 // -- SettingsScreen ----------------------------------------------------------
 
 pub struct SettingsScreen {
     view: SettingsView,
-    numpad: Numpad,
+    /// HH:MM:SS picker for the TimeEntry sub-view.
+    time_picker: Picker<3>,
+    /// DD/MM/YYYY picker for the DateEntry sub-view. The DD wheel's
+    /// range is recomputed every event so leap-day / 30-vs-31
+    /// boundaries stay consistent with the current month + year.
+    date_picker: Picker<3>,
     /// Vertical scroll state for the index sub-view.
     index_scroll: layout::ScrollState,
     /// Vertical scroll state for the MOTION sub-view (live readouts +
@@ -446,12 +470,31 @@ impl SettingsScreen {
     pub fn new() -> Self {
         Self {
             view: SettingsView::Index,
-            numpad: Numpad::new(6),
+            time_picker: Picker::new([
+                Wheel::new(0, 23, 0).with_wrap(true),
+                Wheel::new(0, 59, 0).with_wrap(true),
+                Wheel::new(0, 59, 0).with_wrap(true),
+            ]),
+            date_picker: Picker::new([
+                Wheel::new(1, 31, 1),
+                Wheel::new(1, 12, 1).with_wrap(true),
+                Wheel::new(DATE_YEAR_MIN, DATE_YEAR_MAX, DATE_YEAR_MIN),
+            ]),
             index_scroll: layout::ScrollState::new(),
             imu_scroll: layout::ScrollState::new(),
             motion_phase: 0,
             motion_last: None,
         }
+    }
+
+    /// Re-clamp the date picker's day wheel to the days-in-month for
+    /// the currently-selected month + year. Called after any event
+    /// that may have changed the month or year wheel.
+    fn refresh_date_day_range(&mut self) {
+        let month = self.date_picker.wheels[1].value();
+        let year = self.date_picker.wheels[2].value();
+        let max = days_in_month(month, year);
+        self.date_picker.wheels[0].set_range(1, max);
     }
 }
 
@@ -708,26 +751,22 @@ impl SettingsScreen {
             SystemEvent::Tap { x, y } => {
                 let p = Point::new(*x as i32, *y as i32);
                 if clock_panel_rect(0).contains(p) {
-                    // Open time numpad, pre-fill with current time.
+                    // Open time picker, seed from current time.
                     let t = &data.time;
-                    self.numpad = Numpad::new(6);
-                    self.numpad.prefill(&[
-                        t.hour / 10, t.hour % 10,
-                        t.minute / 10, t.minute % 10,
-                        t.second / 10, t.second % 10,
-                    ]);
+                    self.time_picker.wheels[0].set_value(t.hour as i32);
+                    self.time_picker.wheels[1].set_value(t.minute as i32);
+                    self.time_picker.wheels[2].set_value(t.second as i32);
                     self.view = SettingsView::TimeEntry;
                     Action::Redraw
                 } else if clock_panel_rect(1).contains(p) {
-                    // Open date numpad, pre-fill with current date.
+                    // Open date picker, seed from current date. Set
+                    // month + year first, then re-clamp day range
+                    // before assigning day so it's always valid.
                     let t = &data.time;
-                    self.numpad = Numpad::new(8);
-                    self.numpad.prefill(&[
-                        t.day / 10, t.day % 10,
-                        t.month / 10, t.month % 10,
-                        (t.year / 1000) as u8, ((t.year / 100) % 10) as u8,
-                        ((t.year / 10) % 10) as u8, (t.year % 10) as u8,
-                    ]);
+                    self.date_picker.wheels[1].set_value(t.month as i32);
+                    self.date_picker.wheels[2].set_value(t.year as i32);
+                    self.refresh_date_day_range();
+                    self.date_picker.wheels[0].set_value(t.day as i32);
                     self.view = SettingsView::DateEntry;
                     Action::Redraw
                 } else {
@@ -739,7 +778,7 @@ impl SettingsScreen {
     }
 }
 
-// -- Time entry numpad -------------------------------------------------------
+// -- Time entry picker -------------------------------------------------------
 
 impl SettingsScreen {
     fn render_time_entry<D: DrawTarget<Color = Rgb565>>(
@@ -747,70 +786,61 @@ impl SettingsScreen {
     ) {
         draw_header(display, data, "SET TIME", theme::SIGNAL);
 
-        // HH:MM:SS label from digits.
-        let p = pad_digits(&self.numpad.digits, 6);
-        let mut buf: String<12> = String::new();
-        let _ = write!(buf, "{}{}{}{}{}{}{}{}",
-            p[0], p[1], ':', p[2], p[3], ':', p[4], p[5]);
-        fonts::draw_centered(
-            display, &fonts::value(),
-            &buf,
-            theme::SCREEN_W as i32 / 2, NUMPAD_TIME_Y,
-            theme::SIGNAL,
-        );
+        let cells = picker_cell_rects();
+        self.time_picker.wheels[0].render(display, cells[0], theme::SIGNAL, fmt_2digit);
+        self.time_picker.wheels[1].render(display, cells[1], theme::SIGNAL, fmt_2digit);
+        self.time_picker.wheels[2].render(display, cells[2], theme::SIGNAL, fmt_2digit);
+        draw_picker_separators(display, &cells, ":", theme::SIGNAL);
 
-        self.numpad.render(display);
+        render_action_row(display, theme::SIGNAL);
     }
 
     fn time_entry_event(&mut self, event: &SystemEvent, data: &mut SystemData) -> Action {
         match event {
             SystemEvent::Tap { x, y } if header_back_hit(*x, *y) => {
-                self.numpad = Numpad::new(6);
                 self.view = SettingsView::Clock;
                 Action::Redraw
             }
             SystemEvent::Tap { x, y } => {
-                if let Some(action) = self.numpad.hit_test(*x, *y) {
-                    match action {
-                        NumpadAction::Confirm => {
-                            let p = pad_digits(&self.numpad.digits, 6);
-                            let h = p[0] * 10 + p[1];
-                            let m = p[2] * 10 + p[3];
-                            let s = p[4] * 10 + p[5];
-                            // Validate.
-                            if h < 24 && m < 60 && s < 60 {
-                                self.numpad = Numpad::new(6);
-                                self.view = SettingsView::Clock;
-                                return Action::SetTime {
-                                    year: data.time.year,
-                                    month: data.time.month,
-                                    day: data.time.day,
-                                    hour: h,
-                                    minute: m,
-                                    second: s,
-                                };
-                            }
-                            // Invalid - just redraw (user can see the bad value).
-                            Action::Redraw
-                        }
-                        other => {
-                            if self.numpad.apply(other) {
-                                Action::Redraw
-                            } else {
-                                Action::None
-                            }
-                        }
-                    }
-                } else {
-                    Action::None
+                let (cancel, set) = action_row_rects();
+                if rect_hit(cancel, *x, *y) {
+                    self.view = SettingsView::Clock;
+                    return Action::Redraw;
                 }
+                if rect_hit(set, *x, *y) {
+                    let h = self.time_picker.wheels[0].value() as u8;
+                    let m = self.time_picker.wheels[1].value() as u8;
+                    let s = self.time_picker.wheels[2].value() as u8;
+                    self.view = SettingsView::Clock;
+                    return Action::SetTime {
+                        year: data.time.year,
+                        month: data.time.month,
+                        day: data.time.day,
+                        hour: h,
+                        minute: m,
+                        second: s,
+                    };
+                }
+
+                let cells = picker_cell_rects();
+                if self.time_picker.handle_event(event, &cells) {
+                    return Action::Redraw;
+                }
+                Action::None
+            }
+            SystemEvent::TouchPressed { .. } | SystemEvent::TouchReleased => {
+                let cells = picker_cell_rects();
+                if self.time_picker.handle_event(event, &cells) {
+                    return Action::Redraw;
+                }
+                Action::None
             }
             _ => Action::None,
         }
     }
 }
 
-// -- Date entry numpad -------------------------------------------------------
+// -- Date entry picker -------------------------------------------------------
 
 impl SettingsScreen {
     fn render_date_entry<D: DrawTarget<Color = Rgb565>>(
@@ -818,63 +848,60 @@ impl SettingsScreen {
     ) {
         draw_header(display, data, "SET DATE", theme::SIGNAL);
 
-        // DD.MM.YYYY label from digits.
-        let p = pad_digits(&self.numpad.digits, 8);
-        let mut buf: String<12> = String::new();
-        let _ = write!(buf, "{}{}.{}{}.{}{}{}{}",
-            p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7]);
-        fonts::draw_centered(
-            display, &fonts::value(),
-            &buf,
-            theme::SCREEN_W as i32 / 2, NUMPAD_TIME_Y,
-            theme::SIGNAL,
-        );
+        let cells = picker_cell_rects();
+        self.date_picker.wheels[0].render(display, cells[0], theme::SIGNAL, fmt_2digit);
+        self.date_picker.wheels[1].render(display, cells[1], theme::SIGNAL, fmt_2digit);
+        // Year wheel has 4-digit values - format unpadded to fit
+        // the 72 px column at value-font size.
+        self.date_picker.wheels[2].render(display, cells[2], theme::SIGNAL, |v, buf| {
+            let _ = write!(buf, "{}", v);
+        });
+        draw_picker_separators(display, &cells, ".", theme::SIGNAL);
 
-        self.numpad.render(display);
+        render_action_row(display, theme::SIGNAL);
     }
 
     fn date_entry_event(&mut self, event: &SystemEvent, data: &mut SystemData) -> Action {
         match event {
             SystemEvent::Tap { x, y } if header_back_hit(*x, *y) => {
-                self.numpad = Numpad::new(6);
                 self.view = SettingsView::Clock;
                 Action::Redraw
             }
             SystemEvent::Tap { x, y } => {
-                if let Some(action) = self.numpad.hit_test(*x, *y) {
-                    match action {
-                        NumpadAction::Confirm => {
-                            let p = pad_digits(&self.numpad.digits, 8);
-                            let d = p[0] * 10 + p[1];
-                            let m = p[2] * 10 + p[3];
-                            let y = p[4] as u16 * 1000 + p[5] as u16 * 100
-                                  + p[6] as u16 * 10 + p[7] as u16;
-                            // Basic validation.
-                            if d >= 1 && d <= 31 && m >= 1 && m <= 12 && y >= 2000 && y <= 2099 {
-                                self.numpad = Numpad::new(6);
-                                self.view = SettingsView::Clock;
-                                return Action::SetTime {
-                                    year: y,
-                                    month: m,
-                                    day: d,
-                                    hour: data.time.hour,
-                                    minute: data.time.minute,
-                                    second: data.time.second,
-                                };
-                            }
-                            Action::Redraw
-                        }
-                        other => {
-                            if self.numpad.apply(other) {
-                                Action::Redraw
-                            } else {
-                                Action::None
-                            }
-                        }
-                    }
-                } else {
-                    Action::None
+                let (cancel, set) = action_row_rects();
+                if rect_hit(cancel, *x, *y) {
+                    self.view = SettingsView::Clock;
+                    return Action::Redraw;
                 }
+                if rect_hit(set, *x, *y) {
+                    let d = self.date_picker.wheels[0].value() as u8;
+                    let m = self.date_picker.wheels[1].value() as u8;
+                    let y = self.date_picker.wheels[2].value() as u16;
+                    self.view = SettingsView::Clock;
+                    return Action::SetTime {
+                        year: y,
+                        month: m,
+                        day: d,
+                        hour: data.time.hour,
+                        minute: data.time.minute,
+                        second: data.time.second,
+                    };
+                }
+
+                let cells = picker_cell_rects();
+                if self.date_picker.handle_event(event, &cells) {
+                    self.refresh_date_day_range();
+                    return Action::Redraw;
+                }
+                Action::None
+            }
+            SystemEvent::TouchPressed { .. } | SystemEvent::TouchReleased => {
+                let cells = picker_cell_rects();
+                if self.date_picker.handle_event(event, &cells) {
+                    self.refresh_date_day_range();
+                    return Action::Redraw;
+                }
+                Action::None
             }
             _ => Action::None,
         }
@@ -1785,16 +1812,70 @@ impl SettingsScreen {
 
 // -- Helpers -----------------------------------------------------------------
 
-/// Pad a digit slice to `len` digits, right-aligned with leading zeros.
-fn pad_digits(digits: &[u8], len: usize) -> [u8; MAX_DIGITS] {
-    let mut p = [0u8; MAX_DIGITS];
-    let offset = len.saturating_sub(digits.len());
-    for (i, &d) in digits.iter().enumerate() {
-        if offset + i < 8 {
-            p[offset + i] = d;
-        }
+/// Per-column rects for the time/date wheel picker, centered horizontally
+/// inside the SCREEN_W band.
+fn picker_cell_rects() -> [Rectangle; 3] {
+    let start_x = (theme::SCREEN_W as i32 - PICKER_TOTAL_W) / 2;
+    core::array::from_fn(|i| {
+        Rectangle::new(
+            Point::new(
+                start_x + i as i32 * (PICKER_COL_W + PICKER_GAP),
+                PICKER_TOP,
+            ),
+            Size::new(PICKER_COL_W as u32, WHEEL_TOTAL_H as u32),
+        )
+    })
+}
+
+/// Draw a single-character separator (`":"` for time, `"."` for date)
+/// between adjacent picker columns, sitting on the wheels' selection
+/// band centerline.
+fn draw_picker_separators<D: DrawTarget<Color = Rgb565>>(
+    display: &mut D,
+    cells: &[Rectangle; 3],
+    sep: &str,
+    accent: Rgb565,
+) {
+    let band_cy = cells[0].top_left.y + cells[0].size.height as i32 / 2;
+    for i in 0..2 {
+        let cx = (cells[i].top_left.x + cells[i].size.width as i32
+            + cells[i + 1].top_left.x) / 2;
+        let sep_rect = Rectangle::new(
+            Point::new(cx - 8, band_cy - 16),
+            Size::new(16, 32),
+        );
+        fonts::draw_centered_in_rect(
+            display, &fonts::value(), sep, sep_rect, accent,
+        );
     }
-    p
+}
+
+/// Days in the given Gregorian month/year. Year is assumed to be in
+/// [`DATE_YEAR_MIN`]..=[`DATE_YEAR_MAX`] (the 21st century, no
+/// century-divisible-by-400 boundary in range), so leap-year reduces
+/// to `year % 4 == 0`.
+fn days_in_month(month: i32, year: i32) -> i32 {
+    match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if year % 4 == 0 => 29,
+        2 => 28,
+        _ => 31,
+    }
+}
+
+/// Standalone hit-test - reused by the time/date entry sub-views to
+/// match against `action_row_rects()` slots without pulling in the
+/// alarm screen's helper.
+fn rect_hit(rect: Rectangle, x: u16, y: u16) -> bool {
+    let px = x as i32;
+    let py = y as i32;
+    let rx = rect.top_left.x;
+    let ry = rect.top_left.y;
+    px >= rx
+        && px < rx + rect.size.width as i32
+        && py >= ry
+        && py < ry + rect.size.height as i32
 }
 
 

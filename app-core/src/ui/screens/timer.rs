@@ -14,20 +14,19 @@
 //!   RESET (Ghost steel when zero, Primary signal-red when there's
 //!   a duration set).
 //!
-//! **Numpad view** - duration entry:
-//! - Standard app chrome with chevron-back returning to Main.
-//! - Time label below the header showing entered `HH:MM:SS`,
-//!   right-to-left fill like a calculator.
-//! - Existing `Numpad` widget below. The numpad still uses
-//!   `theme::SIGNAL` for its keys; tinting it to follow the
-//!   per-screen accent is a future change once we have a second
-//!   accent caller.
+//! **Picker view** - duration entry:
+//! - Standard app chrome with chevron-back == Cancel.
+//! - Three-column HH:MM:SS wheel picker (orange accent). HH is
+//!   range-limited 0..=4 (the hardware countdown max is 4h15m);
+//!   MM and SS wrap modularly.
+//! - `CANCEL | SET` action row.
 //!
-//! Tapping the readout in idle/paused opens the numpad. Confirming
-//! on the numpad sets the duration and returns to Main. If the
-//! entered duration exceeds the hardware countdown maximum (4h15m),
-//! it's clamped and the time label flashes orange↔red twice. The
-//! user must confirm again with the capped value.
+//! Tapping the readout in idle/paused opens the picker, seeded
+//! with the current duration. Tapping Set validates: if the
+//! chosen total exceeds [`MAX_TIMER_SECS`] the picker stays
+//! open, the wheels reset to the capped value, and the readout
+//! flashes orange↔red so the user can confirm the cap before
+//! committing.
 
 use core::fmt::Write;
 
@@ -44,9 +43,10 @@ use crate::ui::{fonts, layout, theme};
 use crate::ui::types::{Action, Screen, SystemData, TimerState};
 use crate::data::TimeData;
 use crate::ui::widgets::{
-    app_chrome_back_hit, chamfered_button, chamfered_panel, draw_app_chrome,
-    tag_label, ButtonVariant, Numpad, NumpadAction,
-    APP_CONTENT_TOP, NOTCH, TAG_LABEL_H,
+    action_row_rects, app_chrome_back_hit, chamfered_button, chamfered_panel,
+    draw_app_chrome, fmt_2digit, render_action_row, tag_label, ButtonVariant,
+    Picker, Wheel,
+    APP_CONTENT_TOP, NOTCH, TAG_LABEL_H, WHEEL_TOTAL_H,
 };
 
 // -- Constants ---------------------------------------------------------------
@@ -73,13 +73,30 @@ const READOUT_BUTTON_GAP: i32 = 8;
 const READOUT_TOP: i32 = APP_CONTENT_TOP
     + (layout::BOTTOM_TILE_Y - READOUT_BUTTON_GAP - APP_CONTENT_TOP - READOUT_H) / 2;
 
-/// Y of the time label (top of glyphs) in the numpad view. Sits
-/// below the header with breathing room before the numpad grid.
-const NUMPAD_TIME_Y: i32 = APP_CONTENT_TOP + 28;
+/// Top y of the wheel picker. Centered between the header bottom
+/// and the action row.
+const PICKER_TOP: i32 = APP_CONTENT_TOP
+    + (layout::BOTTOM_TILE_Y - APP_CONTENT_TOP - WHEEL_TOTAL_H) / 2;
+
+/// Width of one wheel column. Three columns plus two gaps span
+/// roughly the same horizontal real estate as the readout panel.
+const PICKER_COL_W: i32 = 72;
+
+/// Horizontal gap between columns - wide enough to hold the colon
+/// glyph at value-font size with breathing room on both sides.
+const PICKER_GAP: i32 = 28;
+
+/// Total horizontal extent of the three-column picker.
+const PICKER_TOTAL_W: i32 = PICKER_COL_W * 3 + PICKER_GAP * 2;
 
 /// Maximum timer duration in seconds (255 * 60s = 4h15m), capped
 /// by the PCF85063 hardware countdown register.
 const MAX_TIMER_SECS: u64 = 15300;
+
+/// Maximum hour value selectable on the picker. The hardware cap
+/// is 4h15m, so values past 4h would always be clamped on Set;
+/// limit the wheel itself so the user can't spin past 4 h.
+const MAX_TIMER_H: i32 = 4;
 
 /// Ticks per flash phase (250 ms at 20 Hz = 5 ticks).
 const FLASH_PHASE_TICKS: u8 = 5;
@@ -92,7 +109,7 @@ const FLASH_TOTAL_TICKS: u8 = FLASH_PHASE_TICKS * 4;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TimerView {
     Main,
-    Numpad,
+    Picker,
 }
 
 // -- Screen ------------------------------------------------------------------
@@ -101,10 +118,12 @@ pub struct TimerScreen {
     view: TimerView,
     /// Last displayed remaining second, gates 1 Hz redraw.
     last_rendered_sec: u64,
-    /// Numpad widget for duration entry.
-    numpad: Numpad,
+    /// HH:MM:SS wheel picker for duration entry. Seeded from the
+    /// current duration on entry; values read back into a Duration
+    /// on Set.
+    picker: Picker<3>,
     /// Remaining flash ticks for the clamp-warning animation.
-    /// Alternates the numpad time label between accent and danger.
+    /// Alternates the picker readout label between accent and danger.
     flash_ticks: u8,
     /// True when the timer has expired and we're alerting the user.
     /// Any tap dismisses the alert and stops the buzz.
@@ -119,11 +138,35 @@ impl TimerScreen {
         Self {
             view: TimerView::Main,
             last_rendered_sec: 0,
-            numpad: Numpad::new(6),
+            picker: Picker::new([
+                Wheel::new(0, MAX_TIMER_H, 0),
+                Wheel::new(0, 59, 0).with_wrap(true),
+                Wheel::new(0, 59, 0).with_wrap(true),
+            ]),
             flash_ticks: 0,
             alerting: false,
             alert_ticks: 0,
         }
+    }
+
+    /// Seed the picker from a `Duration` (used on entry to the
+    /// picker view and after a clamp).
+    fn seed_picker_from(&mut self, d: Duration) {
+        let total = d.as_secs();
+        let h = (total / 3600).min(MAX_TIMER_H as u64) as i32;
+        let m = ((total / 60) % 60) as i32;
+        let s = (total % 60) as i32;
+        self.picker.wheels[0].set_value(h);
+        self.picker.wheels[1].set_value(m);
+        self.picker.wheels[2].set_value(s);
+    }
+
+    /// Read the current picker values back as a `Duration`.
+    fn picker_duration(&self) -> Duration {
+        let h = self.picker.wheels[0].value() as u64;
+        let m = self.picker.wheels[1].value() as u64;
+        let s = self.picker.wheels[2].value() as u64;
+        Duration::from_secs(h * 3600 + m * 60 + s)
     }
 
     /// Compute remaining seconds from current RTC wall time + the
@@ -159,9 +202,11 @@ impl TimerScreen {
         if phase % 2 == 0 { ACCENT } else { theme::DANGER }
     }
 
-    /// Color the numpad time label, flashing between accent and
-    /// danger during the post-clamp warning animation.
-    fn time_label_color(&self) -> Rgb565 {
+    /// Color used for the picker wheels (selection cell + hairlines)
+    /// and colon separators. Flashes accent↔danger during the
+    /// post-clamp warning so the user sees the cap was applied
+    /// before they tap Set again.
+    fn picker_accent(&self) -> Rgb565 {
         if self.flash_ticks == 0 {
             return ACCENT;
         }
@@ -174,7 +219,7 @@ impl Screen for TimerScreen {
     fn render<D: DrawTarget<Color = Rgb565>>(&self, display: &mut D, data: &SystemData) {
         match self.view {
             TimerView::Main => self.render_main(display, data),
-            TimerView::Numpad => self.render_numpad(display, data),
+            TimerView::Picker => self.render_picker(display, data),
         }
     }
 
@@ -230,7 +275,7 @@ impl Screen for TimerScreen {
 
         match self.view {
             TimerView::Main => self.main_event(event, data),
-            TimerView::Numpad => self.numpad_event(event, data),
+            TimerView::Picker => self.picker_event(event, data),
         }
     }
 }
@@ -319,12 +364,12 @@ impl TimerScreen {
                 Action::Back
             }
 
-            // Tap the readout panel (when not running) → numpad.
+            // Tap the readout panel (when not running) → picker.
             SystemEvent::Tap { x, y }
                 if !data.timer.is_running() && rect_hit(readout_rect(), *x, *y) =>
             {
-                self.numpad.prefill(&duration_to_raw(data.timer.remaining()));
-                self.view = TimerView::Numpad;
+                self.seed_picker_from(data.timer.remaining());
+                self.view = TimerView::Picker;
                 Action::Redraw
             }
 
@@ -381,32 +426,42 @@ impl TimerScreen {
     }
 }
 
-// -- Numpad view -------------------------------------------------------------
+// -- Picker view -------------------------------------------------------------
 
 impl TimerScreen {
-    fn render_numpad<D: DrawTarget<Color = Rgb565>>(&self, display: &mut D, data: &SystemData) {
+    fn render_picker<D: DrawTarget<Color = Rgb565>>(&self, display: &mut D, data: &SystemData) {
         draw_app_chrome(display, data, "SET TIMER", TELEMETRY, ACCENT);
 
-        // Time label - shows the digit-buffer's HH:MM:SS during entry,
-        // or the post-clamp capped duration during the flash.
-        let mut buf: heapless::String<12> = heapless::String::new();
-        if self.flash_ticks > 0 {
-            format_duration(data.timer.remaining(), &mut buf);
-        } else {
-            format_duration(digits_to_duration(&self.numpad.digits), &mut buf);
-        }
-        fonts::draw_centered(
-            display, &fonts::value(),
-            buf.as_str(),
-            theme::SCREEN_W as i32 / 2, NUMPAD_TIME_Y,
-            self.time_label_color(),
-        );
+        // Wheels are the readout - their selection cells already
+        // show the current HH/MM/SS. The accent flashes red
+        // during the post-clamp warning so the user sees the cap
+        // was applied before re-pressing Set.
+        let accent = self.picker_accent();
+        let cells = picker_cell_rects();
+        self.picker.wheels[0].render(display, cells[0], accent, fmt_2digit);
+        self.picker.wheels[1].render(display, cells[1], accent, fmt_2digit);
+        self.picker.wheels[2].render(display, cells[2], accent, fmt_2digit);
 
-        // Numpad button grid (still red-tinted - independent of accent).
-        self.numpad.render(display);
+        // Colons between adjacent columns, on the picker's
+        // selection-band centerline.
+        let band_cy = cells[0].top_left.y + cells[0].size.height as i32 / 2;
+        for i in 0..2 {
+            let cx = (cells[i].top_left.x + cells[i].size.width as i32
+                + cells[i + 1].top_left.x) / 2;
+            let colon_rect = Rectangle::new(
+                Point::new(cx - 8, band_cy - 16),
+                Size::new(16, 32),
+            );
+            fonts::draw_centered_in_rect(
+                display, &fonts::value(), ":", colon_rect, accent,
+            );
+        }
+
+        // CANCEL | SET action row.
+        render_action_row(display, ACCENT);
     }
 
-    fn numpad_event(&mut self, event: &SystemEvent, data: &mut SystemData) -> Action {
+    fn picker_event(&mut self, event: &SystemEvent, data: &mut SystemData) -> Action {
         match event {
             // Flash animation: count ticks, redraw on phase change.
             SystemEvent::MotionUpdated { .. } if self.flash_ticks > 0 => {
@@ -416,7 +471,7 @@ impl TimerScreen {
                 if new_phase != old_phase { Action::Redraw } else { Action::None }
             }
 
-            // Header chevron: discard and return to Main.
+            // Header chevron == CANCEL: discard and return to Main.
             SystemEvent::Tap { x, y } if app_chrome_back_hit(*x, *y) => {
                 self.flash_ticks = 0;
                 self.view = TimerView::Main;
@@ -424,37 +479,62 @@ impl TimerScreen {
             }
 
             SystemEvent::Tap { x, y } => {
-                if let Some(action) = self.numpad.hit_test(*x, *y) {
-                    match action {
-                        NumpadAction::Confirm => {
-                            let dur = digits_to_duration(&self.numpad.digits);
-                            if dur.as_secs() > MAX_TIMER_SECS {
-                                let capped = Duration::from_secs(MAX_TIMER_SECS);
-                                data.timer = TimerState::Idle { duration: capped };
-                                self.numpad.prefill(&duration_to_raw(capped));
-                                self.flash_ticks = FLASH_TOTAL_TICKS;
-                                return Action::Redraw;
-                            }
-                            data.timer = TimerState::Idle { duration: dur };
-                            self.view = TimerView::Main;
-                            Action::Redraw
-                        }
-                        other => {
-                            if self.numpad.apply(other) {
-                                Action::Redraw
-                            } else {
-                                Action::None
-                            }
-                        }
-                    }
-                } else {
-                    Action::None
+                let (cancel, set) = action_row_rects();
+                if rect_hit(cancel, *x, *y) {
+                    self.flash_ticks = 0;
+                    self.view = TimerView::Main;
+                    return Action::Redraw;
                 }
+                if rect_hit(set, *x, *y) {
+                    let dur = self.picker_duration();
+                    if dur.as_secs() > MAX_TIMER_SECS {
+                        // Cap and flash; user must press Set again
+                        // with the capped value to commit.
+                        let capped = Duration::from_secs(MAX_TIMER_SECS);
+                        data.timer = TimerState::Idle { duration: capped };
+                        self.seed_picker_from(capped);
+                        self.flash_ticks = FLASH_TOTAL_TICKS;
+                        return Action::Redraw;
+                    }
+                    data.timer = TimerState::Idle { duration: dur };
+                    self.view = TimerView::Main;
+                    return Action::Redraw;
+                }
+
+                // Picker tap-step (above/below center band).
+                let cells = picker_cell_rects();
+                if self.picker.handle_event(event, &cells) {
+                    return Action::Redraw;
+                }
+                Action::None
+            }
+
+            // Drag scroll on the wheels.
+            SystemEvent::TouchPressed { .. } | SystemEvent::TouchReleased => {
+                let cells = picker_cell_rects();
+                if self.picker.handle_event(event, &cells) {
+                    return Action::Redraw;
+                }
+                Action::None
             }
 
             _ => Action::None,
         }
     }
+}
+
+/// Per-column rects for the HH:MM:SS wheel picker, centred horizontally.
+fn picker_cell_rects() -> [Rectangle; 3] {
+    let start_x = (theme::SCREEN_W as i32 - PICKER_TOTAL_W) / 2;
+    core::array::from_fn(|i| {
+        Rectangle::new(
+            Point::new(
+                start_x + i as i32 * (PICKER_COL_W + PICKER_GAP),
+                PICKER_TOP,
+            ),
+            Size::new(PICKER_COL_W as u32, WHEEL_TOTAL_H as u32),
+        )
+    })
 }
 
 // -- Helpers -----------------------------------------------------------------
@@ -489,29 +569,3 @@ fn format_duration(d: Duration, buf: &mut heapless::String<12>) {
     let _ = write!(buf, "{:02}:{:02}:{:02}", h, m, s);
 }
 
-/// Convert a digit buffer (entered left-to-right) into a Duration.
-/// Digits fill right-to-left: `[1, 3, 0]` → `00:01:30` = 90 seconds.
-fn digits_to_duration(digits: &[u8]) -> Duration {
-    let mut padded = [0u8; 6];
-    let offset = 6 - digits.len();
-    for (i, &d) in digits.iter().enumerate() {
-        padded[offset + i] = d;
-    }
-    let h = padded[0] as u64 * 10 + padded[1] as u64;
-    let m = padded[2] as u64 * 10 + padded[3] as u64;
-    let s = padded[4] as u64 * 10 + padded[5] as u64;
-    Duration::from_secs(h * 3600 + m * 60 + s)
-}
-
-/// Convert a Duration into a raw 6-digit array `[H, H, M, M, S, S]`.
-fn duration_to_raw(d: Duration) -> [u8; 6] {
-    let total_secs = d.as_secs();
-    let h = (total_secs / 3600).min(99);
-    let m = (total_secs / 60) % 60;
-    let s = total_secs % 60;
-    [
-        (h / 10) as u8, (h % 10) as u8,
-        (m / 10) as u8, (m % 10) as u8,
-        (s / 10) as u8, (s % 10) as u8,
-    ]
-}

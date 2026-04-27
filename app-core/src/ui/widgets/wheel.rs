@@ -99,7 +99,15 @@ impl Wheel {
     /// Update the allowed range (e.g. day-of-month range when the
     /// month or year changes). Re-clamps the current value into the
     /// new range. Any drag in progress is cancelled.
+    ///
+    /// No-op when min and max are unchanged - callers like the date
+    /// picker run this on every touch event to track month/year
+    /// changes, and resetting drag state every time would prevent
+    /// the day wheel itself from ever accumulating a drag.
     pub fn set_range(&mut self, min: i32, max: i32) {
+        if self.min == min && self.max == max {
+            return;
+        }
         self.min = min;
         self.max = max;
         self.value = self.value.clamp(min, max);
