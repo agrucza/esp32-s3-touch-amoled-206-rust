@@ -4,16 +4,13 @@
 //! its content: top status bar, title headers, back chevron hit zones,
 //! page-indicator scrollbars, bottom home indicators.
 //!
-//! Two generations coexist:
-//!
-//! * **Legacy `header_bar`** - X/< icon on the left, right-aligned
-//!   title. Floating on pure black, no underline. Used by stopwatch,
-//!   timer, alarm, status.
 //! * **Nightwatch `header`** - chevron-back + accent title + right
-//!   telemetry + 1 px hairline underline. Used by settings.
-//! * **Universal status bar + home indicator** - the 18 px top strip
-//!   and the 2 px bottom bar drawn on every non-watch-face screen
-//!   (app drawer, quick access, settings, and new app screens).
+//!   telemetry + 1 px hairline underline. The standard app header.
+//! * **`status_bar`** + **`home_indicator`** - the 18 px top strip
+//!   and the 2 px bottom bar drawn on every non-watch-face screen.
+//! * **`draw_app_chrome`** - convenience helper that renders all
+//!   three together with a single accent + telemetry argument set,
+//!   used by every full-app screen.
 
 use embedded_graphics::{
     draw_target::DrawTarget,
@@ -24,16 +21,8 @@ use embedded_graphics::{
     Drawable,
 };
 
-use crate::ui::{fonts, glyphs, layout, primitives, theme};
-
-// -- Legacy header_bar layout constants --------------------------------------
-
-const HEADER_MARGIN: i32 = 28;
-const HEADER_ICON_HALF: i32 = 8;
-const HEADER_ICON_STROKE: u32 = 2;
-
-/// Width of the invisible hit target on the left of a `header_bar`.
-pub const HEADER_ICON_HIT_WIDTH: i32 = 56;
+use crate::ui::{fonts, glyphs, theme};
+use crate::ui::types::SystemData;
 
 // -- Nightwatch header constants ---------------------------------------------
 
@@ -57,56 +46,6 @@ pub const HOME_INDICATOR_W: i32 = 56;
 
 /// Height (thickness) of the home-indicator bar.
 pub const HOME_INDICATOR_H: i32 = 2;
-
-// -- Icon enum ---------------------------------------------------------------
-
-/// Which icon to draw on the left side of a [`header_bar`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)]
-pub enum HeaderIcon {
-    None,
-    Close,
-    Back,
-}
-
-// -- Legacy header_bar -------------------------------------------------------
-
-/// Draw a legacy screen-header bar into `rect`.
-///
-/// `left_icon` at the left, right-aligned `title`, no background or
-/// underline. Used by the card-style screens.
-pub fn header_bar<D: DrawTarget<Color = Rgb565>>(
-    display: &mut D,
-    rect: Rectangle,
-    left_icon: HeaderIcon,
-    title: &str,
-    title_color: Rgb565,
-) {
-    let left = rect.top_left.x;
-    let top = rect.top_left.y;
-    let right = left + rect.size.width as i32;
-    let cy = top + rect.size.height as i32 / 2;
-
-    match left_icon {
-        HeaderIcon::None => {}
-        HeaderIcon::Close => {
-            let cx = left + HEADER_MARGIN + HEADER_ICON_HALF;
-            draw_close(display, cx, cy, HEADER_ICON_HALF, theme::FG);
-        }
-        HeaderIcon::Back => {
-            let cx = left + HEADER_MARGIN + HEADER_ICON_HALF;
-            draw_back(display, cx, cy, HEADER_ICON_HALF, theme::FG);
-        }
-    }
-
-    fonts::draw_right(
-        display, &fonts::headline(),
-        title,
-        right - HEADER_MARGIN,
-        cy - 9,
-        title_color,
-    );
-}
 
 // -- Nightwatch header -------------------------------------------------------
 
@@ -267,53 +206,78 @@ pub fn home_indicator<D: DrawTarget<Color = Rgb565>>(
     .draw(display).ok();
 }
 
-// -- page_scrollbar ----------------------------------------------------------
+// -- Shared app chrome -------------------------------------------------------
+//
+// Standard layout shared by every full-app screen (settings, stopwatch,
+// timer, alarm, status, ...): a tinted top status bar, an accent
+// Nightwatch header below it, and a signal-red home indicator pinned
+// to the bottom. Screens declare their accent + system-code telemetry;
+// the rest is constant.
 
-/// Draw a vertical page-indicator scrollbar at the standard layout
-/// position. Does nothing when `page_count < 2`.
-pub fn page_scrollbar<D: DrawTarget<Color = Rgb565>>(
+/// Y of the top status bar in standard app chrome.
+pub const APP_STATUS_Y: i32 = 0;
+
+/// Horizontal inset for status-bar content. Picked to keep the time
+/// glyph and battery glyphs clear of the bezel arc at the status
+/// bar's y-band.
+pub const APP_STATUS_X_INSET: i32 = 85;
+
+/// Top of the Nightwatch header bar in standard app chrome. Sits
+/// 8 px below the status bar so the two read as separated rather
+/// than adjacent.
+pub const APP_HEADER_TOP: i32 = APP_STATUS_Y + STATUS_BAR_H + 8;
+
+/// Y of the bottom home-indicator bar in standard app chrome.
+pub const APP_HOME_BAR_Y: i32 = theme::SCREEN_H as i32 - 18;
+
+/// Y at which content rows / panels can start below the standard
+/// app header (header bottom + 8 px breathing room).
+pub const APP_CONTENT_TOP: i32 = APP_HEADER_TOP + HEADER_H + 8;
+
+/// Header rect used by [`draw_app_chrome`] and back-chevron hit
+/// testing. Full screen width; the header widget pads its own
+/// content away from the bezel arc internally.
+pub const fn app_header_rect() -> Rectangle {
+    Rectangle::new(
+        Point::new(0, APP_HEADER_TOP),
+        Size::new(theme::SCREEN_W as u32, HEADER_H as u32),
+    )
+}
+
+/// Draw the standard app chrome: top status bar tinted by `accent`
+/// (live `HH:MM` + battery% read from `data`), Nightwatch header
+/// with `title` + `telemetry` text, bottom signal-red home indicator.
+///
+/// The home indicator is *always* signal-red regardless of the
+/// per-screen `accent`, matching the design spec's rule that it's a
+/// system-level "base of the screen" marker, not a per-app element.
+pub fn draw_app_chrome<D: DrawTarget<Color = Rgb565>>(
     display: &mut D,
-    page_count: usize,
-    active_page: usize,
+    data: &SystemData,
+    title: &str,
+    telemetry: &str,
+    accent: Rgb565,
 ) {
-    if page_count < 2 { return; }
-    primitives::scrollbar_v(
-        display,
-        layout::SCROLLBAR_X, layout::SCROLLBAR_Y,
-        layout::SCROLLBAR_W, layout::SCROLLBAR_H,
-        page_count,
-        active_page,
-        theme::SIGNAL,
-        theme::SIGNAL_DIM,
+    use core::fmt::Write;
+    let mut time_buf: heapless::String<8> = heapless::String::new();
+    let _ = write!(
+        &mut time_buf,
+        "{:02}:{:02}", data.time.hour, data.time.minute,
     );
+    status_bar(
+        display,
+        APP_STATUS_Y,
+        time_buf.as_str(),
+        data.power.battery_percent,
+        accent,
+        APP_STATUS_X_INSET,
+    );
+    header(display, app_header_rect(), title, telemetry, accent);
+    home_indicator(display, APP_HOME_BAR_Y, theme::SIGNAL);
 }
 
-// -- Internal icon helpers for legacy header_bar -----------------------------
-
-fn draw_close<D: DrawTarget<Color = Rgb565>>(
-    display: &mut D, cx: i32, cy: i32, half: i32, color: Rgb565,
-) {
-    let style = PrimitiveStyle::with_stroke(color, HEADER_ICON_STROKE);
-    Line::new(
-        Point::new(cx - half, cy - half),
-        Point::new(cx + half, cy + half),
-    ).into_styled(style).draw(display).ok();
-    Line::new(
-        Point::new(cx - half, cy + half),
-        Point::new(cx + half, cy - half),
-    ).into_styled(style).draw(display).ok();
+/// Hit test for the back chevron of the standard app chrome.
+pub fn app_chrome_back_hit(x: u16, y: u16) -> bool {
+    header_icon_hit(x, y, app_header_rect())
 }
 
-fn draw_back<D: DrawTarget<Color = Rgb565>>(
-    display: &mut D, cx: i32, cy: i32, half: i32, color: Rgb565,
-) {
-    let style = PrimitiveStyle::with_stroke(color, HEADER_ICON_STROKE);
-    Line::new(
-        Point::new(cx + half, cy - half),
-        Point::new(cx - half, cy),
-    ).into_styled(style).draw(display).ok();
-    Line::new(
-        Point::new(cx - half, cy),
-        Point::new(cx + half, cy + half),
-    ).into_styled(style).draw(display).ok();
-}

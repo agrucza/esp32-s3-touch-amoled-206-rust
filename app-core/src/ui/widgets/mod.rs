@@ -1,31 +1,36 @@
 //! Reusable UI widgets, grouped by kind.
 //!
-//! * [`containers`] - surfaces that content lives inside: rounded
-//!   `card`, chamfered `chamfered_panel`, `tile`, `info_tile`, `tag_label`.
-//! * [`bodies`] - content layouts drawn into a rect: `value_body`,
-//!   `icon_button`, `row`.
-//! * [`chrome`] - screen-level decorations: legacy `header_bar`, the
-//!   Nightwatch `header`, top `status_bar`, bottom `home_indicator`,
-//!   `page_scrollbar`.
-//! * [`controls`] - interactive primitives: `toggle`.
+//! * [`containers`] - chamfered Nightwatch surfaces: `chamfered_panel`,
+//!   `tile`, `info_tile`, `tag_label`.
+//! * [`bodies`] - content layouts drawn into a rect: `row` and its
+//!   `RowControl` variants.
+//! * [`chrome`] - screen-level decorations: Nightwatch `header`, top
+//!   `status_bar`, bottom `home_indicator`, plus the
+//!   `draw_app_chrome` convenience helper.
+//! * [`controls`] - interactive primitives: `toggle`, `slider`,
+//!   `chamfered_button`.
 //! * [`numpad`] - multi-digit entry widget for set-time / set-duration
 //!   flows.
+//! * [`scrollable`] - smooth-scroll body + scrollbar helper.
 
 pub mod bodies;
 pub mod chrome;
 pub mod containers;
 pub mod controls;
 pub mod numpad;
+pub mod scrollable;
 
-pub use bodies::{icon_button, row, value_body, RowControl, ROW_H};
+pub use bodies::{row, RowControl, ROW_H};
 pub use chrome::{
-    header, header_bar, header_icon_hit, home_indicator, page_scrollbar, status_bar,
-    HeaderIcon, HEADER_H, HEADER_ICON_HIT_WIDTH, HOME_INDICATOR_H, STATUS_BAR_H,
+    app_chrome_back_hit, app_header_rect, draw_app_chrome, header, header_icon_hit,
+    home_indicator, status_bar,
+    APP_CONTENT_TOP, APP_HEADER_TOP, APP_HOME_BAR_Y, HEADER_H, HOME_INDICATOR_H,
+    STATUS_BAR_H,
 };
-pub use containers::{
-    card, chamfered_panel, info_tile, tag_label, tile, CardStyle, NOTCH, TAG_LABEL_H,
-};
+pub use containers::{chamfered_panel, info_tile, tag_label, tile, NOTCH, TAG_LABEL_H};
 pub use controls::{
-    chamfered_button, slider, slider_value_from_x, toggle, ButtonVariant, SLIDER_BAR_H,
+    chamfered_button, slider, slider_value_from_x, toggle, ButtonVariant,
+    SLIDER_BAR_H, TOGGLE_H, TOGGLE_W,
 };
 pub use numpad::{Numpad, NumpadAction, MAX_DIGITS};
+pub use scrollable::{handle_scroll_drag, render_scrolled, scroll_max, SCROLLBAR_GUTTER};

@@ -43,7 +43,6 @@ use crate::ui::widgets::{home_indicator, status_bar, tile, STATUS_BAR_H};
 #[derive(Clone, Copy)]
 enum IconKind {
     Clock,
-    Status,
     Stopwatch,
     Timer,
     Alarm,
@@ -62,7 +61,6 @@ fn draw_icon<D: DrawTarget<Color = Rgb565>>(
 ) {
     match kind {
         IconKind::Clock     => glyphs::clock(display, cx, cy, radius, color),
-        IconKind::Status    => glyphs::status(display, cx, cy, radius, color),
         IconKind::Stopwatch => glyphs::stopwatch(display, cx, cy, radius, color),
         IconKind::Timer     => glyphs::hourglass(display, cx, cy, radius, color),
         IconKind::Alarm     => glyphs::bell(display, cx, cy, radius, color),
@@ -91,7 +89,7 @@ struct TileDef {
     icon: IconKind,
 }
 
-/// The 9 drawer tiles in row-major order. 6 launch real screens, 3
+/// The 9 drawer tiles in row-major order. 5 launch real screens, 4
 /// are placeholders to keep the grid complete.
 const TILES: [TileDef; 9] = [
     // Row 0
@@ -103,7 +101,7 @@ const TILES: [TileDef; 9] = [
     TileDef { target: Some(ScreenId::Timer),     caption: "TIMER",    border: theme::ORANGE, icon: IconKind::Timer     },
     TileDef { target: Some(ScreenId::Alarm),     caption: "ALARM",    border: theme::YELLOW, icon: IconKind::Alarm     },
     // Row 2
-    TileDef { target: Some(ScreenId::Status),    caption: "DIAG",     border: theme::CYAN,   icon: IconKind::Status    },
+    TileDef { target: None,                      caption: "",         border: theme::STEEL,  icon: IconKind::Empty     },
     TileDef { target: None,                      caption: "MSG",      border: theme::STEEL,  icon: IconKind::Empty     },
     TileDef { target: None,                      caption: "CAL",      border: theme::STEEL,  icon: IconKind::Empty     },
 ];

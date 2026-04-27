@@ -35,7 +35,6 @@ pub enum DisplayState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScreenId {
     Clock,
-    Status,
     /// Count-up stopwatch (HH:MM:SS). Panel-only app.
     Stopwatch,
     /// Count-down timer with numpad duration entry. Panel-only app,

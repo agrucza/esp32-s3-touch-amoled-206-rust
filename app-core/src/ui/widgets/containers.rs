@@ -1,15 +1,17 @@
 //! Container widgets - surface shapes that content lives inside.
 //!
-//! Two visual idioms coexist:
+//! Every container is a chamfered Nightwatch surface: a 6-line
+//! outline with 45-degree notches on the TL and BR corners.
+//! Variants:
 //!
-//! * **Rounded card** (`card` + `CardStyle`) - legacy rounded panel
-//!   with optional status dot. Still used by stopwatch, timer, alarm,
-//!   status, and the settings leaf sub-views that carry tabular
-//!   diagnostic data.
-//! * **Chamfered hex panel** (`chamfered_panel`, `tile`, `tag_label`) -
-//!   sharp Nightwatch surfaces traced as 6-line outlines with a
-//!   45-degree notch on the TL and BR corners. Used by the watch face,
-//!   app drawer, quick access, and the settings index.
+//! * `chamfered_panel` - bare panel outline, the building block.
+//! * `tile` - app-grid / quick-access tile (icon + caption inside
+//!   a chamfered border).
+//! * `info_tile` - leading glyph + value + suffix in a single short
+//!   tile, paired with `layout::bottom_tile_row` for N-up bottom
+//!   bands like the watch face's heart-rate / unread-count tiles.
+//! * `tag_label` - flag-shaped label ribbon, optionally chamfered to
+//!   nest into a parent panel's TL chamfer.
 //!
 //! Containers never draw their own content - body helpers and screen
 //! code place content into the same rect after the container is drawn.
@@ -19,24 +21,13 @@ use embedded_graphics::{
     geometry::{Point, Size},
     pixelcolor::Rgb565,
     prelude::Primitive,
-    primitives::{Circle, Line, PrimitiveStyle, Rectangle},
+    primitives::{Line, PrimitiveStyle, Rectangle},
     Drawable,
 };
 
-use crate::ui::{fonts, primitives::rounded_panel, theme};
+use crate::ui::{fonts, theme};
 
 // -- Widget-local layout constants -------------------------------------------
-
-/// Corner radius for rounded cards. Tuned against the "All Bookings"
-/// reference visual.
-pub const CARD_RADIUS: u32 = 24;
-
-/// Diameter of the status-accent dot at the right edge of a card.
-pub const STATUS_DOT_DIAMETER: i32 = 12;
-
-/// Horizontal inset of the status-dot center from the card's right
-/// edge.
-pub const STATUS_DOT_INSET: i32 = 22;
 
 /// Chamfer notch size for Nightwatch panels and tiles. Matches the
 /// spec's default 10 px corner cut.
@@ -44,63 +35,6 @@ pub const NOTCH: i32 = 10;
 
 /// Height of a tag-label ribbon.
 pub const TAG_LABEL_H: i32 = 15;
-
-// -- CardStyle ---------------------------------------------------------------
-
-/// Visual style for a [`card`] container.
-#[derive(Debug, Clone, Copy)]
-pub struct CardStyle {
-    pub bg: Rgb565,
-    pub border: Option<Rgb565>,
-    pub radius: u32,
-    /// Optional accent dot drawn at the right edge, vertically
-    /// centered (e.g. PASS/FAIL on diagnostics).
-    pub status_dot: Option<Rgb565>,
-}
-
-impl CardStyle {
-    /// Standard filled card: dark ink panel, no border, generous
-    /// corner radius, no status accent.
-    pub const DEFAULT: Self = Self {
-        bg: theme::INK,
-        border: None,
-        radius: CARD_RADIUS,
-        status_dot: None,
-    };
-
-    /// Builder-style helper: clone `self` with a status dot color
-    /// applied.
-    pub const fn with_status_dot(mut self, color: Rgb565) -> Self {
-        self.status_dot = Some(color);
-        self
-    }
-}
-
-// -- card --------------------------------------------------------------------
-
-/// Draw a rounded card container into `rect` with the given style.
-pub fn card<D: DrawTarget<Color = Rgb565>>(
-    display: &mut D,
-    rect: Rectangle,
-    style: CardStyle,
-) {
-    rounded_panel(
-        display,
-        rect.top_left.x, rect.top_left.y,
-        rect.size.width as i32, rect.size.height as i32,
-        style.radius,
-        Some(style.bg),
-        style.border,
-    );
-
-    if let Some(color) = style.status_dot {
-        let cx = rect.top_left.x + rect.size.width as i32 - STATUS_DOT_INSET;
-        let cy = rect.top_left.y + rect.size.height as i32 / 2;
-        Circle::with_center(Point::new(cx, cy), STATUS_DOT_DIAMETER as u32)
-            .into_styled(PrimitiveStyle::with_fill(color))
-            .draw(display).ok();
-    }
-}
 
 // -- chamfered_panel ---------------------------------------------------------
 

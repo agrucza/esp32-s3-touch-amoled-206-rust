@@ -243,26 +243,6 @@ pub fn settings<D: DrawTarget<Color = Rgb565>>(
     }
 }
 
-/// Three vertical bars of increasing height (status / bar-chart icon).
-pub fn status<D: DrawTarget<Color = Rgb565>>(
-    display: &mut D, cx: i32, cy: i32, radius: i32, color: Rgb565,
-) {
-    let bar_w = (radius / 3).max(4);
-    let gap = 4;
-    let total_w = 3 * bar_w + 2 * gap;
-    let start_x = cx - total_w / 2;
-    let base_y = cy + radius / 2;
-    let heights = [radius / 2, radius * 3 / 4, radius];
-    let fill = PrimitiveStyle::with_fill(color);
-
-    for (i, h) in heights.iter().enumerate() {
-        let x = start_x + i as i32 * (bar_w + gap);
-        let y = base_y - *h;
-        Rectangle::new(Point::new(x, y), Size::new(bar_w as u32, *h as u32))
-            .into_styled(fill).draw(display).ok();
-    }
-}
-
 /// Four small filled squares in a 2x2 grid (panel / app-grid icon).
 pub fn panel<D: DrawTarget<Color = Rgb565>>(
     display: &mut D, cx: i32, cy: i32, radius: i32, color: Rgb565,

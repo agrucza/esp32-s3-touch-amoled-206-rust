@@ -26,7 +26,7 @@ use crate::events::{
     self, SwipeDir, SwipeRegion, SystemEvent, NUM_SELF_TESTS,
 };
 use crate::nav::NavStack;
-use crate::ui::screens::{self, ActiveScreen};
+use crate::ui::screens::ActiveScreen;
 use crate::ui::types::{
     Action, AlarmReprogram, AlarmState, DisplayState, ScreenId, SystemData, TimerState,
 };
@@ -291,7 +291,7 @@ impl Model {
 
         // 5. Forward to the active screen and dispatch its Action.
         let action = self.screen.on_event(event, &mut self.cached_data);
-        self.dispatch_action(event, action, &mut out);
+        self.dispatch_action(action, &mut out);
 
         // 6. Config flush: any action above may have dirtied the
         // config (e.g. `SetBrightness`). We deliberately defer the
@@ -397,32 +397,9 @@ impl Model {
 
     /// Dispatch a screen-returned `Action` into state mutations
     /// and effects.
-    fn dispatch_action(&mut self, event: &SystemEvent, action: Action, out: &mut Effects) {
+    fn dispatch_action(&mut self, action: Action, out: &mut Effects) {
         match action {
-            Action::None => {
-                // Home-row nav fallback: content L/R swipes cycle
-                // through home-row apps (not when already on an
-                // overlay).
-                if !matches!(self.screen.id(),
-                    ScreenId::QuickAccess | ScreenId::AppDrawer)
-                {
-                    if let SystemEvent::Swipe { dir, region: SwipeRegion::Content } = event {
-                        match dir {
-                            SwipeDir::Right => {
-                                let next = screens::cycle_home_app(self.screen.id(), true);
-                                self.screen.switch_to(next, &self.cached_data);
-                                self.needs_redraw = true;
-                            }
-                            SwipeDir::Left => {
-                                let prev = screens::cycle_home_app(self.screen.id(), false);
-                                self.screen.switch_to(prev, &self.cached_data);
-                                self.needs_redraw = true;
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-            }
+            Action::None => {}
             Action::Redraw => self.needs_redraw = true,
             Action::SwitchScreen(id) => {
                 // Modal replace-top: when leaving an overlay the
@@ -782,7 +759,7 @@ mod tests {
         let mut m = fresh();
         // Poke directly via dispatch_action - bypasses screen.
         let mut out: Effects = Vec::new();
-        m.dispatch_action(&SystemEvent::BootButtonPressed, Action::Shutdown, &mut out);
+        m.dispatch_action(Action::Shutdown, &mut out);
         assert_eq!(out[0], Effect::Shutdown);
     }
 
@@ -792,7 +769,7 @@ mod tests {
         m.cached_data.time.hour = 7;
         m.cached_data.time.minute = 55;
         let mut out: Effects = Vec::new();
-        m.dispatch_action(&SystemEvent::BootButtonPressed, Action::SnoozeAlarm, &mut out);
+        m.dispatch_action(Action::SnoozeAlarm, &mut out);
         assert!(out.contains(&Effect::MotorOff));
         assert!(out.contains(&Effect::RtcCommand(
             RtcCommand::SetAlarm { hour: 8, minute: 5, weekday: None }

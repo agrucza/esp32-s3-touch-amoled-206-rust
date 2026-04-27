@@ -3,22 +3,26 @@
 //! Layout (top to bottom on a 410x502 canvas):
 //! 1. Telemetry strip: cyan `SYS-ID <code>` on the left, chrome
 //!    `DOW DD MON` on the right. Small mono-ish font.
-//! 2. Swipe-hint bar: a thin cyan 2px line centered ~6px below the
-//!    top, visible hit-zone for the swipe-down-from-top action. No
-//!    per-screen handler; the Model routes that gesture.
+//! 2. Swipe-hint bar: a thin cyan 2 px line near the top, a visual
+//!    cue for the swipe-down-from-top edge gesture (routed by the
+//!    Model into Quick Access).
 //! 3. Stacked numerals: HH in signal red, MM directly below in bone.
 //!    Both rendered in the geometric `Mega` (logisoso78) face, digits
 //!    only. Meta row beneath: `:SS` in cyan + `LAT .. LON ..` in
 //!    chrome.
-//! 4. Two chamfered-outline tiles at the bottom, 6px gap:
-//!    - left: signal-red border, mini heart + `062 BPM`
-//!    - right: cyan border, mini envelope + `x03 UNREAD`
+//! 4. Two chamfered info tiles at the bottom (via `info_tile` +
+//!    `layout::bottom_tile_row::<2>()`):
+//!    - left: yellow border, bell glyph, next enabled alarm time
+//!      (`HH:MM`) or `OFF` if none, suffix `ALARM`.
+//!    - right: orange border, hourglass glyph, timer remaining
+//!      (`MM:SS` < 1 h, `HH:MM` ≥ 1 h) or `OFF`, suffix `TIMER`.
 //!
 //! Interactions:
-//! - Tap anywhere in the hero band → open the app drawer.
-//! - Tap on the UNREAD tile → (future) notifications screen. Currently
-//!   a no-op; forwarded as a switch to Status as a placeholder so the
-//!   tile reads as alive.
+//! - Tap on the alarm tile → switch to Alarm screen.
+//! - Tap on the timer tile → switch to Timer screen.
+//! - Anywhere else: no-op. Quick Access reaches via swipe-down-from-
+//!   top, App Drawer via swipe-up-from-bottom (both at the Model
+//!   level, not handled here).
 //!
 //! Copy follows the spec's systemic voice: ALL CAPS chrome, leading
 //! zeros on numerals, no em-dashes.
@@ -43,7 +47,7 @@ use crate::ui::widgets::info_tile;
 // -- Geometry ---------------------------------------------------------------
 
 const PAD_TOP: i32 = 28;
-const PAD_X: i32 = 22;
+const PAD_X: i32 = 40;
 
 /// Y of the swipe-hint bar (2px tall, 36px wide, centered on X).
 const HINT_Y: i32 = 8;
@@ -88,6 +92,15 @@ impl Screen for ClockScreen {
             // A seconds tick forces a redraw so `:SS` and the MM
             // digit keep in sync with the RTC.
             SystemEvent::TimeUpdated { .. } => Action::Redraw,
+            // Discrete state transitions that happen between seconds
+            // and would otherwise leave the bottom tiles showing
+            // stale data until the next TimeUpdated:
+            // - AlarmFired: an enabled alarm just rang. The Model
+            //   may snooze it / disable it / advance the next-alarm
+            //   pointer, so re-render the alarm tile.
+            // - TimerExpired: the running timer hit zero and reset
+            //   to Idle, so the timer tile should flip to OFF.
+            SystemEvent::AlarmFired | SystemEvent::TimerExpired => Action::Redraw,
             // Bottom tiles route to their target apps; everywhere else
             // is a no-op. Quick Access opens via swipe-down-from-top
             // and App Drawer via swipe-up-from-bottom (both routed at

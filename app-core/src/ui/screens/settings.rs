@@ -11,12 +11,12 @@
 //! [`header`] bar with chevron-left + title + right-aligned
 //! telemetry + a 1-px signal hairline underline. The Index itself is
 //! a stack of [`row`]s (icon / uppercase label / right control);
-//! the leaf sub-views still use the rounded `card` + `value_body`
+//! the leaf sub-views use the chamfered metric-panel pattern
 //! vocabulary inside, since those fit the tabular diagnostic data
 //! better than a flat row list.
 
 use embedded_graphics::{
-    draw_target::{DrawTarget, DrawTargetExt},
+    draw_target::DrawTarget,
     geometry::{Point, Size},
     pixelcolor::Rgb565,
     primitives::{Line, PrimitiveStyle, Rectangle, StyledDrawable},
@@ -29,9 +29,10 @@ use crate::ui::types::{
     Action, Screen, SelfTestId, SelfTestResult, SystemData, SystemEvent,
 };
 use crate::ui::widgets::{
-    card, chamfered_button, chamfered_panel, header, header_icon_hit, home_indicator, row,
-    slider, slider_value_from_x, status_bar, tag_label, value_body, ButtonVariant, CardStyle,
-    RowControl, Numpad, NumpadAction, NOTCH, ROW_H, SLIDER_BAR_H, STATUS_BAR_H, MAX_DIGITS,
+    chamfered_button, chamfered_panel, handle_scroll_drag, header, header_icon_hit,
+    home_indicator, render_scrolled, row, slider, slider_value_from_x, status_bar,
+    tag_label, ButtonVariant, RowControl, Numpad, NumpadAction, NOTCH, ROW_H,
+    SCROLLBAR_GUTTER, SLIDER_BAR_H, STATUS_BAR_H, TAG_LABEL_H, MAX_DIGITS,
 };
 
 /// Slider lower bound for brightness in the Display sub-view -
@@ -112,17 +113,17 @@ const ROWS_TOP: i32 = HDR_TOP + HDR_H + 8;
 /// Rect for the Nth row in the settings Index / Storage sub-index,
 /// adjusted by the current scroll offset. `scroll = 0` returns the
 /// row's natural position; positive `scroll` shifts everything up
-/// (rows below come into view).
-///
-/// Rows span the full screen width; the `row` widget's internal
-/// `ROW_PAD` keeps the icon, label, and hairline visually inset from
-/// the bezel arc on its own. Letting the rect go edge-to-edge means
-/// the row reads as a real list row rather than a floating panel.
+/// (rows below come into view). Width leaves a [`SCROLLBAR_GUTTER`]
+/// inset on the right so the row's right-aligned controls have room
+/// before the scrollbar.
 fn row_rect(index: usize, scroll: i32) -> Rectangle {
     let y = ROWS_TOP + index as i32 * ROW_H - scroll;
     Rectangle::new(
         Point::new(0, y),
-        Size::new(theme::SCREEN_W as u32, ROW_H as u32),
+        Size::new(
+            (theme::SCREEN_W as i32 - SCROLLBAR_GUTTER) as u32,
+            ROW_H as u32,
+        ),
     )
 }
 
@@ -379,7 +380,7 @@ const INDEX_ROWS: &[IndexRow] = &[
         kind: RowKind::Navigate { target: SettingsView::Battery, value_fn: battery_value },
     },
     IndexRow {
-        label: "6-AXIS IMU",
+        label: "MOTION",
         icon: RowIcon::Imu,
         kind: RowKind::Navigate { target: SettingsView::Imu, value_fn: imu_value },
     },
@@ -428,10 +429,17 @@ const NUMPAD_TIME_Y: i32 = 90;
 pub struct SettingsScreen {
     view: SettingsView,
     numpad: Numpad,
-    /// Vertical scroll state for the index sub-view. Other sub-views
-    /// don't currently scroll; if they ever do, give them their own
-    /// `ScrollState` instance.
+    /// Vertical scroll state for the index sub-view.
     index_scroll: layout::ScrollState,
+    /// Vertical scroll state for the MOTION sub-view (live readouts +
+    /// self-tests stacked together overflow the viewport).
+    imu_scroll: layout::ScrollState,
+    /// Counter that throttles MOTION-sub-view redraws to a fraction
+    /// of the IMU's 20 Hz `MotionUpdated` cadence.
+    motion_phase: u8,
+    /// Last MotionData rendered into the MOTION sub-view, used to
+    /// suppress redraws when the values haven't changed materially.
+    motion_last: Option<crate::data::MotionData>,
 }
 
 impl SettingsScreen {
@@ -440,6 +448,9 @@ impl SettingsScreen {
             view: SettingsView::Index,
             numpad: Numpad::new(6),
             index_scroll: layout::ScrollState::new(),
+            imu_scroll: layout::ScrollState::new(),
+            motion_phase: 0,
+            motion_last: None,
         }
     }
 }
@@ -498,18 +509,12 @@ impl SettingsScreen {
     fn render_index<D: DrawTarget<Color = Rgb565>>(
         &self, display: &mut D, data: &SystemData,
     ) {
-        // Chrome (status bar, header, home indicator) renders against
-        // the un-clipped target so it stays fixed regardless of scroll.
         draw_header(display, data, "SETTINGS", theme::SIGNAL);
-
-        // Rows render into a clipped sub-target spanning the area
-        // between the header bottom and the home indicator. Anything
-        // that scrolls past those bounds is hard-clipped at the
-        // hardware level.
-        let viewport = index_viewport_rect();
-        let scroll = self.index_scroll.offset();
-        let mut clipped = display.clipped(&viewport);
-        render_rows(&mut clipped, data, INDEX_ROWS, scroll);
+        render_scrolled(
+            display, self.index_scroll.offset(),
+            index_viewport_rect(), index_content_h(), theme::SIGNAL,
+            |clipped, scroll| render_rows(clipped, data, INDEX_ROWS, scroll),
+        );
     }
 
     fn index_event(&mut self, event: &SystemEvent, _data: &mut SystemData) -> Action {
@@ -528,18 +533,13 @@ impl SettingsScreen {
                 }
                 Action::None
             }
-            // Finger drag on the index scrolls the row list. First
-            // TouchPressed of a gesture records the y; subsequent
-            // ones translate finger motion into scroll deltas.
-            SystemEvent::TouchPressed { y, .. } => {
-                let max = index_scroll_max();
-                if self.index_scroll.drag(*y as i32, max) {
+            SystemEvent::TouchPressed { .. } | SystemEvent::TouchReleased => {
+                let viewport_h = index_viewport_rect().size.height as i32;
+                if handle_scroll_drag(
+                    &mut self.index_scroll, event, viewport_h, index_content_h(),
+                ) {
                     return Action::Redraw;
                 }
-                Action::None
-            }
-            SystemEvent::TouchReleased => {
-                self.index_scroll.release();
                 Action::None
             }
             _ => Action::None,
@@ -558,12 +558,9 @@ fn index_viewport_rect() -> Rectangle {
     )
 }
 
-/// Maximum valid scroll offset for the index based on the current
-/// row count and viewport height. Zero when content fits.
-fn index_scroll_max() -> i32 {
-    let viewport_h = index_viewport_rect().size.height as i32;
-    let content_h = INDEX_ROWS.len() as i32 * ROW_H;
-    (content_h - viewport_h).max(0)
+/// Total content height of the index row list.
+fn index_content_h() -> i32 {
+    INDEX_ROWS.len() as i32 * ROW_H
 }
 
 // -- Shared row rendering / hit-testing for index + storage sub-index --------
@@ -634,7 +631,46 @@ fn row_hit(
     None
 }
 
-// -- Clock sub-view (time + date cards) --------------------------------------
+// -- Clock sub-view (time + date panels) -------------------------------------
+
+/// Y of the first clock metric panel below the settings header.
+const CLOCK_PANEL_TOP: i32 = HDR_TOP + HDR_H + 12;
+/// Height of one clock metric panel.
+const CLOCK_PANEL_H: i32 = 84;
+/// Vertical gap between the two clock metric panels.
+const CLOCK_PANEL_GAP: i32 = 12;
+
+fn clock_panel_rect(slot: usize) -> Rectangle {
+    let y = CLOCK_PANEL_TOP + slot as i32 * (CLOCK_PANEL_H + CLOCK_PANEL_GAP);
+    let x = layout::VSTACK_SIDE_MARGIN;
+    let w = theme::SCREEN_W as i32 - layout::VSTACK_SIDE_MARGIN * 2;
+    Rectangle::new(
+        Point::new(x, y),
+        Size::new(w as u32, CLOCK_PANEL_H as u32),
+    )
+}
+
+fn draw_clock_panel<D: DrawTarget<Color = Rgb565>>(
+    display: &mut D,
+    rect: Rectangle,
+    tag: &str,
+    value: &str,
+) {
+    chamfered_panel(display, rect, NOTCH, theme::SIGNAL, 1);
+    tag_label(
+        display,
+        rect.top_left.x, rect.top_left.y,
+        tag, theme::SIGNAL, NOTCH,
+    );
+    let inner = Rectangle::new(
+        Point::new(rect.top_left.x, rect.top_left.y + TAG_LABEL_H),
+        Size::new(rect.size.width, rect.size.height - TAG_LABEL_H as u32),
+    );
+    fonts::draw_centered_in_rect(
+        display, &fonts::value(),
+        value, inner, theme::FG,
+    );
+}
 
 impl SettingsScreen {
     fn render_clock<D: DrawTarget<Color = Rgb565>>(
@@ -642,21 +678,15 @@ impl SettingsScreen {
     ) {
         draw_header(display, data, "CLOCK", theme::SIGNAL);
 
-        // Time card.
-        let rect = layout::content_card_rect(0);
-        card(display, rect, CardStyle::DEFAULT);
         let mut time_buf: String<12> = String::new();
         let _ = write!(time_buf, "{:02}:{:02}:{:02}",
             data.time.hour, data.time.minute, data.time.second);
-        value_body(display, rect, "TIME", time_buf.as_str(), theme::FG);
+        draw_clock_panel(display, clock_panel_rect(0), "TIME", time_buf.as_str());
 
-        // Date card.
-        let rect = layout::content_card_rect(1);
-        card(display, rect, CardStyle::DEFAULT);
         let mut date_buf: String<12> = String::new();
         let _ = write!(date_buf, "{:02}.{:02}.{:04}",
             data.time.day, data.time.month, data.time.year);
-        value_body(display, rect, "DATE", date_buf.as_str(), theme::FG);
+        draw_clock_panel(display, clock_panel_rect(1), "DATE", date_buf.as_str());
     }
 
     fn clock_event(&mut self, event: &SystemEvent, data: &mut SystemData) -> Action {
@@ -676,9 +706,8 @@ impl SettingsScreen {
                 Action::Redraw
             }
             SystemEvent::Tap { x, y } => {
-                if layout::content_card_rect(0)
-                    .contains(Point::new(*x as i32, *y as i32))
-                {
+                let p = Point::new(*x as i32, *y as i32);
+                if clock_panel_rect(0).contains(p) {
                     // Open time numpad, pre-fill with current time.
                     let t = &data.time;
                     self.numpad = Numpad::new(6);
@@ -689,9 +718,7 @@ impl SettingsScreen {
                     ]);
                     self.view = SettingsView::TimeEntry;
                     Action::Redraw
-                } else if layout::content_card_rect(1)
-                    .contains(Point::new(*x as i32, *y as i32))
-                {
+                } else if clock_panel_rect(1).contains(p) {
                     // Open date numpad, pre-fill with current date.
                     let t = &data.time;
                     self.numpad = Numpad::new(8);
@@ -854,7 +881,141 @@ impl SettingsScreen {
     }
 }
 
-// -- IMU sub-view ------------------------------------------------------------
+// -- MOTION sub-view ---------------------------------------------------------
+//
+// Live IMU + temperature readouts at the top, self-test panels with
+// RUN buttons below. Stacked tall enough to need smooth scrolling.
+
+/// Tag-labels for the 7 live readout panels (3 accel axes, 3 gyro
+/// axes, 1 environment temperature).
+const MOTION_LABELS: [&str; 7] = [
+    "ACCEL X", "ACCEL Y", "ACCEL Z",
+    "GYRO X",  "GYRO Y",  "GYRO Z",
+    "TEMP",
+];
+
+/// Height of one live readout panel.
+const MOTION_READOUT_H: i32 = 56;
+/// Vertical gap between adjacent live readout panels.
+const MOTION_READOUT_GAP: i32 = 6;
+/// Vertical break between the readouts band and the self-test band.
+const MOTION_SECTION_GAP: i32 = 16;
+
+/// IMU `MotionUpdated` arrives at ~20 Hz; only redraw on every Nth
+/// sample to keep the MOTION sub-view legible without bottlenecking
+/// the render loop. 4 → ~5 Hz redraw cadence.
+const MOTION_REDRAW_DIVIDER: u8 = 4;
+
+/// Per-axis change threshold (raw i16 units) below which a fresh
+/// `MotionUpdated` is treated as "no visible change" and skipped.
+/// Suppresses sensor noise on a still device.
+const MOTION_DIFF_THRESHOLD: i32 = 16;
+
+/// Per-temperature change threshold. `temp_raw` is in 1/256 °C so 64
+/// raw ≈ 0.25 °C, well above sensor self-heat noise.
+const MOTION_TEMP_THRESHOLD: i32 = 64;
+
+/// Self-test panel + button geometry inside the MOTION sub-view.
+const MOTION_TEST_PANEL_H: i32 = 80;
+const MOTION_TEST_PANEL_BTN_GAP: i32 = 8;
+const MOTION_TEST_BUTTON_H: i32 = 36;
+const MOTION_INTER_TEST_GAP: i32 = 16;
+
+struct MotionLayout {
+    /// One rect per `MOTION_LABELS` entry.
+    readouts: [Rectangle; 7],
+    /// `(panel, button)` pairs in `IMU_TESTS` order.
+    tests: [(Rectangle, Rectangle); 2],
+    /// Total content height; passed to the smooth-scroll helpers.
+    content_h: i32,
+}
+
+fn motion_layout(scroll: i32) -> MotionLayout {
+    let mut s = layout::VStack::new(LEAF_TOP_Y - scroll);
+
+    let r0 = s.slot(MOTION_READOUT_H); s.gap(MOTION_READOUT_GAP);
+    let r1 = s.slot(MOTION_READOUT_H); s.gap(MOTION_READOUT_GAP);
+    let r2 = s.slot(MOTION_READOUT_H); s.gap(MOTION_READOUT_GAP);
+    let r3 = s.slot(MOTION_READOUT_H); s.gap(MOTION_READOUT_GAP);
+    let r4 = s.slot(MOTION_READOUT_H); s.gap(MOTION_READOUT_GAP);
+    let r5 = s.slot(MOTION_READOUT_H); s.gap(MOTION_READOUT_GAP);
+    let r6 = s.slot(MOTION_READOUT_H);
+    s.gap(MOTION_SECTION_GAP);
+
+    let p0 = s.slot(MOTION_TEST_PANEL_H);
+    s.gap(MOTION_TEST_PANEL_BTN_GAP);
+    let b0 = s.slot(MOTION_TEST_BUTTON_H);
+    s.gap(MOTION_INTER_TEST_GAP);
+    let p1 = s.slot(MOTION_TEST_PANEL_H);
+    s.gap(MOTION_TEST_PANEL_BTN_GAP);
+    let b1 = s.slot(MOTION_TEST_BUTTON_H);
+
+    let content_h = s.cursor_y() + scroll - LEAF_TOP_Y;
+    MotionLayout {
+        readouts: [r0, r1, r2, r3, r4, r5, r6],
+        tests: [(p0, b0), (p1, b1)],
+        content_h,
+    }
+}
+
+/// Visible viewport for MOTION's scrollable area: from the row of
+/// section content (LEAF_TOP_Y) down to just above the home bar.
+fn motion_viewport_rect() -> Rectangle {
+    let top = LEAF_TOP_Y;
+    let bot = HOME_BAR_Y - 4;
+    Rectangle::new(
+        Point::new(0, top),
+        Size::new(theme::SCREEN_W as u32, (bot - top) as u32),
+    )
+}
+
+/// True when at least one axis or the temperature changed by more
+/// than the per-channel noise threshold. Used to gate redraws so a
+/// motionless device doesn't trigger frames on every IMU sample.
+fn motion_changed(prev: &crate::data::MotionData, curr: &crate::data::MotionData) -> bool {
+    let pairs = [
+        (prev.accel_x, curr.accel_x, MOTION_DIFF_THRESHOLD),
+        (prev.accel_y, curr.accel_y, MOTION_DIFF_THRESHOLD),
+        (prev.accel_z, curr.accel_z, MOTION_DIFF_THRESHOLD),
+        (prev.gyro_x,  curr.gyro_x,  MOTION_DIFF_THRESHOLD),
+        (prev.gyro_y,  curr.gyro_y,  MOTION_DIFF_THRESHOLD),
+        (prev.gyro_z,  curr.gyro_z,  MOTION_DIFF_THRESHOLD),
+        (prev.temp_raw, curr.temp_raw, MOTION_TEMP_THRESHOLD),
+    ];
+    pairs.iter().any(|(p, c, t)| ((*p as i32) - (*c as i32)).abs() >= *t)
+}
+
+/// Format the live value for the readout at `idx`, into `buf`.
+fn motion_value(idx: usize, data: &SystemData, buf: &mut heapless::String<12>) {
+    use core::fmt::Write;
+    let m = &data.motion;
+    let _ = match idx {
+        0 => write!(buf, "{}", m.accel_x),
+        1 => write!(buf, "{}", m.accel_y),
+        2 => write!(buf, "{}", m.accel_z),
+        3 => write!(buf, "{}", m.gyro_x),
+        4 => write!(buf, "{}", m.gyro_y),
+        5 => write!(buf, "{}", m.gyro_z),
+        6 => write!(buf, "{} C", m.temp_raw / 256),
+        _ => Ok(()),
+    };
+}
+
+fn draw_motion_panel<D: DrawTarget<Color = Rgb565>>(
+    display: &mut D, rect: Rectangle, tag: &str, value: &str,
+) {
+    chamfered_panel(display, rect, NOTCH, theme::CYAN, 1);
+    tag_label(
+        display,
+        rect.top_left.x, rect.top_left.y,
+        tag, theme::CYAN, NOTCH,
+    );
+    let inner = Rectangle::new(
+        Point::new(rect.top_left.x, rect.top_left.y + TAG_LABEL_H),
+        Size::new(rect.size.width, rect.size.height - TAG_LABEL_H as u32),
+    );
+    fonts::draw_centered_in_rect(display, &fonts::value(), value, inner, theme::FG);
+}
 
 impl SettingsScreen {
     fn render_imu<D: DrawTarget<Color = Rgb565>>(
@@ -862,51 +1023,82 @@ impl SettingsScreen {
         display: &mut D,
         data: &SystemData,
     ) {
-        draw_header(display, data, "6-AXIS IMU", theme::SIGNAL);
+        draw_header(display, data, "MOTION", theme::SIGNAL);
 
-        // Per test: a state-display panel (tag-labeled, border + text
-        // tinted by run state) plus a separate primary button below
-        // that triggers the test. Splits "show state" from "do
-        // thing" so the panel is read-only and there's an explicit
-        // tap target.
-        let slots = imu_slots();
-        for (i, test) in IMU_TESTS.iter().enumerate() {
-            let (panel_rect, button_rect) = slots[i];
-            let result = data.self_tests[test.id as usize];
-            let (value_buf, _, _) = format_result(&result, test.unit);
-            let accent = imu_result_accent(&result);
+        let scroll = self.imu_scroll.offset();
+        let layout = motion_layout(scroll);
 
-            chamfered_panel(display, panel_rect, NOTCH, accent, 1);
-            tag_label(
-                display,
-                panel_rect.top_left.x,
-                panel_rect.top_left.y,
-                test.label,
-                accent,
-                NOTCH,
-            );
-            fonts::draw_centered_in_rect(
-                display, &fonts::value(),
-                value_buf.as_str(), panel_rect, accent,
-            );
+        render_scrolled(
+            display, scroll, motion_viewport_rect(), layout.content_h, theme::SIGNAL,
+            |clipped, _| {
+                // Live readouts.
+                let mut value_buf: heapless::String<12> = heapless::String::new();
+                for i in 0..MOTION_LABELS.len() {
+                    value_buf.clear();
+                    motion_value(i, data, &mut value_buf);
+                    draw_motion_panel(
+                        clipped, layout.readouts[i],
+                        MOTION_LABELS[i], value_buf.as_str(),
+                    );
+                }
 
-            // Button: Primary while idle/finished, Ghost while a test
-            // is running so the user can't re-tap mid-run.
-            let running = matches!(result, SelfTestResult::Running);
-            let variant = if running {
-                ButtonVariant::Ghost
-            } else {
-                ButtonVariant::Primary
-            };
-            chamfered_button(
-                display, button_rect, "RUN SELF-TEST",
-                variant, theme::SIGNAL,
-            );
-        }
+                // Self-tests: state panel + RUN button per test.
+                for (i, test) in IMU_TESTS.iter().enumerate() {
+                    let (panel_rect, button_rect) = layout.tests[i];
+                    let result = data.self_tests[test.id as usize];
+                    let (test_buf, _, _) = format_result(&result, test.unit);
+                    let accent = imu_result_accent(&result);
+
+                    chamfered_panel(clipped, panel_rect, NOTCH, accent, 1);
+                    tag_label(
+                        clipped,
+                        panel_rect.top_left.x, panel_rect.top_left.y,
+                        test.label, accent, NOTCH,
+                    );
+                    fonts::draw_centered_in_rect(
+                        clipped, &fonts::value(),
+                        test_buf.as_str(), panel_rect, accent,
+                    );
+
+                    // Ghost while running (drops re-taps); Primary
+                    // when idle / finished.
+                    let running = matches!(result, SelfTestResult::Running);
+                    let variant = if running {
+                        ButtonVariant::Ghost
+                    } else {
+                        ButtonVariant::Primary
+                    };
+                    chamfered_button(
+                        clipped, button_rect, "RUN SELF-TEST",
+                        variant, theme::SIGNAL,
+                    );
+                }
+            },
+        );
     }
 
     fn imu_event(&mut self, event: &SystemEvent, data: &mut SystemData) -> Action {
         match event {
+            // Live readouts: throttle the IMU's 20 Hz MotionUpdated to
+            // ~5 Hz (every 4th sample) and additionally gate on
+            // material change so a still device doesn't churn frames.
+            SystemEvent::MotionUpdated { .. } => {
+                self.motion_phase = (self.motion_phase + 1) % MOTION_REDRAW_DIVIDER;
+                if self.motion_phase != 0 {
+                    return Action::None;
+                }
+                let curr = data.motion;
+                let changed = match self.motion_last {
+                    None => true,
+                    Some(prev) => motion_changed(&prev, &curr),
+                };
+                if !changed {
+                    return Action::None;
+                }
+                self.motion_last = Some(curr);
+                Action::Redraw
+            }
+
             SystemEvent::Tap { x, y } if header_back_hit(*x, *y) => {
                 self.view = SettingsView::Index;
                 Action::Redraw
@@ -918,15 +1110,29 @@ impl SettingsScreen {
                 self.view = SettingsView::Index;
                 Action::Redraw
             }
+
+            // Drag scroll for the live + self-tests stack.
+            SystemEvent::TouchPressed { .. } | SystemEvent::TouchReleased => {
+                let layout = motion_layout(0);
+                let viewport_h = motion_viewport_rect().size.height as i32;
+                if handle_scroll_drag(
+                    &mut self.imu_scroll, event, viewport_h, layout.content_h,
+                ) {
+                    return Action::Redraw;
+                }
+                Action::None
+            }
+
+            // Self-test button tap.
             SystemEvent::Tap { x, y } => {
+                let scroll = self.imu_scroll.offset();
+                let layout = motion_layout(scroll);
                 let pt = Point::new(*x as i32, *y as i32);
-                let slots = imu_slots();
                 for (i, test) in IMU_TESTS.iter().enumerate() {
-                    let (_, button_rect) = slots[i];
+                    let (_, button_rect) = layout.tests[i];
                     if !button_rect.contains(pt) { continue; }
-                    // The button is rendered in Ghost variant when this
-                    // test is running - mirror that visual by ignoring
-                    // the tap so behavior matches what the user sees.
+                    // Mirror the Ghost-while-running visual by ignoring
+                    // re-taps mid-run.
                     if matches!(data.self_tests[test.id as usize], SelfTestResult::Running) {
                         return Action::None;
                     }
@@ -1633,22 +1839,6 @@ fn format_result(
 /// Top y for every leaf sub-view's first slot. Sits below the
 /// header hairline with breathing room.
 const LEAF_TOP_Y: i32 = ROWS_TOP + 18;
-
-// -- IMU sub-view: per-test stacked (panel, button) pairs -------------------
-
-/// One IMU test slot: `(panel_rect, run_button_rect)`.
-type ImuSlot = (Rectangle, Rectangle);
-
-/// IMU sub-view rects, indexed by test number. Each entry is a
-/// `(panel, button)` pair so render and event loops can index by
-/// test order.
-fn imu_slots() -> [ImuSlot; 2] {
-    let mut s = layout::VStack::new(LEAF_TOP_Y);
-    let p0 = s.slot(80); s.gap(8); let b0 = s.slot(36);
-    s.gap(16);
-    let p1 = s.slot(80); s.gap(8); let b1 = s.slot(36);
-    [(p0, b0), (p1, b1)]
-}
 
 // -- Storage SD: status panel + single full-width action button ------------
 

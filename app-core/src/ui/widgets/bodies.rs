@@ -14,71 +14,9 @@ use embedded_graphics::{
     Drawable,
 };
 
-use crate::ui::{fonts, layout, primitives, theme};
+use crate::ui::{fonts, theme};
 
 use super::controls::{toggle, TOGGLE_H, TOGGLE_W};
-
-// -- value_body --------------------------------------------------------------
-
-const LABEL_TOP_OFFSET: i32 = 20;
-const VALUE_TOP_OFFSET: i32 = 44;
-
-/// Render a "small label over large value" layout into `rect`.
-/// Label uses `FG_MUTED`; value uses the caller-supplied color so
-/// rows can tint pass/fail/warn semantics.
-pub fn value_body<D: DrawTarget<Color = Rgb565>>(
-    display: &mut D,
-    rect: Rectangle,
-    label: &str,
-    value: &str,
-    value_color: Rgb565,
-) {
-    let cx = rect.top_left.x + rect.size.width as i32 / 2;
-    let top = rect.top_left.y;
-
-    fonts::draw_centered(
-        display, &fonts::body(),
-        label, cx, top + LABEL_TOP_OFFSET,
-        theme::FG_MUTED,
-    );
-
-    fonts::draw_centered(
-        display, &fonts::value(),
-        value, cx, top + VALUE_TOP_OFFSET,
-        value_color,
-    );
-}
-
-// -- icon_button -------------------------------------------------------------
-
-/// Render a tappable circle button: filled circle + icon glyph + caption.
-pub fn icon_button<D, F>(
-    display: &mut D,
-    cx: i32, cy: i32,
-    fill: Rgb565,
-    glyph: F,
-    glyph_color: Rgb565,
-    label: &str,
-    label_color: Rgb565,
-)
-where
-    D: DrawTarget<Color = Rgb565>,
-    F: FnOnce(&mut D, i32, i32, i32, Rgb565),
-{
-    primitives::circle_button(
-        display, cx, cy,
-        layout::CIRCLE_RADIUS, fill, None,
-    );
-
-    glyph(display, cx, cy, layout::GLYPH_RADIUS, glyph_color);
-
-    fonts::draw_centered(
-        display, &fonts::caption(),
-        label,
-        cx, cy + layout::CIRCLE_RADIUS + layout::CIRCLE_LABEL_GAP,
-        label_color,
-    );
-}
 
 // -- row ---------------------------------------------------------------------
 
