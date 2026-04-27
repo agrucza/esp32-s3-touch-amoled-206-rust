@@ -744,6 +744,7 @@ impl SettingsScreen {
             SystemEvent::Swipe {
                 dir: crate::events::SwipeDir::Right,
                 region: crate::events::SwipeRegion::Content,
+                ..
             } => {
                 self.view = SettingsView::Index;
                 Action::Redraw
@@ -1133,6 +1134,7 @@ impl SettingsScreen {
             SystemEvent::Swipe {
                 dir: crate::events::SwipeDir::Right,
                 region: crate::events::SwipeRegion::Content,
+                ..
             } => {
                 self.view = SettingsView::Index;
                 Action::Redraw
@@ -1259,6 +1261,7 @@ impl SettingsScreen {
             SystemEvent::Swipe {
                 dir: crate::events::SwipeDir::Right,
                 region: crate::events::SwipeRegion::Content,
+                ..
             } => {
                 self.view = SettingsView::Index;
                 Action::Redraw
@@ -1307,6 +1310,7 @@ impl SettingsScreen {
             SystemEvent::Swipe {
                 dir: crate::events::SwipeDir::Right,
                 region: crate::events::SwipeRegion::Content,
+                ..
             } => {
                 self.view = SettingsView::Index;
                 Action::Redraw
@@ -1386,6 +1390,7 @@ impl SettingsScreen {
             SystemEvent::Swipe {
                 dir: crate::events::SwipeDir::Right,
                 region: crate::events::SwipeRegion::Content,
+                ..
             } => {
                 self.view = SettingsView::Storage;
                 Action::Redraw
@@ -1445,6 +1450,7 @@ impl SettingsScreen {
             SystemEvent::Swipe {
                 dir: crate::events::SwipeDir::Right,
                 region: crate::events::SwipeRegion::Content,
+                ..
             } => {
                 self.view = SettingsView::Storage;
                 Action::Redraw
@@ -1527,6 +1533,7 @@ impl SettingsScreen {
             SystemEvent::Swipe {
                 dir: crate::events::SwipeDir::Right,
                 region: crate::events::SwipeRegion::Content,
+                ..
             } => {
                 self.view = SettingsView::Storage;
                 Action::Redraw
@@ -1597,6 +1604,7 @@ impl SettingsScreen {
             SystemEvent::Swipe {
                 dir: crate::events::SwipeDir::Right,
                 region: crate::events::SwipeRegion::Content,
+                ..
             } => {
                 self.view = SettingsView::Storage;
                 Action::Redraw
@@ -1711,6 +1719,7 @@ impl SettingsScreen {
             SystemEvent::Swipe {
                 dir: crate::events::SwipeDir::Right,
                 region: crate::events::SwipeRegion::Content,
+                ..
             } => {
                 self.view = SettingsView::Index;
                 Action::Redraw
@@ -1801,6 +1810,7 @@ impl SettingsScreen {
             SystemEvent::Swipe {
                 dir: crate::events::SwipeDir::Right,
                 region: crate::events::SwipeRegion::Content,
+                ..
             } => {
                 self.view = SettingsView::Index;
                 Action::Redraw

@@ -1,7 +1,7 @@
 //! Alarm screen - rebuilt on the Nightwatch theme. Up to
 //! [`MAX_ALARMS`] alarm entries.
 //!
-//! Three internal views:
+//! Two internal views:
 //!
 //! **List view** (default):
 //! - Standard app chrome: status bar (yellow-tinted), Nightwatch
@@ -10,34 +10,21 @@
 //! - Smooth-scrolling vertical list of chamfered alarm rows (one
 //!   per entry, [`MAX_ALARMS`] total). Each row is yellow-bordered
 //!   when enabled, steel-bordered when disabled, and shows: `HH:MM`
-//!   left, the 7 day letters middle (yellow for active days, steel
-//!   otherwise), enable toggle right. The full list scrolls under a
-//!   clipped viewport - same drag pattern as the settings index
-//!   ([`layout::ScrollState`] driven by `TouchPressed` / `TouchReleased`).
+//!   left, single-letter day strip middle (yellow for active days,
+//!   steel otherwise), enable toggle right.
 //! - Tap row body → open Edit. Tap toggle area → flip enabled.
 //!
 //! **Edit view**:
 //! - Standard app chrome, header title `EDIT ALARM` + `ALM.0N`
-//!   telemetry; chevron-back discards the in-flight edit (same as
-//!   tapping CANCEL).
-//! - Day selector row: 7 tappable cells with the day letter, yellow
-//!   when active, FG_DIM when not. Tap toggles.
-//! - HH:MM wheel picker (yellow accent). Drag a column to scroll;
-//!   tap above/below the center band to step ±1. Hours and minutes
-//!   both wrap at their range ends.
-//! - `CANCEL | SET` action row at the bottom: Cancel returns to the
-//!   list discarding edits; Set commits and persists.
+//!   telemetry; chevron-back == Cancel.
+//! - Day chip row: 7 tappable 3-letter chips, yellow when active,
+//!   steel when not.
+//! - HH:MM wheel picker (yellow accent).
+//! - `CANCEL | SET` action row.
 //!
-//! **Alert view** (alarm fired):
-//! - Standard app chrome with `ALARM` title; chevron-back doubles
-//!   as DISMISS for now.
-//! - Readout panel flashing yellow↔signal-red, `RINGING` tag-label,
-//!   hero-font HH:MM of the fired alarm centered inside.
-//! - Action row: SNOOZE (Primary yellow) and DISMISS (Primary
-//!   signal-red) chamfered_buttons.
-//!
-//! Will be replaced by a global notification overlay once that
-//! infrastructure lands; for now the Alert view stays in-screen.
+//! When an alarm fires, the user-facing alert lives in the global
+//! Notifications overlay (reached via left-edge swipe-right). The
+//! screen does not show an in-screen flash.
 
 use core::fmt::Write;
 
@@ -54,10 +41,10 @@ use crate::ui::types::{
     Action, AlarmEntry, Screen, SystemData, MAX_ALARMS,
 };
 use crate::ui::widgets::{
-    action_row_rects, app_chrome_back_hit, chamfered_button, chamfered_panel,
-    draw_app_chrome, fmt_2digit, handle_scroll_drag, render_action_row, render_scrolled,
-    tag_label, toggle, ButtonVariant, Picker, Wheel,
-    APP_CONTENT_TOP, APP_HOME_BAR_Y, NOTCH, TAG_LABEL_H,
+    action_row_rects, app_chrome_back_hit, chamfered_panel, draw_app_chrome, fmt_2digit,
+    handle_scroll_drag, render_action_row, render_scrolled, tag_label, toggle,
+    Picker, Wheel,
+    APP_CONTENT_TOP, APP_HOME_BAR_Y, NOTCH,
     TOGGLE_H, TOGGLE_W, WHEEL_TOTAL_H,
 };
 
@@ -134,31 +121,12 @@ const PICKER_GAP: i32 = 40;
 /// Total horizontal extent of the two-column picker.
 const PICKER_TOTAL_W: i32 = PICKER_COL_W * 2 + PICKER_GAP;
 
-// -- Alert constants ---------------------------------------------------------
-
-/// Readout panel height in the Alert view.
-const ALERT_READOUT_H: i32 = 130;
-
-/// Gap between the Alert readout and the action row.
-const ALERT_READOUT_BUTTON_GAP: i32 = 8;
-
-/// Y of the Alert readout's top edge - vertically centred between
-/// the header bottom and the action row.
-const ALERT_READOUT_TOP: i32 = APP_CONTENT_TOP
-    + (layout::BOTTOM_TILE_Y - ALERT_READOUT_BUTTON_GAP - APP_CONTENT_TOP - ALERT_READOUT_H) / 2;
-
-/// Ticks per alert-flash phase (250 ms at 20 Hz = 5 ticks).
-const FLASH_PHASE_TICKS: u8 = 5;
-
 // -- Views -------------------------------------------------------------------
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AlarmView {
     List,
     Edit { index: usize },
-    /// Alarm fired - shows the triggered alarm prominently. Tap
-    /// SNOOZE / DISMISS / chevron to leave.
-    Alert,
 }
 
 // -- Screen ------------------------------------------------------------------
@@ -176,8 +144,6 @@ pub struct AlarmScreen {
     /// Days bitmask being edited (copy from entry on Edit entry,
     /// written back on Set).
     edit_days: u8,
-    /// Tick counter for the alert flash, wraps freely.
-    alert_ticks: u8,
 }
 
 impl AlarmScreen {
@@ -190,7 +156,6 @@ impl AlarmScreen {
                 Wheel::new(0, 59, 0).with_wrap(true),
             ]),
             edit_days: 0x7F,
-            alert_ticks: 0,
         }
     }
 }
@@ -200,7 +165,6 @@ impl Screen for AlarmScreen {
         match self.view {
             AlarmView::List => self.render_list(display, data),
             AlarmView::Edit { index } => self.render_edit(display, data, index),
-            AlarmView::Alert => self.render_alert(display, data),
         }
     }
 
@@ -209,38 +173,9 @@ impl Screen for AlarmScreen {
             return Action::Shutdown;
         }
 
-        // Alarm fired - check weekday and switch into Alert view.
-        if matches!(event, SystemEvent::AlarmFired) {
-            let weekday = day_of_week(
-                data.time.year as i32,
-                data.time.month as i32,
-                data.time.day as i32,
-            );
-            let is_snooze = data.alarms.snoozed;
-            data.alarms.snoozed = false;
-
-            if is_snooze {
-                data.alarms.alerting = true;
-                self.view = AlarmView::Alert;
-                self.alert_ticks = 0;
-                return Action::StartBuzz { on_ms: 200, off_ms: 100 };
-            }
-
-            if let Some(idx) = data.alarms.active_hw {
-                if data.alarms.entries[idx].fires_on(weekday) {
-                    data.alarms.alerting = true;
-                    self.view = AlarmView::Alert;
-                    self.alert_ticks = 0;
-                    return Action::StartBuzz { on_ms: 200, off_ms: 100 };
-                }
-            }
-            return Action::None;
-        }
-
         match self.view {
             AlarmView::List => self.list_event(event, data),
             AlarmView::Edit { index } => self.edit_event(event, data, index),
-            AlarmView::Alert => self.alert_event(event, data),
         }
     }
 }
@@ -551,92 +486,6 @@ fn picker_cell_rects() -> [Rectangle; 2] {
     ]
 }
 
-// -- Alert view --------------------------------------------------------------
-
-impl AlarmScreen {
-    fn render_alert<D: DrawTarget<Color = Rgb565>>(
-        &self, display: &mut D, data: &SystemData,
-    ) {
-        draw_app_chrome(display, data, "ALARM", "RINGING", ACCENT);
-
-        let phase = self.alert_ticks / FLASH_PHASE_TICKS;
-        let panel_color = if phase % 2 == 0 { ACCENT } else { theme::DANGER };
-
-        let panel = alert_readout_rect();
-        chamfered_panel(display, panel, NOTCH, panel_color, 1);
-        tag_label(
-            display,
-            panel.top_left.x,
-            panel.top_left.y,
-            "RINGING",
-            panel_color,
-            NOTCH,
-        );
-
-        let mut buf: heapless::String<8> = heapless::String::new();
-        if let Some(idx) = data.alarms.active_hw {
-            let entry = &data.alarms.entries[idx];
-            let _ = write!(buf, "{:02}:{:02}", entry.hour, entry.minute);
-        } else {
-            let _ = buf.push_str("--:--");
-        }
-        let inner_rect = Rectangle::new(
-            Point::new(
-                panel.top_left.x,
-                panel.top_left.y + TAG_LABEL_H,
-            ),
-            Size::new(
-                panel.size.width,
-                panel.size.height - TAG_LABEL_H as u32,
-            ),
-        );
-        fonts::draw_centered_in_rect(
-            display, &fonts::hero(),
-            buf.as_str(), inner_rect, panel_color,
-        );
-
-        // Action row: SNOOZE (Primary yellow) + DISMISS (Primary signal).
-        let [left, right] = layout::bottom_tile_row::<2>();
-        chamfered_button(display, left, "SNOOZE", ButtonVariant::Primary, ACCENT);
-        chamfered_button(display, right, "DISMISS", ButtonVariant::Primary, theme::SIGNAL);
-    }
-
-    fn alert_event(&mut self, event: &SystemEvent, data: &mut SystemData) -> Action {
-        match event {
-            // Flash animation tick (20 Hz IMU cadence).
-            SystemEvent::MotionUpdated { .. } => {
-                let old_phase = self.alert_ticks / FLASH_PHASE_TICKS;
-                self.alert_ticks = self.alert_ticks.wrapping_add(1);
-                let new_phase = self.alert_ticks / FLASH_PHASE_TICKS;
-                if new_phase != old_phase { Action::Redraw } else { Action::None }
-            }
-
-            // Header chevron in Alert view doubles as DISMISS - the
-            // alert isn't a navigable view, the chevron just gives a
-            // visible affordance to leave.
-            SystemEvent::Tap { x, y } if app_chrome_back_hit(*x, *y) => {
-                data.alarms.alerting = false;
-                Action::DismissAlarm
-            }
-
-            SystemEvent::Tap { x, y } => {
-                let [left, right] = layout::bottom_tile_row::<2>();
-                if rect_hit(left, *x, *y) {
-                    data.alarms.alerting = false;
-                    Action::SnoozeAlarm
-                } else if rect_hit(right, *x, *y) {
-                    data.alarms.alerting = false;
-                    Action::DismissAlarm
-                } else {
-                    Action::None
-                }
-            }
-
-            _ => Action::None,
-        }
-    }
-}
-
 // -- Helpers -----------------------------------------------------------------
 
 /// Rect for the alarm entry at `idx` inside the List view's
@@ -674,17 +523,6 @@ fn list_content_h() -> i32 {
         + MAX_ALARMS as i32 * ROW_STEP
         - ROW_GAP
         + LIST_TOP_PAD
-}
-
-/// Rect for the readout panel in the Alert view.
-fn alert_readout_rect() -> Rectangle {
-    Rectangle::new(
-        Point::new(SIDE_MARGIN, ALERT_READOUT_TOP),
-        Size::new(
-            (theme::SCREEN_W as i32 - SIDE_MARGIN * 2) as u32,
-            ALERT_READOUT_H as u32,
-        ),
-    )
 }
 
 fn rect_hit(rect: Rectangle, x: u16, y: u16) -> bool {

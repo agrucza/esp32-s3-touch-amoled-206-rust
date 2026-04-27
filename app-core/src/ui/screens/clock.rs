@@ -100,7 +100,7 @@ impl Screen for ClockScreen {
             //   pointer, so re-render the alarm tile.
             // - TimerExpired: the running timer hit zero and reset
             //   to Idle, so the timer tile should flip to OFF.
-            SystemEvent::AlarmFired | SystemEvent::TimerExpired => Action::Redraw,
+            SystemEvent::AlarmFired { .. } | SystemEvent::TimerExpired { .. } => Action::Redraw,
             // Bottom tiles route to their target apps; everywhere else
             // is a no-op. Quick Access opens via swipe-down-from-top
             // and App Drawer via swipe-up-from-bottom (both routed at

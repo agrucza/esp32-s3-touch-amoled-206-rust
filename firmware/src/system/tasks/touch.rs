@@ -210,7 +210,12 @@ impl<'d> TouchTaskState<'d> {
             SwipeRegion::Content
         };
 
-        SystemEvent::Swipe { dir, region }
+        SystemEvent::Swipe {
+            dir,
+            region,
+            start_x: start.0,
+            start_y: start.1,
+        }
     }
 
     /// Async wait for the touch INT line to go low. The FT3168

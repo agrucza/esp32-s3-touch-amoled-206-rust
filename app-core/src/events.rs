@@ -26,16 +26,31 @@ pub enum SystemEvent {
     /// release at the start position of the press. This is what
     /// screens should use for "click" semantics.
     Tap { x: u16, y: u16 },
-    /// Swipe gesture completed on release.
-    Swipe { dir: SwipeDir, region: SwipeRegion },
+    /// Swipe gesture completed on release. `start_x`/`start_y` are
+    /// the touch-down coordinates the gesture began at - useful for
+    /// per-row hit-tests (e.g. "swipe-right on which notification?")
+    /// when the touched UI element matters as well as the direction.
+    Swipe {
+        dir: SwipeDir,
+        region: SwipeRegion,
+        start_x: u16,
+        start_y: u16,
+    },
 
     // -- Time --
     /// RTC alarm fired (set via `Rtc::set_alarm`). The RTC task
     /// reads Control_2 on INT# fall and clears the alarm flag
     /// before emitting this event.
-    AlarmFired,
+    /// PCF85063 alarm match fired. `time` is the RTC reading at the
+    /// moment AF was observed - use it for the fire timestamp
+    /// rather than any cached time snapshot, which may lag.
+    AlarmFired { time: crate::data::TimeData },
     /// RTC countdown timer expired (set via `Rtc::set_timer`).
-    TimerExpired,
+    /// PCF85063 countdown timer expired. `time` is the RTC reading
+    /// at expiry, same rationale as [`AlarmFired`].
+    ///
+    /// [`AlarmFired`]: SystemEvent::AlarmFired
+    TimerExpired { time: crate::data::TimeData },
 
     // -- Power / battery --
     /// Battery state-of-charge changed. The power task emits this
@@ -246,8 +261,8 @@ pub fn is_wake_source(event: &SystemEvent) -> bool {
     matches!(
         event,
         SystemEvent::WakeOnMotion
-            | SystemEvent::AlarmFired
-            | SystemEvent::TimerExpired
+            | SystemEvent::AlarmFired { .. }
+            | SystemEvent::TimerExpired { .. }
     )
 }
 
@@ -271,8 +286,8 @@ pub struct LoggedEvent {
 /// lines.
 pub fn classify_for_log(event: &SystemEvent) -> Option<LoggedEvent> {
     Some(match event {
-        SystemEvent::AlarmFired               => LoggedEvent { tag: "alarm",         detail: None },
-        SystemEvent::TimerExpired             => LoggedEvent { tag: "timer_expired", detail: None },
+        SystemEvent::AlarmFired { .. }        => LoggedEvent { tag: "alarm",         detail: None },
+        SystemEvent::TimerExpired { .. }      => LoggedEvent { tag: "timer_expired", detail: None },
         SystemEvent::VbusInserted             => LoggedEvent { tag: "vbus_in",       detail: None },
         SystemEvent::VbusRemoved              => LoggedEvent { tag: "vbus_out",      detail: None },
         SystemEvent::PowerButtonLong          => LoggedEvent { tag: "shutdown_req",  detail: None },
@@ -304,10 +319,11 @@ mod tests {
 
     #[test]
     fn alarm_and_timer_are_wake_sources_not_activity() {
-        assert!(!is_user_activity(&SystemEvent::AlarmFired));
-        assert!(!is_user_activity(&SystemEvent::TimerExpired));
-        assert!(is_wake_source(&SystemEvent::AlarmFired));
-        assert!(is_wake_source(&SystemEvent::TimerExpired));
+        let t = crate::data::TimeData::default();
+        assert!(!is_user_activity(&SystemEvent::AlarmFired { time: t }));
+        assert!(!is_user_activity(&SystemEvent::TimerExpired { time: t }));
+        assert!(is_wake_source(&SystemEvent::AlarmFired { time: t }));
+        assert!(is_wake_source(&SystemEvent::TimerExpired { time: t }));
     }
 
     #[test]
@@ -320,12 +336,13 @@ mod tests {
 
     #[test]
     fn log_classifier_covers_alarm_timer_power_button() {
+        let t = crate::data::TimeData::default();
         assert_eq!(
-            classify_for_log(&SystemEvent::AlarmFired),
+            classify_for_log(&SystemEvent::AlarmFired { time: t }),
             Some(LoggedEvent { tag: "alarm", detail: None }),
         );
         assert_eq!(
-            classify_for_log(&SystemEvent::TimerExpired),
+            classify_for_log(&SystemEvent::TimerExpired { time: t }),
             Some(LoggedEvent { tag: "timer_expired", detail: None }),
         );
         assert_eq!(

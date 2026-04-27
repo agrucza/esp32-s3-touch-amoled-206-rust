@@ -28,7 +28,8 @@ use crate::events::{
 use crate::nav::NavStack;
 use crate::ui::screens::ActiveScreen;
 use crate::ui::types::{
-    Action, AlarmReprogram, AlarmState, DisplayState, ScreenId, SystemData, TimerState,
+    Action, AlarmReprogram, AlarmState, DisplayState, Notification, NotificationSeverity,
+    NotificationSource, ScreenId, SystemData, TimerState,
 };
 
 /// Upper bound on the number of [`Effect`]s produced by a single
@@ -259,16 +260,17 @@ impl Model {
         // swipe-down-from-top inside the drawer means "close", not
         // "switch to Quick Access").
         //
-        //   swipe-down-from-top   -> Quick Access
-        //   swipe-up-from-bottom  -> App Drawer
+        //   swipe-down-from-top    -> Quick Access
+        //   swipe-up-from-bottom   -> App Drawer
+        //   swipe-right-from-left  -> Notifications
         //
         // Each pushes the pre-overlay screen onto the nav stack so
         // `Action::Back` from an app launched via the overlay returns
         // to the original screen, not a hardcoded home.
         if !matches!(self.screen.id(),
-            ScreenId::QuickAccess | ScreenId::AppDrawer)
+            ScreenId::QuickAccess | ScreenId::AppDrawer | ScreenId::Notifications)
         {
-            if let SystemEvent::Swipe { dir, region } = event {
+            if let SystemEvent::Swipe { dir, region, .. } = event {
                 match (dir, region) {
                     (SwipeDir::Down, SwipeRegion::Top) => {
                         let previous = self.screen.id();
@@ -281,6 +283,13 @@ impl Model {
                         let previous = self.screen.id();
                         self.nav_stack.push(previous);
                         self.screen.open_app_drawer(previous, &self.cached_data);
+                        self.needs_redraw = true;
+                        return out;
+                    }
+                    (SwipeDir::Right, SwipeRegion::Left) => {
+                        let previous = self.screen.id();
+                        self.nav_stack.push(previous);
+                        self.screen.open_notifications(&self.cached_data);
                         self.needs_redraw = true;
                         return out;
                     }
@@ -332,7 +341,7 @@ impl Model {
                 // Re-evaluate the next-firing alarm against the
                 // new time. Catches alarms whose fire-time the
                 // clock just crossed.
-                self.replan_alarms(out);
+                self.replan_alarms(out, false);
             }
             SystemEvent::PowerUpdated { data } => {
                 self.cached_data.power = *data;
@@ -340,19 +349,42 @@ impl Model {
             SystemEvent::MotionUpdated { data } => {
                 self.cached_data.motion = *data;
             }
-            SystemEvent::TimerExpired => {
+            SystemEvent::TimerExpired { time } => {
+                self.cached_data.time = *time;
                 self.cached_data.timer = TimerState::Idle { duration: Duration::from_ticks(0) };
-                if !matches!(self.screen.id(), ScreenId::Timer) {
-                    self.nav_stack.push(self.screen.id());
-                    self.screen.switch_to(ScreenId::Timer, &self.cached_data);
-                }
+                self.push_notification(
+                    NotificationSeverity::Warning,
+                    NotificationSource::Timer,
+                    "EXPIRED",
+                );
+                self.start_attention_buzz(out);
+                self.surface_notifications();
                 self.needs_redraw = true;
             }
-            SystemEvent::AlarmFired => {
-                if !matches!(self.screen.id(), ScreenId::Alarm) {
-                    self.nav_stack.push(self.screen.id());
-                    self.screen.switch_to(ScreenId::Alarm, &self.cached_data);
-                }
+            SystemEvent::AlarmFired { time } => {
+                self.cached_data.time = *time;
+                let subtitle = self
+                    .cached_data
+                    .alarms
+                    .active_hw
+                    .map(|idx| {
+                        let e = &self.cached_data.alarms.entries[idx];
+                        let mut s: heapless::String<32> = heapless::String::new();
+                        let _ = core::fmt::Write::write_fmt(
+                            &mut s,
+                            format_args!("{:02}:{:02}", e.hour, e.minute),
+                        );
+                        s
+                    })
+                    .unwrap_or_default();
+                self.push_notification_owned(
+                    NotificationSeverity::Critical,
+                    NotificationSource::Alarm,
+                    subtitle,
+                );
+                self.cached_data.alarms.alerting = true;
+                self.start_attention_buzz(out);
+                self.surface_notifications();
                 self.needs_redraw = true;
             }
             SystemEvent::SelfTestUpdated { id, result } => {
@@ -396,7 +428,7 @@ impl Model {
                 // pre-overlay screen is already on the nav stack.
                 let current_is_overlay = matches!(
                     self.screen.id(),
-                    ScreenId::QuickAccess | ScreenId::AppDrawer,
+                    ScreenId::QuickAccess | ScreenId::AppDrawer | ScreenId::Notifications,
                 );
                 if !current_is_overlay {
                     self.nav_stack.push(self.screen.id());
@@ -480,19 +512,33 @@ impl Model {
             Action::DismissAlarm => {
                 self.buzz = None;
                 let _ = out.push(Effect::MotorOff);
-                let target = self.nav_stack.pop_or_home();
-                self.screen.switch_to(target, &self.cached_data);
+                self.cached_data.alarms.alerting = false;
+                self.cached_data.alarms.snoozed = false;
                 self.needs_redraw = true;
             }
             Action::SnoozeAlarm => {
                 self.buzz = None;
                 let _ = out.push(Effect::MotorOff);
+                self.cached_data.alarms.alerting = false;
                 self.cached_data.alarms.snoozed = true;
                 let t = &self.cached_data.time;
                 let (hour, minute) = AlarmState::compute_snooze(t.hour, t.minute, 10);
-                let _ = out.push(Effect::RtcCommand(RtcCommand::SetAlarm { hour, minute, weekday: None }));
-                let target = self.nav_stack.pop_or_home();
-                self.screen.switch_to(target, &self.cached_data);
+                let _ = out.push(Effect::RtcCommand(RtcCommand::SetAlarm {
+                    hour, minute, weekday: None,
+                }));
+                // Leave a visible breadcrumb in the overlay so the
+                // user can see the snoozed alarm is still queued
+                // and what time it'll fire at.
+                let mut subtitle: heapless::String<32> = heapless::String::new();
+                let _ = core::fmt::Write::write_fmt(
+                    &mut subtitle,
+                    format_args!("SNOOZED -> {:02}:{:02}", hour, minute),
+                );
+                self.push_notification_owned(
+                    NotificationSeverity::Info,
+                    NotificationSource::Alarm,
+                    subtitle,
+                );
                 self.needs_redraw = true;
             }
             Action::FactoryReset => {
@@ -509,11 +555,11 @@ impl Model {
             }
             Action::PersistAlarms => {
                 let _ = out.push(Effect::SaveAlarms);
-                // Re-evaluate which alarm is "next" so the NEXT
-                // tag in the list and the RTC alarm register both
-                // catch up immediately, instead of staying stale
-                // until the next minute tick.
-                self.replan_alarms(out);
+                // Force-replan: editing the active entry's HH:MM
+                // doesn't move `active_hw`, so a non-forced replan
+                // would skip the SetAlarm and leave the chip stuck
+                // at the old time.
+                self.replan_alarms(out, true);
                 self.needs_redraw = true;
             }
             Action::PersistConfig => {
@@ -587,18 +633,81 @@ impl Model {
         }
     }
 
+    /// Push a notification with a static-string subtitle. Convenience
+    /// for sources that don't need to format anything (e.g. timer
+    /// expired -> "EXPIRED"). Snapshots the current wall-clock for
+    /// the timestamp.
+    fn push_notification(
+        &mut self,
+        severity: NotificationSeverity,
+        source: NotificationSource,
+        subtitle: &str,
+    ) {
+        let mut s: heapless::String<32> = heapless::String::new();
+        let _ = s.push_str(subtitle);
+        self.push_notification_owned(severity, source, s);
+    }
+
+    /// Push a notification with a caller-built subtitle string.
+    /// Used by sources whose subtitle has dynamic context that's
+    /// already been formatted (e.g. alarm fired -> "ALARM: 06:30").
+    fn push_notification_owned(
+        &mut self,
+        severity: NotificationSeverity,
+        source: NotificationSource,
+        subtitle: heapless::String<32>,
+    ) {
+        let t = &self.cached_data.time;
+        self.cached_data.notifications.push(Notification {
+            severity,
+            source,
+            subtitle,
+            ts_hour: t.hour,
+            ts_minute: t.minute,
+        });
+    }
+
+    /// Start the standard "demand attention" buzz pattern fired by
+    /// alarms and timer expiry. Sourced by both
+    /// `apply_snapshot::AlarmFired` and `TimerExpired`. Stopped by
+    /// any of `Action::DismissAlarm` / `SnoozeAlarm` / `StopBuzz`,
+    /// which are emitted by the notification overlay's row gestures.
+    fn start_attention_buzz(&mut self, out: &mut Effects) {
+        self.buzz = Some(BuzzPattern::start(
+            200, 100, self.last_activity,
+        ));
+        let _ = out.push(Effect::MotorOn);
+    }
+
+    /// Auto-open the Notifications overlay so the just-pushed
+    /// notification is the first thing the user sees on wake.
+    /// No-op when already on Notifications.
+    fn surface_notifications(&mut self) {
+        if matches!(self.screen.id(), ScreenId::Notifications) {
+            return;
+        }
+        let previous = self.screen.id();
+        self.nav_stack.push(previous);
+        self.screen.open_notifications(&self.cached_data);
+    }
+
     /// Re-evaluate which enabled alarm fires next given the
-    /// cached time and emit the matching RTC command if the
-    /// target changed. Called both on `TimeUpdated` (clock moved)
-    /// and on `PersistAlarms` (entries changed) so `active_hw`,
-    /// the RTC register, and the list-row NEXT marker stay in
-    /// sync.
-    fn replan_alarms(&mut self, out: &mut Effects) {
+    /// cached time and emit the matching RTC command. The `force`
+    /// flag controls whether to emit a command even when the
+    /// next-alarm *index* is unchanged - needed on the persist
+    /// path because editing the active entry's HH:MM doesn't move
+    /// `active_hw`, but the chip still needs reprogramming.
+    fn replan_alarms(&mut self, out: &mut Effects, force: bool) {
         let t = &self.cached_data.time;
         let weekday = crate::ui::screens::alarm::day_of_week(
             t.year as i32, t.month as i32, t.day as i32,
         );
-        match self.cached_data.alarms.plan_reprogram(t.hour, t.minute, weekday) {
+        let plan = if force {
+            self.cached_data.alarms.plan_reprogram_force(t.hour, t.minute, weekday)
+        } else {
+            self.cached_data.alarms.plan_reprogram(t.hour, t.minute, weekday)
+        };
+        match plan {
             None => {}
             Some(AlarmReprogram::SetAlarm { hour, minute }) => {
                 let _ = out.push(Effect::RtcCommand(RtcCommand::SetAlarm {
@@ -642,6 +751,14 @@ impl Model {
             return;
         }
         self.sleeping = true;
+        // Silence any in-flight attention buzz on the way to sleep -
+        // the user can't react to a notification they can't see, and
+        // a buzzing motor across light sleep entry burns power for
+        // nothing.
+        if self.buzz.is_some() {
+            self.buzz = None;
+            let _ = out.push(Effect::MotorOff);
+        }
         let _ = out.push(Effect::BroadcastSleep(SleepState::Sleeping));
         let _ = out.push(Effect::TransitionDisplay {
             from: self.display_state,

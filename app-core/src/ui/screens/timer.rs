@@ -8,8 +8,8 @@
 //!   indicator at the bottom.
 //! - Readout panel: orange border, `REMAINING` tag-label TL,
 //!   hero-font `HH:MM:SS` centered. Tappable when not running to
-//!   open the numpad. Border + numerals + tag flash orange↔signal
-//!   during the post-expiry alert.
+//!   open the picker. Expiry surfaces in the global Notifications
+//!   overlay - no in-screen flash.
 //! - Action row: START / PAUSE / RESUME (Primary orange) and
 //!   RESET (Ghost steel when zero, Primary signal-red when there's
 //!   a duration set).
@@ -125,12 +125,6 @@ pub struct TimerScreen {
     /// Remaining flash ticks for the clamp-warning animation.
     /// Alternates the picker readout label between accent and danger.
     flash_ticks: u8,
-    /// True when the timer has expired and we're alerting the user.
-    /// Any tap dismisses the alert and stops the buzz.
-    alerting: bool,
-    /// Tick counter for the alert flash, incremented per
-    /// `MotionUpdated` while alerting.
-    alert_ticks: u8,
 }
 
 impl TimerScreen {
@@ -144,8 +138,6 @@ impl TimerScreen {
                 Wheel::new(0, 59, 0).with_wrap(true),
             ]),
             flash_ticks: 0,
-            alerting: false,
-            alert_ticks: 0,
         }
     }
 
@@ -195,13 +187,6 @@ impl TimerScreen {
         };
     }
 
-    /// Color the readout panel + numerals while alerting, flashing
-    /// at 250 ms per phase between the screen accent and danger.
-    fn alert_color(&self) -> Rgb565 {
-        let phase = self.alert_ticks / FLASH_PHASE_TICKS;
-        if phase % 2 == 0 { ACCENT } else { theme::DANGER }
-    }
-
     /// Color used for the picker wheels (selection cell + hairlines)
     /// and colon separators. Flashes accent↔danger during the
     /// post-clamp warning so the user sees the cap was applied
@@ -226,31 +211,6 @@ impl Screen for TimerScreen {
     fn on_event(&mut self, event: &SystemEvent, data: &mut SystemData) -> Action {
         if matches!(event, SystemEvent::PowerButtonLong) {
             return Action::Shutdown;
-        }
-
-        // RTC hardware timer expired - start alerting.
-        if matches!(event, SystemEvent::TimerExpired) {
-            self.alerting = true;
-            self.view = TimerView::Main;
-            return Action::StartBuzz { on_ms: 200, off_ms: 100 };
-        }
-
-        // While alerting: tick the flash, dismiss on tap.
-        if self.alerting {
-            if matches!(event, SystemEvent::Tap { .. }) {
-                self.alerting = false;
-                self.alert_ticks = 0;
-                return Action::StopBuzz;
-            }
-            if matches!(event, SystemEvent::MotionUpdated { .. }) {
-                let old_phase = self.alert_ticks / FLASH_PHASE_TICKS;
-                self.alert_ticks = self.alert_ticks.wrapping_add(1);
-                let new_phase = self.alert_ticks / FLASH_PHASE_TICKS;
-                if new_phase != old_phase {
-                    return Action::Redraw;
-                }
-            }
-            return Action::None;
         }
 
         // Resync embassy deadline from RTC time on every wall-clock
@@ -287,10 +247,10 @@ impl TimerScreen {
         draw_app_chrome(display, data, "TIMER", TELEMETRY, ACCENT);
 
         // -- Readout panel -------------------------------------------------
-        let panel_color = if self.alerting { self.alert_color() } else { ACCENT };
+        let panel_color = ACCENT;
         let panel = readout_rect();
         chamfered_panel(display, panel, NOTCH, panel_color, 1);
-        let tag_text = if self.alerting { "EXPIRED" } else { "REMAINING" };
+        let tag_text = "REMAINING";
         tag_label(
             display,
             panel.top_left.x,

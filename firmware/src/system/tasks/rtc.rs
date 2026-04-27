@@ -64,25 +64,49 @@ pub async fn rtc_task(bus: &'static SharedI2c, mut state: RtcTaskState<'static>)
                 // INT# fired (timer expiry or alarm).
                 let (event, time) = {
                     let mut i2c = bus.lock().await;
-                    let event = state.classify_interrupt(&mut *i2c);
                     let time = state.snapshot(&mut *i2c);
+                    let event = state.classify_interrupt(&mut *i2c, time);
                     (event, time)
                 };
-                EVENTS.send(SystemEvent::TimeUpdated { data: time }).await;
                 if let Some(ev) = event {
                     EVENTS.send(ev).await;
                 }
+                EVENTS.send(SystemEvent::TimeUpdated { data: time }).await;
             }
             Either3::Second(cmd) => {
-                let mut i2c = bus.lock().await;
-                state.handle_command(&mut *i2c, cmd);
+                // Drain any latched AF/TF before handling the
+                // command. The model emits `RtcCommand::SetAlarm`
+                // from `replan_alarms` whenever the next alarm
+                // changes, including immediately after wake when
+                // the just-fired alarm is in the past and the
+                // queue rolls forward. Without this drain, the new
+                // `set_alarm` would clear AF as part of arming and
+                // the fire event would be lost.
+                let pending = {
+                    let mut i2c = bus.lock().await;
+                    let time = state.snapshot(&mut *i2c);
+                    let event = state.read_pending_flag(&mut *i2c, time);
+                    state.handle_command(&mut *i2c, cmd);
+                    event
+                };
+                if let Some(ev) = pending {
+                    EVENTS.send(ev).await;
+                }
             }
             Either3::Third(()) => {
-                // Software poll: read RTC time and send update.
-                let time = {
+                // Software poll: read RTC time + check for any
+                // latched alarm/timer flag the edge path may have
+                // missed (e.g. AF set during light sleep with no
+                // post-wake falling edge to resolve wait_for_int).
+                let (event, time) = {
                     let mut i2c = bus.lock().await;
-                    state.snapshot(&mut *i2c)
+                    let time = state.snapshot(&mut *i2c);
+                    let event = state.read_pending_flag(&mut *i2c, time);
+                    (event, time)
                 };
+                if let Some(ev) = event {
+                    EVENTS.send(ev).await;
+                }
                 EVENTS.send(SystemEvent::TimeUpdated { data: time }).await;
             }
         }
@@ -235,19 +259,34 @@ impl<'d> RtcTaskState<'d> {
     ///
     /// Returns `None` only on I2C failure, which shouldn't happen
     /// in practice.
-    pub fn classify_interrupt(&self, i2c: &mut impl I2cTrait) -> Option<SystemEvent> {
+    pub fn classify_interrupt(
+        &self, i2c: &mut impl I2cTrait, time: TimeData,
+    ) -> Option<SystemEvent> {
+        let event = self.read_pending_flag(i2c, time);
+        if event.is_none() {
+            log::warn!("RTC: INT# fired with no AF/TF set - stray pulse");
+        }
+        event
+    }
+
+    /// Same flag check as [`classify_interrupt`] but silent when no
+    /// flag is set - the periodic poll calls it every 5 s and most
+    /// polls have nothing pending. Catches AF/TF flags latched
+    /// during sleep when the edge path didn't resolve on wake.
+    pub fn read_pending_flag(
+        &self, i2c: &mut impl I2cTrait, time: TimeData,
+    ) -> Option<SystemEvent> {
         let status = self.rtc.read_status(i2c).ok()?;
         if status.alarm_flag {
+            log::info!("RTC: alarm flag detected, emitting AlarmFired");
             let _ = self.rtc.clear_alarm_flag(i2c);
-            Some(SystemEvent::AlarmFired)
+            Some(SystemEvent::AlarmFired { time })
         } else if status.timer_flag {
+            log::info!("RTC: timer flag detected, emitting TimerExpired");
             let _ = self.rtc.clear_timer_flag(i2c);
             let _ = self.rtc.disable_timer(i2c);
-            Some(SystemEvent::TimerExpired)
+            Some(SystemEvent::TimerExpired { time })
         } else {
-            // Unexpected: HMI/MI are never enabled, so INT# should
-            // only fire for alarm or timer. Log and swallow.
-            log::warn!("RTC: INT# fired with no AF/TF set - stray pulse");
             None
         }
     }

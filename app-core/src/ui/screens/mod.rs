@@ -1,6 +1,7 @@
 pub mod alarm;
 pub mod app_drawer;
 pub mod clock;
+pub mod notifications;
 pub mod quick_access;
 pub mod settings;
 pub mod stopwatch;
@@ -25,6 +26,8 @@ pub enum ActiveScreen {
     /// Pull-up App Drawer. Reached via swipe-up-from-bottom and via
     /// tapping the watch face.
     AppDrawer(app_drawer::AppDrawerScreen),
+    /// Global ALERTS overlay. Reached via left-edge swipe-right.
+    Notifications(notifications::NotificationsScreen),
 }
 
 impl ActiveScreen {
@@ -52,6 +55,9 @@ impl ActiveScreen {
                     "use ActiveScreen::new_app_drawer(previous) for AppDrawer");
                 Self::Clock(clock::ClockScreen::new())
             }
+            ScreenId::Notifications => {
+                Self::Notifications(notifications::NotificationsScreen::new())
+            }
         }
     }
 
@@ -76,6 +82,7 @@ impl ActiveScreen {
             Self::Settings(s) => s.render(display, data),
             Self::QuickAccess(s) => s.render(display, data),
             Self::AppDrawer(s) => s.render(display, data),
+            Self::Notifications(s) => s.render(display, data),
         }
     }
 
@@ -88,6 +95,7 @@ impl ActiveScreen {
             Self::Settings(s) => s.on_event(event, data),
             Self::QuickAccess(s) => s.on_event(event, data),
             Self::AppDrawer(s) => s.on_event(event, data),
+            Self::Notifications(s) => s.on_event(event, data),
         }
     }
 
@@ -100,6 +108,7 @@ impl ActiveScreen {
             Self::Settings(s) => s.on_mount(data),
             Self::QuickAccess(s) => s.on_mount(data),
             Self::AppDrawer(s) => s.on_mount(data),
+            Self::Notifications(s) => s.on_mount(data),
         }
     }
 
@@ -112,6 +121,7 @@ impl ActiveScreen {
             Self::Settings(s) => s.on_unmount(),
             Self::QuickAccess(s) => s.on_unmount(),
             Self::AppDrawer(s) => s.on_unmount(),
+            Self::Notifications(s) => s.on_unmount(),
         }
     }
 
@@ -125,6 +135,7 @@ impl ActiveScreen {
             Self::Settings(_) => ScreenId::Settings,
             Self::QuickAccess(_) => ScreenId::QuickAccess,
             Self::AppDrawer(_) => ScreenId::AppDrawer,
+            Self::Notifications(_) => ScreenId::Notifications,
         }
     }
 
@@ -148,6 +159,17 @@ impl ActiveScreen {
     pub fn open_app_drawer(&mut self, previous: ScreenId, data: &SystemData) {
         self.unmount();
         *self = Self::new_app_drawer(previous);
+        self.mount(data);
+    }
+
+    /// Open the Notifications overlay. Notifications doesn't need
+    /// a `previous` context the way Quick Access / App Drawer do
+    /// (it isn't a launcher and doesn't highlight the source app),
+    /// but we keep the call site shape uniform with the other two
+    /// global edge-gesture overlays.
+    pub fn open_notifications(&mut self, data: &SystemData) {
+        self.unmount();
+        *self = Self::Notifications(notifications::NotificationsScreen::new());
         self.mount(data);
     }
 }

@@ -56,6 +56,11 @@ pub enum ScreenId {
     /// swipe-up-from-bottom and by tapping the watch face. Also
     /// overlay-like: constructed via `ActiveScreen::new_app_drawer(previous)`.
     AppDrawer,
+    /// Global ALERTS overlay. Reached via left-edge swipe-right
+    /// (`Swipe { dir: Right, region: Left }`); the model pushes the
+    /// pre-overlay screen onto the nav stack so `Action::Back`
+    /// returns to wherever the user came from.
+    Notifications,
 }
 
 // -- Actions -----------------------------------------------------------------
@@ -430,11 +435,35 @@ impl AlarmState {
         minute: u8,
         weekday: u8,
     ) -> Option<AlarmReprogram> {
+        self.plan_reprogram_inner(hour, minute, weekday, false)
+    }
+
+    /// Like [`plan_reprogram`] but always emits a command even when
+    /// the next-alarm index hasn't changed. Use this when the user
+    /// just edited entries: the index might still point at the same
+    /// slot, but its HH:MM may have changed and the chip's registers
+    /// would otherwise stay stuck at the old value.
+    pub fn plan_reprogram_force(
+        &mut self,
+        hour: u8,
+        minute: u8,
+        weekday: u8,
+    ) -> Option<AlarmReprogram> {
+        self.plan_reprogram_inner(hour, minute, weekday, true)
+    }
+
+    fn plan_reprogram_inner(
+        &mut self,
+        hour: u8,
+        minute: u8,
+        weekday: u8,
+        force: bool,
+    ) -> Option<AlarmReprogram> {
         if self.snoozed {
             return None;
         }
         let next = self.next_alarm(hour, minute, weekday);
-        if next == self.active_hw {
+        if !force && next == self.active_hw {
             return None;
         }
         self.active_hw = next;
@@ -547,6 +576,104 @@ pub use crate::data::{MotionData, PowerData, StorageUsage, TimeData, TouchData};
 /// Intentionally not `Copy`: [`crate::data::BatteryHistory`] owns a
 /// ring buffer that can't live on the stack silently on every pass.
 /// The struct is always accessed through `&SystemData` / `&mut
+// -- Notifications -----------------------------------------------------------
+
+/// Maximum simultaneous active notifications. Past this the oldest
+/// is dropped to make room - the overlay is a recent-events queue,
+/// not a long-term history.
+pub const MAX_NOTIFICATIONS: usize = 16;
+
+/// Severity classification for a notification, drives the row's
+/// border + label + badge colour. Mirrors the Nightwatch spec's
+/// four-level taxonomy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NotificationSeverity {
+    /// Critical alert. signal red. Alarm fired, fault, etc.
+    Critical,
+    /// Warning. yellow. Timer expired, low battery soon.
+    Warning,
+    /// Success. green. Self-test passed, save committed.
+    Ok,
+    /// Informational. cyan. Connectivity changes, generic info.
+    Info,
+}
+
+/// Where a notification originated. Drives the tap-to-route target
+/// and the row's title/badge defaults.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NotificationSource {
+    Alarm,
+    Timer,
+}
+
+impl NotificationSource {
+    /// Screen to switch to when the notification row is tapped.
+    pub fn target(self) -> ScreenId {
+        match self {
+            Self::Alarm => ScreenId::Alarm,
+            Self::Timer => ScreenId::Timer,
+        }
+    }
+
+    /// UPPERCASE row title shown in the overlay.
+    pub fn title(self) -> &'static str {
+        match self {
+            Self::Alarm => "ALARM",
+            Self::Timer => "TIMER",
+        }
+    }
+
+    /// Single-character badge glyph rendered top-left of the row.
+    pub fn badge(self) -> &'static str {
+        match self {
+            Self::Alarm => "!",
+            Self::Timer => "*",
+        }
+    }
+}
+
+/// One notification entry in the overlay's row list.
+#[derive(Debug, Clone)]
+pub struct Notification {
+    pub severity: NotificationSeverity,
+    pub source: NotificationSource,
+    /// Free-form subtitle line drawn under the title. Snapshot of
+    /// the relevant context at notification-creation time, e.g.
+    /// `"WAKE @ 06:30"` for an alarm fire.
+    pub subtitle: heapless::String<32>,
+    /// Hour-of-day (0..=23) the notification was created.
+    pub ts_hour: u8,
+    /// Minute-of-hour (0..=59) the notification was created.
+    pub ts_minute: u8,
+}
+
+/// Active notification queue. Newest entries pushed to the end;
+/// rendered top-to-bottom in the overlay (newest on top via reverse
+/// iteration at render time).
+#[derive(Debug, Clone, Default)]
+pub struct NotificationState {
+    pub entries: heapless::Vec<Notification, MAX_NOTIFICATIONS>,
+}
+
+impl NotificationState {
+    /// Push a new notification. Drops the oldest entry first if
+    /// the queue is at capacity.
+    pub fn push(&mut self, n: Notification) {
+        if self.entries.is_full() {
+            self.entries.remove(0);
+        }
+        let _ = self.entries.push(n);
+    }
+
+    /// Remove the notification at `idx`. No-op if `idx` is out of
+    /// range.
+    pub fn dismiss(&mut self, idx: usize) {
+        if idx < self.entries.len() {
+            self.entries.remove(idx);
+        }
+    }
+}
+
 /// SystemData` references, so the missing `Copy` costs nothing at
 /// call sites - see `Model::new` (only by-value use).
 #[derive(Debug, Clone, Default)]
@@ -566,6 +693,11 @@ pub struct SystemData {
     pub stopwatch: StopwatchState,
     pub timer: TimerState,
     pub alarms: AlarmState,
+    /// Active notification queue surfaced in the global Notifications
+    /// overlay. Producers are the alarm-fired and timer-expired
+    /// hooks in [`crate::Model::apply_snapshot`]; consumers is the
+    /// overlay screen (renders rows, tap-to-route, swipe-to-dismiss).
+    pub notifications: NotificationState,
     /// Per-test latest result, indexed by [`SelfTestId`] cast to
     /// `usize`. Updated by the main loop whenever a
     /// [`SystemEvent::SelfTestUpdated`] arrives.
