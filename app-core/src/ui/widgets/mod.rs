@@ -10,15 +10,22 @@
 //! * [`controls`] - interactive primitives: `toggle`, `slider`,
 //!   `chamfered_button`.
 //! * [`numpad`] - multi-digit entry widget for set-time / set-duration
-//!   flows.
+//!   flows. Being phased out in favour of [`wheel`] / [`picker`].
 //! * [`scrollable`] - smooth-scroll body + scrollbar helper.
+//! * [`wheel`] - vertical scroll-wheel column for bounded-integer
+//!   picking. Composed into multi-column [`picker`]s for HH:MM,
+//!   HH:MM:SS, DD/MM/YYYY entry.
+//! * [`picker`] - multi-column [`Picker`] that routes drags to the
+//!   correct [`wheel::Wheel`] column.
 
 pub mod bodies;
 pub mod chrome;
 pub mod containers;
 pub mod controls;
 pub mod numpad;
+pub mod picker;
 pub mod scrollable;
+pub mod wheel;
 
 pub use bodies::{row, RowControl, ROW_H};
 pub use chrome::{
@@ -33,4 +40,6 @@ pub use controls::{
     SLIDER_BAR_H, TOGGLE_H, TOGGLE_W,
 };
 pub use numpad::{Numpad, NumpadAction, MAX_DIGITS};
+pub use picker::{action_row_rects, render_action_row, Picker};
 pub use scrollable::{handle_scroll_drag, render_scrolled, scroll_max, SCROLLBAR_GUTTER};
+pub use wheel::{fmt_2digit, Wheel, WHEEL_CELL_H, WHEEL_TOTAL_H};

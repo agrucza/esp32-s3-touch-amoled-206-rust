@@ -18,12 +18,15 @@
 //!
 //! **Edit view**:
 //! - Standard app chrome, header title `EDIT ALARM` + `ALM.0N`
-//!   telemetry; chevron-back discards the in-flight edit.
-//! - Time label (HH:MM) below the header, yellow.
+//!   telemetry; chevron-back discards the in-flight edit (same as
+//!   tapping CANCEL).
 //! - Day selector row: 7 tappable cells with the day letter, yellow
 //!   when active, FG_DIM when not. Tap toggles.
-//! - Existing `Numpad` widget (still red-tinted - same future-tweak
-//!   concern as Timer's numpad).
+//! - HH:MM wheel picker (yellow accent). Drag a column to scroll;
+//!   tap above/below the center band to step ±1. Hours and minutes
+//!   both wrap at their range ends.
+//! - `CANCEL | SET` action row at the bottom: Cancel returns to the
+//!   list discarding edits; Set commits and persists.
 //!
 //! **Alert view** (alarm fired):
 //! - Standard app chrome with `ALARM` title; chevron-back doubles
@@ -51,11 +54,11 @@ use crate::ui::types::{
     Action, AlarmEntry, Screen, SystemData, MAX_ALARMS,
 };
 use crate::ui::widgets::{
-    app_chrome_back_hit, chamfered_button, chamfered_panel, draw_app_chrome,
-    handle_scroll_drag, render_scrolled, tag_label, toggle, ButtonVariant,
-    Numpad, NumpadAction,
-    APP_CONTENT_TOP, APP_HOME_BAR_Y, MAX_DIGITS, NOTCH, TAG_LABEL_H,
-    TOGGLE_H, TOGGLE_W,
+    action_row_rects, app_chrome_back_hit, chamfered_button, chamfered_panel,
+    draw_app_chrome, fmt_2digit, handle_scroll_drag, render_action_row, render_scrolled,
+    tag_label, toggle, ButtonVariant, Picker, Wheel,
+    APP_CONTENT_TOP, APP_HOME_BAR_Y, NOTCH, TAG_LABEL_H,
+    TOGGLE_H, TOGGLE_W, WHEEL_TOTAL_H,
 };
 
 // -- Constants ---------------------------------------------------------------
@@ -87,26 +90,49 @@ const LIST_TOP_PAD: i32 = 4;
 /// Vertical step from one row's top edge to the next.
 const ROW_STEP: i32 = ROW_H + ROW_GAP;
 
-/// Y of the time label (top of glyphs) in the Edit view, between the
-/// header and the day selector row.
-const EDIT_TIME_Y: i32 = APP_CONTENT_TOP + 28;
+// -- Edit view layout --------------------------------------------------------
 
-/// Y of the day-selector row's letter baseline in the Edit view.
-const DAY_ROW_Y: i32 = EDIT_TIME_Y + 64;
+/// Top y of the day-chip row.
+const DAY_ROW_TOP: i32 = APP_CONTENT_TOP + 18;
 
-/// Horizontal spacing between adjacent day cells.
-const DAY_SPACING: i32 = 48;
+/// Height of one day chip.
+const DAY_CHIP_H: i32 = 24;
 
-/// Hit-test radius around each day-selector cell's centre.
-const DAY_HIT_R: i32 = DAY_SPACING / 2;
+/// Horizontal gap between adjacent day chips.
+const DAY_CHIP_GAP: i32 = 4;
 
-/// Display order of day letters (Monday first to mirror most
-/// European/work-week conventions).
-const DAY_LABELS: [&str; 7] = ["M", "T", "W", "T", "F", "S", "S"];
+/// Notch carved off TL+BR of each day chip - smaller than the
+/// standard button notch since chips are about half the height.
+const DAY_CHIP_NOTCH: i32 = 4;
+
+/// Three-letter day labels for the Edit-view chip row, where each
+/// chip is wide enough to hold the disambiguated label. Monday
+/// first to mirror European / work-week convention.
+const DAY_LABELS: [&str; 7] = ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"];
+
+/// Single-letter day labels for the list overview. The list row
+/// has to share its width with the time block and the toggle, so
+/// three-letter labels won't fit there with readable gaps. Same
+/// Monday-first order as [`DAY_LABELS`].
+const DAY_LABELS_LIST: [&str; 7] = ["M", "T", "W", "T", "F", "S", "S"];
 
 /// Map display index (0=Mon) to the bitmask bit position used by
-/// `AlarmEntry::days` (0=Sun, 1=Mon, ...).
+/// `AlarmEntry::days` (0=Sun, 1=Mon, ..., 6=Sat).
 const DAY_BIT: [u8; 7] = [1, 2, 3, 4, 5, 6, 0];
+
+/// Top y of the HH:MM wheel picker. Picks up below the day chip
+/// row with comfortable breathing room.
+const PICKER_TOP: i32 = APP_CONTENT_TOP + 90;
+
+/// Width of one wheel column.
+const PICKER_COL_W: i32 = 80;
+
+/// Horizontal gap between the HH and MM columns - wide enough to
+/// fit the colon glyph at value-font size with no crowding.
+const PICKER_GAP: i32 = 40;
+
+/// Total horizontal extent of the two-column picker.
+const PICKER_TOTAL_W: i32 = PICKER_COL_W * 2 + PICKER_GAP;
 
 // -- Alert constants ---------------------------------------------------------
 
@@ -143,9 +169,12 @@ pub struct AlarmScreen {
     /// via `TouchPressed` / `TouchReleased`, mirroring the settings
     /// index pattern.
     list_scroll: layout::ScrollState,
-    numpad: Numpad,
+    /// HH:MM wheel picker for the Edit view. Wheels wrap; values
+    /// are seeded from the entry on Edit entry and read back into
+    /// the entry on Set.
+    time_picker: Picker<2>,
     /// Days bitmask being edited (copy from entry on Edit entry,
-    /// written back on confirm).
+    /// written back on Set).
     edit_days: u8,
     /// Tick counter for the alert flash, wraps freely.
     alert_ticks: u8,
@@ -156,7 +185,10 @@ impl AlarmScreen {
         Self {
             view: AlarmView::List,
             list_scroll: layout::ScrollState::new(),
-            numpad: Numpad::new(4).with_top(EDIT_TIME_Y + 110),
+            time_picker: Picker::new([
+                Wheel::new(0, 23, 0).with_wrap(true),
+                Wheel::new(0, 59, 0).with_wrap(true),
+            ]),
             edit_days: 0x7F,
             alert_ticks: 0,
         }
@@ -277,18 +309,36 @@ impl AlarmScreen {
             );
         }
 
-        // Day letters, centred horizontally.
-        let day_total_w = (DAY_LABELS.len() as i32 - 1) * 28;
-        let day_center = rect.top_left.x + rect.size.width as i32 / 2;
-        let day_left = day_center - day_total_w / 2;
-        let day_y = rect.top_left.y + rect.size.height as i32 - 24;
-        for (i, label) in DAY_LABELS.iter().enumerate() {
+        // Day-letter strip for the overview row: single-letter
+        // labels in evenly-sized cells, centred between the time
+        // block's right edge and the toggle's left edge. Three-letter
+        // labels live in the Edit-view chip row, where there's room.
+        let time_w = fonts::measure_width(&fonts::value(), time_buf.as_str());
+        let time_right = rect.top_left.x + ROW_PAD_X + time_w;
+        let toggle_left =
+            rect.top_left.x + rect.size.width as i32 - ROW_PAD_X - TOGGLE_W;
+        let day_cell_w: i32 = 24;
+        let day_cell_h: i32 = 16;
+        let n = DAY_LABELS_LIST.len() as i32;
+        let strip_w = n * day_cell_w;
+        let strip_x = (time_right + toggle_left - strip_w) / 2;
+        let strip_y = rect.top_left.y + rect.size.height as i32 - 26;
+        for (i, label) in DAY_LABELS_LIST.iter().enumerate() {
             let active = entry.enabled && (entry.days & (1 << DAY_BIT[i])) != 0;
-            let cell_color = if active { ACCENT } else { theme::STEEL };
-            let cx = day_left + i as i32 * 28;
-            fonts::draw_centered(
+            let cell_color = if active {
+                ACCENT
+            } else if entry.enabled {
+                theme::STEEL
+            } else {
+                theme::STEEL_2
+            };
+            let cell_rect = Rectangle::new(
+                Point::new(strip_x + i as i32 * day_cell_w, strip_y),
+                Size::new(day_cell_w as u32, day_cell_h as u32),
+            );
+            fonts::draw_centered_in_rect(
                 display, &fonts::caption(),
-                label, cx, day_y, cell_color,
+                label, cell_rect, cell_color,
             );
         }
 
@@ -340,12 +390,11 @@ impl AlarmScreen {
                         return Action::PersistAlarms;
                     }
 
-                    // Body tap: open Edit.
+                    // Body tap: open Edit. Seed the picker from
+                    // the entry's HH:MM.
                     let entry = &data.alarms.entries[idx];
-                    self.numpad.prefill(&[
-                        entry.hour / 10, entry.hour % 10,
-                        entry.minute / 10, entry.minute % 10,
-                    ]);
+                    self.time_picker.wheels[0].set_value(entry.hour as i32);
+                    self.time_picker.wheels[1].set_value(entry.minute as i32);
                     self.edit_days = entry.days;
                     self.view = AlarmView::Edit { index: idx };
                     return Action::Redraw;
@@ -368,101 +417,138 @@ impl AlarmScreen {
         let _ = write!(tele_buf, "{}{:02}", EDIT_TELEMETRY_PREFIX, index);
         draw_app_chrome(display, data, "EDIT ALARM", tele_buf.as_str(), ACCENT);
 
-        // HH:MM label from current digit buffer.
-        let mut padded = [0u8; MAX_DIGITS];
-        let offset = 4usize.saturating_sub(self.numpad.digits.len());
-        for (i, &d) in self.numpad.digits.iter().enumerate() {
-            padded[offset + i] = d;
+        // Day chip row.
+        let chips = day_chip_rects();
+        for (i, rect) in chips.iter().enumerate() {
+            let active = (self.edit_days & (1 << DAY_BIT[i])) != 0;
+            day_chip(display, *rect, DAY_LABELS[i], active);
         }
-        let mut buf: heapless::String<8> = heapless::String::new();
-        let _ = write!(buf, "{}{}:{}{}", padded[0], padded[1], padded[2], padded[3]);
-        fonts::draw_centered(
-            display, &fonts::value(),
-            buf.as_str(),
-            theme::SCREEN_W as i32 / 2, EDIT_TIME_Y,
-            ACCENT,
+
+        // HH:MM wheel picker.
+        let cells = picker_cell_rects();
+        self.time_picker.wheels[0].render(display, cells[0], ACCENT, fmt_2digit);
+        self.time_picker.wheels[1].render(display, cells[1], ACCENT, fmt_2digit);
+
+        // Colon between the two columns, sized to match the
+        // wheel's center cell so it sits on the same baseline as
+        // the selected HH and MM.
+        let colon_cx = (cells[0].top_left.x + cells[0].size.width as i32
+            + cells[1].top_left.x) / 2;
+        let colon_cy = cells[0].top_left.y + cells[0].size.height as i32 / 2;
+        let colon_rect = Rectangle::new(
+            Point::new(colon_cx - 8, colon_cy - 16),
+            Size::new(16, 32),
+        );
+        fonts::draw_centered_in_rect(
+            display, &fonts::value(), ":", colon_rect, ACCENT,
         );
 
-        // Day selector row.
-        let total_w = 7 * DAY_SPACING;
-        let start_x = (theme::SCREEN_W as i32 - total_w) / 2 + DAY_SPACING / 2;
-        for (i, label) in DAY_LABELS.iter().enumerate() {
-            let cx = start_x + i as i32 * DAY_SPACING;
-            let active = (self.edit_days & (1 << DAY_BIT[i])) != 0;
-            let color = if active { ACCENT } else { theme::FG_DIM };
-            fonts::draw_centered(
-                display, &fonts::body(),
-                label, cx, DAY_ROW_Y,
-                color,
-            );
-        }
-
-        self.numpad.render(display);
+        // CANCEL | SET action row.
+        render_action_row(display, ACCENT);
     }
 
     fn edit_event(
         &mut self, event: &SystemEvent, data: &mut SystemData, index: usize,
     ) -> Action {
         match event {
-            // Header chevron: discard edit, return to list.
+            // Header chevron: discard edit, return to list. Same as
+            // tapping CANCEL.
             SystemEvent::Tap { x, y } if app_chrome_back_hit(*x, *y) => {
                 self.view = AlarmView::List;
                 Action::Redraw
             }
 
             SystemEvent::Tap { x, y } => {
-                let total_w = 7 * DAY_SPACING;
-                let start_x = (theme::SCREEN_W as i32 - total_w) / 2 + DAY_SPACING / 2;
-                let py = *y as i32;
-                let px = *x as i32;
-                if py >= DAY_ROW_Y - 12 && py <= DAY_ROW_Y + 22 {
-                    for i in 0..7 {
-                        let cx = start_x + i as i32 * DAY_SPACING;
-                        if (px - cx).abs() < DAY_HIT_R {
-                            self.edit_days ^= 1 << DAY_BIT[i as usize];
-                            return Action::Redraw;
-                        }
+                // Day chips first - small targets with the highest
+                // mis-tap risk if the wheel below catches them.
+                let chips = day_chip_rects();
+                for (i, rect) in chips.iter().enumerate() {
+                    if rect_hit(*rect, *x, *y) {
+                        self.edit_days ^= 1 << DAY_BIT[i];
+                        return Action::Redraw;
                     }
                 }
 
-                if let Some(action) = self.numpad.hit_test(*x, *y) {
-                    match action {
-                        NumpadAction::Confirm => {
-                            let mut padded = [0u8; MAX_DIGITS];
-                            let offset = 4usize.saturating_sub(self.numpad.digits.len());
-                            for (i, &d) in self.numpad.digits.iter().enumerate() {
-                                padded[offset + i] = d;
-                            }
-                            let h = padded[0] * 10 + padded[1];
-                            let m = padded[2] * 10 + padded[3];
-                            if h < 24 && m < 60 {
-                                data.alarms.entries[index] = AlarmEntry {
-                                    hour: h,
-                                    minute: m,
-                                    days: self.edit_days,
-                                    enabled: true,
-                                };
-                                self.view = AlarmView::List;
-                                return Action::PersistAlarms;
-                            }
-                            Action::Redraw
-                        }
-                        other => {
-                            if self.numpad.apply(other) {
-                                Action::Redraw
-                            } else {
-                                Action::None
-                            }
-                        }
-                    }
-                } else {
-                    Action::None
+                // Action row.
+                let (cancel, set) = action_row_rects();
+                if rect_hit(cancel, *x, *y) {
+                    self.view = AlarmView::List;
+                    return Action::Redraw;
                 }
+                if rect_hit(set, *x, *y) {
+                    let h = self.time_picker.wheels[0].value() as u8;
+                    let m = self.time_picker.wheels[1].value() as u8;
+                    data.alarms.entries[index] = AlarmEntry {
+                        hour: h,
+                        minute: m,
+                        days: self.edit_days,
+                        enabled: true,
+                    };
+                    self.view = AlarmView::List;
+                    return Action::PersistAlarms;
+                }
+
+                // Picker tap-step (above/below center band).
+                let cells = picker_cell_rects();
+                if self.time_picker.handle_event(event, &cells) {
+                    return Action::Redraw;
+                }
+                Action::None
+            }
+
+            // Drag scroll on the wheels.
+            SystemEvent::TouchPressed { .. } | SystemEvent::TouchReleased => {
+                let cells = picker_cell_rects();
+                if self.time_picker.handle_event(event, &cells) {
+                    return Action::Redraw;
+                }
+                Action::None
             }
 
             _ => Action::None,
         }
     }
+}
+
+/// Rect for each of the 7 day chips, evenly split across the
+/// content band with [`DAY_CHIP_GAP`] between them.
+fn day_chip_rects() -> [Rectangle; 7] {
+    let inner_w = theme::SCREEN_W as i32 - SIDE_MARGIN * 2;
+    let chip_w = (inner_w - 6 * DAY_CHIP_GAP) / 7;
+    core::array::from_fn(|i| {
+        Rectangle::new(
+            Point::new(
+                SIDE_MARGIN + i as i32 * (chip_w + DAY_CHIP_GAP),
+                DAY_ROW_TOP,
+            ),
+            Size::new(chip_w as u32, DAY_CHIP_H as u32),
+        )
+    })
+}
+
+/// Draw one day chip - chamfered border + matching label colour.
+/// Active chips wear the accent; inactive chips read as steel.
+fn day_chip<D: DrawTarget<Color = Rgb565>>(
+    display: &mut D, rect: Rectangle, label: &str, active: bool,
+) {
+    let color = if active { ACCENT } else { theme::STEEL_2 };
+    chamfered_panel(display, rect, DAY_CHIP_NOTCH, color, 1);
+    fonts::draw_centered_in_rect(display, &fonts::caption(), label, rect, color);
+}
+
+/// Per-column rects for the HH:MM wheel picker, centred horizontally.
+fn picker_cell_rects() -> [Rectangle; 2] {
+    let start_x = (theme::SCREEN_W as i32 - PICKER_TOTAL_W) / 2;
+    [
+        Rectangle::new(
+            Point::new(start_x, PICKER_TOP),
+            Size::new(PICKER_COL_W as u32, WHEEL_TOTAL_H as u32),
+        ),
+        Rectangle::new(
+            Point::new(start_x + PICKER_COL_W + PICKER_GAP, PICKER_TOP),
+            Size::new(PICKER_COL_W as u32, WHEEL_TOTAL_H as u32),
+        ),
+    ]
 }
 
 // -- Alert view --------------------------------------------------------------

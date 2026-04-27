@@ -329,20 +329,10 @@ impl Model {
         match event {
             SystemEvent::TimeUpdated { data } => {
                 self.cached_data.time = *data;
-                // Check if the next alarm needs reprogramming.
-                let t = &self.cached_data.time;
-                let weekday = crate::ui::screens::alarm::day_of_week(
-                    t.year as i32, t.month as i32, t.day as i32,
-                );
-                match self.cached_data.alarms.plan_reprogram(t.hour, t.minute, weekday) {
-                    None => {}
-                    Some(AlarmReprogram::SetAlarm { hour, minute }) => {
-                        let _ = out.push(Effect::RtcCommand(RtcCommand::SetAlarm { hour, minute, weekday: None }));
-                    }
-                    Some(AlarmReprogram::CancelAlarm) => {
-                        let _ = out.push(Effect::RtcCommand(RtcCommand::CancelAlarm));
-                    }
-                }
+                // Re-evaluate the next-firing alarm against the
+                // new time. Catches alarms whose fire-time the
+                // clock just crossed.
+                self.replan_alarms(out);
             }
             SystemEvent::PowerUpdated { data } => {
                 self.cached_data.power = *data;
@@ -519,6 +509,11 @@ impl Model {
             }
             Action::PersistAlarms => {
                 let _ = out.push(Effect::SaveAlarms);
+                // Re-evaluate which alarm is "next" so the NEXT
+                // tag in the list and the RTC alarm register both
+                // catch up immediately, instead of staying stale
+                // until the next minute tick.
+                self.replan_alarms(out);
                 self.needs_redraw = true;
             }
             Action::PersistConfig => {
@@ -588,6 +583,30 @@ impl Model {
                 self.cached_data.config = self.config;
                 self.config_dirty = true;
                 self.needs_redraw = true;
+            }
+        }
+    }
+
+    /// Re-evaluate which enabled alarm fires next given the
+    /// cached time and emit the matching RTC command if the
+    /// target changed. Called both on `TimeUpdated` (clock moved)
+    /// and on `PersistAlarms` (entries changed) so `active_hw`,
+    /// the RTC register, and the list-row NEXT marker stay in
+    /// sync.
+    fn replan_alarms(&mut self, out: &mut Effects) {
+        let t = &self.cached_data.time;
+        let weekday = crate::ui::screens::alarm::day_of_week(
+            t.year as i32, t.month as i32, t.day as i32,
+        );
+        match self.cached_data.alarms.plan_reprogram(t.hour, t.minute, weekday) {
+            None => {}
+            Some(AlarmReprogram::SetAlarm { hour, minute }) => {
+                let _ = out.push(Effect::RtcCommand(RtcCommand::SetAlarm {
+                    hour, minute, weekday: None,
+                }));
+            }
+            Some(AlarmReprogram::CancelAlarm) => {
+                let _ = out.push(Effect::RtcCommand(RtcCommand::CancelAlarm));
             }
         }
     }
