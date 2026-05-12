@@ -1,11 +1,7 @@
 use crate::config::DisplayConfig;
-use crate::display_hal::{self, CO5300, EspQspi};
 use embassy_time::{Duration, Timer};
-use esp_hal::{
-    dma::DmaChannelFor,
-    gpio::{Output, interconnect::{PeripheralInput, PeripheralOutput}},
-    spi::master::AnySpi,
-};
+use esp_hal::gpio::Output;
+use firmware_hal::display::{CO5300, EspQspi};
 
 /// Concrete type of the display handle the rest of the firmware uses.
 /// Parameterized over the esp-hal peripheral lifetime `'d`; the
@@ -18,45 +14,12 @@ pub type Display<'d> = CO5300<'static, EspQspi<'d>, Output<'d>>;
 // Re-exported here so existing firmware imports keep working.
 pub use app_core::ui::types::DisplayState;
 
-/// Perform the full display hardware init sequence.
-///
-/// Builds the QSPI bus, performs the reset pulse, sends init commands,
-/// sleep out, and display on. Returns the ready-to-use display handle.
-pub async fn init_display<'d, 'fb>(
-    spi: impl esp_hal::spi::master::Instance + 'd,
-    sclk: impl PeripheralOutput<'d>,
-    // QSPI data lines are bidirectional in esp-hal 1.1's SPI API -
-    // PeripheralInput bound has to be propagated through the wrapper.
-    sio0: impl PeripheralInput<'d> + PeripheralOutput<'d>,
-    sio1: impl PeripheralInput<'d> + PeripheralOutput<'d>,
-    sio2: impl PeripheralInput<'d> + PeripheralOutput<'d>,
-    sio3: impl PeripheralInput<'d> + PeripheralOutput<'d>,
-    cs: impl PeripheralOutput<'d>,
-    dma: impl DmaChannelFor<AnySpi<'d>>,
-    reset_pin: Output<'d>,
-    fb: &'fb mut [u8],
-) -> CO5300<'fb, EspQspi<'d>, Output<'d>> {
-    let bus = display_hal::build_spi(spi, sclk, sio0, sio1, sio2, sio3, cs, dma);
-    let mut display = CO5300::new(bus, reset_pin, fb);
-
-    // Hardware reset: short low pulse then settle
-    display.reset_high();
-    Timer::after(Duration::from_millis(10)).await;
-    display.reset_low();
-    Timer::after(Duration::from_millis(10)).await;
-    display.reset_high();
-    Timer::after(Duration::from_millis(120)).await;
-
-    log::info!("Display: initializing CO5300...");
-    display.init().await;
-    display.wake().await;
-    Timer::after(Duration::from_millis(120)).await;
-    display.display_on().await;
-    Timer::after(Duration::from_millis(70)).await;
-    log::info!("Display: ready");
-
-    display
-}
+// The display init sequence (QSPI bus build, reset pulse, CO5300 init,
+// wake, display-on) lives in `firmware-hal` so both firmware-s3 and
+// firmware-c6 share one implementation. Re-export it here so the existing
+// `crate::system::display::init_display(...)` call site in manager.rs
+// keeps compiling unchanged.
+pub use firmware_hal::display::init_display;
 
 /// Apply a display-state transition. Issues the necessary DCS
 /// commands over SPI: brightness changes for Active/Dim, the full

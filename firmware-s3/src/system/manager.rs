@@ -1,7 +1,7 @@
 extern crate alloc;
 
 use crate::config::Config;
-use crate::display_hal::{self, WIDTH, HEIGHT};
+use firmware_hal::display::{self as display_hal, WIDTH, HEIGHT};
 use crate::events::SystemEvent;
 use crate::system::audio::AudioSystem;
 use crate::system::bus::{EVENTS, IMU_COMMAND, RTC_COMMAND, SLEEP_WATCH, SleepState};

@@ -1,0 +1,17 @@
+[build]
+target = "riscv32imac-unknown-none-elf"
+
+[target.riscv32imac-unknown-none-elf]
+# No --partition-table flag yet - espflash will synthesise a
+# single-app layout that's good enough for the smoke test. When
+# persistent storage lands on C6, add `partitions-c6.csv` next to
+# the S3 one and pass it here, matching firmware/.cargo/config.toml.
+runner = "espflash flash --monitor"
+rustflags = [
+    # Pull in esp-hal's linker script, which sets up all memory sections.
+    "-C", "link-arg=-Tlinkall.x",
+]
+
+# No `[unstable] build-std` block here: precompiled `core` and `alloc`
+# ship with the stable toolchain for `riscv32imac-unknown-none-elf`,
+# unlike the Xtensa targets which require build-std on the esp fork.

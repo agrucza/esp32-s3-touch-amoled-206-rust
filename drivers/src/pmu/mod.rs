@@ -357,6 +357,42 @@ impl Pmu {
         self.write_register(i2c, registers::REG_LDO_EN0, new)
     }
 
+    /// Enable or disable ALDO2 (net `DSI_PWR_EN`, the AMOLED display rail).
+    ///
+    /// ALDO2 is enabled at boot by [`enable_all_rails`] and powers the
+    /// CO5300 display module via the `DSI_PWR_EN` enable line on the
+    /// display FPC. Toggling this rail off cuts the panel; firmware
+    /// must keep it on while the display is in use.
+    ///
+    /// On the S3 variant this rail is dedicated to the display; on the
+    /// C6 variant the same ALDO2 net feeds the display FPC, and whether
+    /// it also powers anything else on that FPC (e.g. the FT3168 touch
+    /// IC) is still TBD - approach incrementally when bringing up the
+    /// C6 board.
+    ///
+    /// Contract:
+    /// 1. Call `set_aldo2_voltage(i2c, 3300)` before enabling the rail
+    ///    (the LDO voltage register has no guaranteed default).
+    /// 2. Call `set_display_rail(i2c, true)`.
+    /// 3. Wait at least 20 ms for the rail to stabilise before sending
+    ///    QSPI commands to the panel.
+    ///
+    /// Only ALDO2 is touched - all other rail enables in REG 90h are
+    /// preserved via a read-modify-write.
+    pub fn set_display_rail<I2C, E>(&self, i2c: &mut I2C, enable: bool) -> Result<(), Error<E>>
+    where
+        I2C: I2cTrait<Error = E>,
+    {
+        use registers::ldo_en0;
+        let cur = self.read_register(i2c, registers::REG_LDO_EN0)?;
+        let new = if enable {
+            cur | ldo_en0::ALDO2
+        } else {
+            cur & !ldo_en0::ALDO2
+        };
+        self.write_register(i2c, registers::REG_LDO_EN0, new)
+    }
+
     /// Disable all LDOs (REG 90h and REG 91h both cleared).
     pub fn disable_all_rails<I2C, E>(&self, i2c: &mut I2C) -> Result<(), Error<E>>
     where

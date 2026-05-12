@@ -1,10 +1,10 @@
 [package]
-name    = "firmware"
+name    = "firmware-s3"
 version = "0.1.0"
 edition = "2021"
 
 [[bin]]
-name  = "firmware"
+name  = "firmware-s3"
 path  = "src/main.rs"
 test  = false
 bench = false
@@ -65,8 +65,9 @@ embedded-hal-async = { workspace = true }
 embedded-hal-bus   = { version = "0.3.0" }
 
 # --- Local crates ---
-app-core = { path = "../app-core", features = ["serde"] }
-drivers  = { path = "../drivers", features = ["display", "imu", "pmu", "rtc", "touch", "sdcard", "es8311", "es7210"] }
+app-core     = { path = "../app-core",     features = ["serde"] }
+drivers      = { path = "../drivers",      features = ["display", "imu", "pmu", "rtc", "touch", "sdcard", "es8311", "es7210"] }
+firmware-hal = { path = "../firmware-hal" }
 
 embedded-graphics-core = { workspace = true }
 embedded-graphics      = "0.8.2"

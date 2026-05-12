@@ -12,7 +12,7 @@
 #![allow(dead_code)]
 
 // =============================================================================
-// Display - RM67162 AMOLED, QSPI interface
+// Display - CO5300 AMOLED, QSPI interface
 // Resolution: 410 x 502 px (portrait)
 // =============================================================================
 pub const LCD_SDIO0:  u8 = 4;   // QSPI Data 0 (MOSI)
@@ -27,7 +27,7 @@ pub const LCD_TE:     u8 = 13;  // Tear enable (optional, avoids tearing)
 pub const LCD_WIDTH:  u16 = 410;
 pub const LCD_HEIGHT: u16 = 502;
 
-// Column / row offset for the RM67162 on this specific panel.
+// Column / row offset for the CO5300 on this specific panel.
 pub const LCD_COL_OFFSET: u16 = 22;
 pub const LCD_ROW_OFFSET: u16 = 0;
 

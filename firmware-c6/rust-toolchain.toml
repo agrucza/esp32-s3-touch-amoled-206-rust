@@ -1,0 +1,9 @@
+[toolchain]
+# Stock upstream stable toolchain. Unlike the workspace-root
+# `esp` channel (Xtensa fork installed by espup), the RISC-V
+# target on the C6 needs no compiler fork - it's a standard
+# rustc target. Running cargo from inside this directory makes
+# rustup pick this toolchain instead of the workspace one.
+channel = "stable"
+components = ["rustfmt", "clippy"]
+targets = ["riscv32imac-unknown-none-elf"]

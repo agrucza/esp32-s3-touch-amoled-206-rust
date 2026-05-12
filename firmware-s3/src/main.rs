@@ -4,7 +4,6 @@
 extern crate alloc;
 
 mod board;
-mod display_hal;
 mod sdcard_hal;
 // Audio stack is fully implemented and stays in the tree but is not
 // wired into SystemManager by default - the I2S DMA, DAC, ADC, and

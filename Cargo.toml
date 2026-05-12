@@ -3,7 +3,20 @@ resolver = "2"
 members = [
     "app-core",
     "drivers",
-    "firmware",
+    "firmware-hal",
+    "firmware-s3",
+    "firmware-c6",
+]
+# firmware-c6 is excluded from default-members so `cargo build
+# --workspace` at the root (which runs under the `esp` Xtensa
+# toolchain) doesn't try to compile a RISC-V target with the wrong
+# toolchain. Build it explicitly from inside firmware-c6/ - its own
+# rust-toolchain.toml switches rustup to stable for that directory.
+default-members = [
+    "app-core",
+    "drivers",
+    "firmware-hal",
+    "firmware-s3",
 ]
 
 # Shared dependency versions - single source of truth to avoid mismatches.

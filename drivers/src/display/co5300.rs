@@ -45,8 +45,19 @@ use super::qspi::QspiWrite;
 pub const WIDTH:  u16 = 410;
 pub const HEIGHT: u16 = 502;
 
-/// Framebuffer size in bytes (RGB565, 2 bytes per pixel).
+/// Framebuffer size in bytes for a full-panel buffer (RGB565, 2 bytes per pixel).
+///
+/// Callers that don't have room for a full-panel buffer (e.g. ESP32-C6, no PSRAM)
+/// can pass a smaller buffer to [`CO5300::new`] as long as its length is a whole
+/// number of full panel rows (`WIDTH * 2` bytes each). See [`fb_bytes_for_rows`].
 pub const FB_BYTES: usize = WIDTH as usize * HEIGHT as usize * 2;
+
+/// Compute the framebuffer byte count for a partial-height buffer covering
+/// the top `rows` rows of the panel. Use this to size a partial FB at the
+/// call site without hand-multiplying.
+pub const fn fb_bytes_for_rows(rows: u16) -> usize {
+    WIDTH as usize * rows as usize * 2
+}
 
 /// Column / row offsets applied by this panel inside the CO5300 frame buffer.
 const COL_OFFSET: u16 = 22;
@@ -94,10 +105,20 @@ pub enum Rotation {
 /// CO5300 driver. Generic over the QSPI bus `B` and reset pin `RST`.
 ///
 /// `'fb` is the lifetime of the caller-provided framebuffer slice.
+///
+/// The framebuffer can cover the full panel ([`FB_BYTES`]) or only the top
+/// `N` rows ([`fb_bytes_for_rows`]). When partial, all FB-side operations
+/// clip to the buffer's row count; the panel area outside the buffer is
+/// simply never written by this driver. Useful for chips without PSRAM
+/// that can't spare a full 402 KB.
 pub struct CO5300<'fb, B, RST> {
     bus:         B,
     reset:       RST,
     framebuffer: &'fb mut [u8],
+    /// Number of full panel rows that fit in `framebuffer`. Always
+    /// `<= HEIGHT` and `framebuffer.len() == fb_rows * WIDTH * 2`.
+    /// FB-side bounds checks use this instead of `HEIGHT`.
+    fb_rows:     u16,
 }
 
 // ---- Init / power / config - all async (bus I/O) ----------------------------
@@ -105,11 +126,32 @@ pub struct CO5300<'fb, B, RST> {
 impl<'fb, B: QspiWrite, RST: OutputPin> CO5300<'fb, B, RST> {
     /// Create a new driver.
     ///
-    /// `framebuffer` must be exactly [`FB_BYTES`] bytes long and should be
-    /// placed in PSRAM on ESP32-S3 via `#[link_section = ".ext_ram.bss"]`.
+    /// `framebuffer` length must be a whole number of panel rows
+    /// (`WIDTH * 2` bytes each) and at most [`FB_BYTES`] (the full panel).
+    /// A full-panel buffer should be placed in PSRAM on ESP32-S3 via
+    /// `#[link_section = ".ext_ram.bss"]`; a partial buffer fits in
+    /// internal SRAM (use [`fb_bytes_for_rows`] to size it).
     pub fn new(bus: B, reset: RST, framebuffer: &'fb mut [u8]) -> Self {
-        assert_eq!(framebuffer.len(), FB_BYTES, "framebuffer must be WIDTH*HEIGHT*2 bytes");
-        Self { bus, reset, framebuffer }
+        let row_bytes = WIDTH as usize * 2;
+        assert!(
+            framebuffer.len().is_multiple_of(row_bytes),
+            "framebuffer must be a whole number of rows (multiple of WIDTH * 2 bytes)",
+        );
+        assert!(
+            framebuffer.len() <= FB_BYTES,
+            "framebuffer must be at most FB_BYTES bytes (the full panel)",
+        );
+        let fb_rows = (framebuffer.len() / row_bytes) as u16;
+        Self { bus, reset, framebuffer, fb_rows }
+    }
+
+    /// Number of panel rows covered by this driver's framebuffer.
+    ///
+    /// `fb_rows == HEIGHT` for a full-panel buffer; smaller for a partial
+    /// buffer. Use this when computing what region of the FB to fill /
+    /// flush from caller code.
+    pub fn fb_rows(&self) -> u16 {
+        self.fb_rows
     }
 
     // ---- Reset helpers (caller provides delays via Timer::after) --------
@@ -201,9 +243,9 @@ impl<'fb, B: QspiWrite, RST: OutputPin> CO5300<'fb, B, RST> {
     /// down to the nearest even row and `y1` is rounded up, so the band
     /// we actually push always covers the caller's requested range.
     pub async fn flush_rows(&mut self, y0: u16, y1: u16) {
-        if y1 <= y0 || y0 >= HEIGHT { return; }
+        if y1 <= y0 || y0 >= self.fb_rows { return; }
         let y0 = y0 & !1;
-        let y1 = ((y1 + 1) & !1).min(HEIGHT);
+        let y1 = ((y1 + 1) & !1).min(self.fb_rows);
         let h  = y1 - y0;
         self.set_addr_window(0, y0, WIDTH, h).await;
         let stride = WIDTH as usize * 2;
@@ -273,7 +315,7 @@ impl<'fb, B, RST> CO5300<'fb, B, RST> {
 
     /// Write a single pixel to the framebuffer.
     pub fn draw_pixel(&mut self, x: u16, y: u16, color: u16) {
-        if x < WIDTH && y < HEIGHT {
+        if x < WIDTH && y < self.fb_rows {
             let idx = (y as usize * WIDTH as usize + x as usize) * 2;
             self.framebuffer[idx]     = (color >> 8) as u8;
             self.framebuffer[idx + 1] = (color & 0xFF) as u8;
@@ -285,7 +327,10 @@ impl<'fb, B, RST> CO5300<'fb, B, RST> {
 
 impl<'fb, B, RST> OriginDimensions for CO5300<'fb, B, RST> {
     fn size(&self) -> Size {
-        Size::new(WIDTH as u32, HEIGHT as u32)
+        // Report the actual FB area to embedded-graphics so its clipping
+        // and bounding-box queries reflect what the driver can actually
+        // render. For a full-panel FB this is still WIDTH x HEIGHT.
+        Size::new(WIDTH as u32, self.fb_rows as u32)
     }
 }
 
@@ -303,7 +348,7 @@ impl<'fb, B, RST> DrawTarget for CO5300<'fb, B, RST> {
             if pt.x >= 0
                 && pt.y >= 0
                 && pt.x < WIDTH  as i32
-                && pt.y < HEIGHT as i32
+                && pt.y < self.fb_rows as i32
             {
                 let raw = ((color.r() as u16) << 11)
                     | ((color.g() as u16) << 5)
@@ -335,7 +380,7 @@ impl<'fb, B, RST> DrawTarget for CO5300<'fb, B, RST> {
 
         // Completely outside the framebuffer - nothing to draw and the
         // source iterator can simply be dropped.
-        if ax1 <= 0 || ay1 <= 0 || ax0 >= WIDTH as i32 || ay0 >= HEIGHT as i32 {
+        if ax1 <= 0 || ay1 <= 0 || ax0 >= WIDTH as i32 || ay0 >= self.fb_rows as i32 {
             return Ok(());
         }
 
@@ -343,7 +388,7 @@ impl<'fb, B, RST> DrawTarget for CO5300<'fb, B, RST> {
         let cx0 = ax0.max(0);
         let cy0 = ay0.max(0);
         let cx1 = ax1.min(WIDTH  as i32);
-        let cy1 = ay1.min(HEIGHT as i32);
+        let cy1 = ay1.min(self.fb_rows as i32);
 
         // Count of source pixels to skip on each side of the clip. These
         // are always >= 0 because of the .max(0) / .min(...) clamps.

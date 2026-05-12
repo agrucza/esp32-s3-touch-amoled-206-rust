@@ -1,0 +1,63 @@
+[package]
+name    = "firmware-c6"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name  = "firmware-c6"
+path  = "src/main.rs"
+test  = false
+bench = false
+
+# Firmware crate for the ESP32-C6-Touch-AMOLED-2.06 board.
+#
+# Bring-up is incremental and mirrors the S3 init structure in `firmware/`:
+# board.rs (pin map), display_hal.rs (QSPI bus), system/* (subsystem init).
+# Driver features are pulled in piecewise as each subsystem comes online.
+
+[dependencies]
+# --- Espressif bootloader descriptor (required by espflash to verify the image) ---
+esp-bootloader-esp-idf = { version = "0.5.0", features = ["esp32c6"] }
+
+# --- Espressif HAL ---
+esp-hal = { version = "1.1.0-rc.0", features = [
+    "esp32c6",
+    "unstable",     # required for many APIs in 1.x
+] }
+esp-rtos = { version = "0.3.0", features = [
+    "esp32c6",
+    "embassy",  # enables the async executor and time driver
+] }
+esp-backtrace = { version = "0.19.0", features = [
+    "esp32c6",
+    "panic-handler",
+    "println",
+] }
+esp-println = { version = "0.17.0", features = [
+    "esp32c6",
+    "log-04",           # bridges esp-println to the `log` 0.4 crate
+] }
+
+# --- Embassy async runtime ---
+embassy-executor = { version = "0.10" }
+embassy-time     = { version = "0.5.1" }
+
+# --- embedded-hal traits (needed to call drivers crate APIs generically) ---
+embedded-hal = { workspace = true }
+
+# --- Local crates ---
+# Pulled in piecewise as each peripheral is brought up.
+# `default-features = false` disables the drivers crate's `defmt`
+# feature; firmware-c6 uses esp-println / log, not defmt.
+drivers      = { path = "../drivers", default-features = false, features = ["pmu", "display"] }
+firmware-hal = { path = "../firmware-hal" }
+
+# --- Internal-SRAM heap allocator ---
+# The C6 has no PSRAM, so the heap lives in HP SRAM. We use a small heap
+# (sized in main.rs via `heap_allocator!`) just to allocate the display
+# framebuffer with the same `Vec::leak()` pattern the S3 firmware uses
+# (it allocates a 402 KB FB in PSRAM there).
+esp-alloc = "0.10.0"
+
+# --- Logging ---
+log = { version = "0.4.29", default-features = false }

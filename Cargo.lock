@@ -864,6 +864,7 @@ dependencies = [
  "cfg-if",
  "document-features",
  "esp-metadata-generated",
+ "esp32c6",
  "esp32s3",
 ]
 
@@ -1004,7 +1005,36 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5baebc0774151f905a1a2cc41989300b1e6fbb29aff0ceffa1064fdd3088d582"
 
 [[package]]
-name = "firmware"
+name = "firmware-c6"
+version = "0.1.0"
+dependencies = [
+ "drivers",
+ "embassy-executor",
+ "embassy-time",
+ "embedded-hal 1.0.0",
+ "esp-alloc",
+ "esp-backtrace",
+ "esp-bootloader-esp-idf",
+ "esp-hal",
+ "esp-println",
+ "esp-rtos",
+ "firmware-hal",
+ "log",
+]
+
+[[package]]
+name = "firmware-hal"
+version = "0.1.0"
+dependencies = [
+ "drivers",
+ "embassy-time",
+ "embedded-hal 1.0.0",
+ "esp-hal",
+ "log",
+]
+
+[[package]]
+name = "firmware-s3"
 version = "0.1.0"
 dependencies = [
  "app-core",
@@ -1026,6 +1056,7 @@ dependencies = [
  "esp-println",
  "esp-rtos",
  "esp-storage",
+ "firmware-hal",
  "heapless 0.9.2",
  "littlefs-rust",
  "log",
