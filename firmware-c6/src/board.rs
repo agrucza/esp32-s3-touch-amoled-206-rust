@@ -2,9 +2,10 @@
 //! Waveshare ESP32-C6-Touch-AMOLED-2.06 (16MB Flash, no PSRAM, no SD).
 //!
 //! Source: V1.0 schematic, audited block-by-block on 2026-05-12.
-//! Mirrors the structure of firmware/src/board.rs (S3 variant). Where a
-//! signal exists on both boards, the constant name is identical so
-//! shared code can address either board with the same identifier.
+//! Mirrors the structure of `firmware-s3/src/board.rs`. Where a signal
+//! exists across multiple board variants, the constant name is kept
+//! identical so shared code can address any variant with the same
+//! identifier.
 //!
 //! These constants are a reference table for the hardware layout. They
 //! are intentionally kept feature-complete even when nothing currently

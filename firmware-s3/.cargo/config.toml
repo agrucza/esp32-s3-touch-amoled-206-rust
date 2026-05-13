@@ -3,8 +3,7 @@ target = "xtensa-esp32s3-none-elf"
 
 [target.xtensa-esp32s3-none-elf]
 # `--partition-table` writes our custom layout to 0x8000 on every
-# flash. When the C6 port lands, swap to partitions-c6.csv under
-# a separate target block.
+# flash. The C6 variant has its own CSV in `firmware-c6/.cargo/config.toml`.
 runner = "espflash flash --monitor --partition-table partitions-s3.csv"
 rustflags = [
     # Pull in esp-hal's linker script, which sets up all memory sections.

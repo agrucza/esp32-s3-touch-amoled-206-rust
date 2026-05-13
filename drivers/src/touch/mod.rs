@@ -26,7 +26,10 @@ pub const ADDR: u8 = 0x38;
 const REG_TD_STATUS: u8 = 0x02;
 const REG_P1_XH:     u8 = 0x03;
 const REG_CHIP_ID:   u8 = 0xA3;
-const REG_POWER_MODE: u8 = 0xA5;
+/// Power-mode register - write [`PowerMode`] here. Pub so callers
+/// with raw I²C bus access (e.g. a sync-from-sleep handler that can't
+/// dispatch to the touch task) can flip the chip directly.
+pub const REG_POWER_MODE: u8 = 0xA5;
 const REG_FW_VER:    u8 = 0xA6;
 
 /// Power / operating mode of the FT3168. Written to

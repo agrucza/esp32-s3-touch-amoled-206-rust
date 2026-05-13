@@ -42,7 +42,7 @@ use embedded_graphics::{
 
 use crate::events::SystemEvent;
 use crate::ui::{fonts, layout, theme};
-use crate::ui::types::{Action, Screen, StopwatchState, SystemData};
+use crate::ui::types::{Action, RenderCtx, Screen, StopwatchState, SystemData};
 use crate::ui::widgets::{
     app_chrome_back_hit, chamfered_button, chamfered_panel, draw_app_chrome,
     tag_label, ButtonVariant, APP_CONTENT_TOP, NOTCH, TAG_LABEL_H,
@@ -91,7 +91,12 @@ impl StopwatchScreen {
 }
 
 impl Screen for StopwatchScreen {
-    fn render<D: DrawTarget<Color = Rgb565>>(&self, display: &mut D, data: &SystemData) {
+    fn render<D: DrawTarget<Color = Rgb565>>(
+        &self,
+        display: &mut D,
+        data: &SystemData,
+        _ctx: &RenderCtx,
+    ) {
         draw_app_chrome(display, data, "STOPWATCH", TELEMETRY, ACCENT);
 
         // -- Readout panel -------------------------------------------------

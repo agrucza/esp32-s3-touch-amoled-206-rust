@@ -21,6 +21,10 @@ embedded-hal       = { workspace = true }
 embedded-hal-async = { workspace = true }
 embedded-graphics-core = { workspace = true }
 embedded-sdmmc    = { version = "0.8.2", optional = true }
+# log macros are zero-cost when no logger is installed - safe to depend on
+# from a no_std driver. Used to surface unrecoverable bus errors that would
+# otherwise be swallowed by `.ok()` in the synchronous flush paths.
+log                = { workspace = true }
 
 [dev-dependencies]
 # Fake SPI/I2C buses for unit-testing drivers without hardware.

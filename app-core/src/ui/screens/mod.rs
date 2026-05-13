@@ -10,7 +10,7 @@ pub mod timer;
 use embedded_graphics::{draw_target::DrawTarget, pixelcolor::Rgb565};
 
 use crate::events::SystemEvent;
-use super::types::{Action, Screen, ScreenId, SystemData};
+use super::types::{Action, DirtyRegion, RenderCtx, Screen, ScreenId, SystemData};
 
 /// Enum-based screen dispatch - avoids dynamic dispatch and heap allocation.
 ///
@@ -73,16 +73,21 @@ impl ActiveScreen {
         Self::AppDrawer(app_drawer::AppDrawerScreen::new(previous))
     }
 
-    pub fn render<D: DrawTarget<Color = Rgb565>>(&self, display: &mut D, data: &SystemData) {
+    pub fn render<D: DrawTarget<Color = Rgb565>>(
+        &self,
+        display: &mut D,
+        data: &SystemData,
+        ctx: &RenderCtx,
+    ) {
         match self {
-            Self::Clock(s) => s.render(display, data),
-            Self::Stopwatch(s) => s.render(display, data),
-            Self::Timer(s) => s.render(display, data),
-            Self::Alarm(s) => s.render(display, data),
-            Self::Settings(s) => s.render(display, data),
-            Self::QuickAccess(s) => s.render(display, data),
-            Self::AppDrawer(s) => s.render(display, data),
-            Self::Notifications(s) => s.render(display, data),
+            Self::Clock(s) => s.render(display, data, ctx),
+            Self::Stopwatch(s) => s.render(display, data, ctx),
+            Self::Timer(s) => s.render(display, data, ctx),
+            Self::Alarm(s) => s.render(display, data, ctx),
+            Self::Settings(s) => s.render(display, data, ctx),
+            Self::QuickAccess(s) => s.render(display, data, ctx),
+            Self::AppDrawer(s) => s.render(display, data, ctx),
+            Self::Notifications(s) => s.render(display, data, ctx),
         }
     }
 
@@ -122,6 +127,37 @@ impl ActiveScreen {
             Self::QuickAccess(s) => s.on_unmount(),
             Self::AppDrawer(s) => s.on_unmount(),
             Self::Notifications(s) => s.on_unmount(),
+        }
+    }
+
+    /// Ask the active screen which regions need re-rendering this frame.
+    /// Forwarded to the variant's [`Screen::dirty_rects`].
+    pub fn dirty_rects(&self, data: &SystemData) -> DirtyRegion {
+        match self {
+            Self::Clock(s) => s.dirty_rects(data),
+            Self::Stopwatch(s) => s.dirty_rects(data),
+            Self::Timer(s) => s.dirty_rects(data),
+            Self::Alarm(s) => s.dirty_rects(data),
+            Self::Settings(s) => s.dirty_rects(data),
+            Self::QuickAccess(s) => s.dirty_rects(data),
+            Self::AppDrawer(s) => s.dirty_rects(data),
+            Self::Notifications(s) => s.dirty_rects(data),
+        }
+    }
+
+    /// Tell the active screen the frame was rendered with `data`, so it
+    /// can update its "last rendered" snapshot. Forwarded to the
+    /// variant's [`Screen::clear_dirty`].
+    pub fn clear_dirty(&mut self, data: &SystemData) {
+        match self {
+            Self::Clock(s) => s.clear_dirty(data),
+            Self::Stopwatch(s) => s.clear_dirty(data),
+            Self::Timer(s) => s.clear_dirty(data),
+            Self::Alarm(s) => s.clear_dirty(data),
+            Self::Settings(s) => s.clear_dirty(data),
+            Self::QuickAccess(s) => s.clear_dirty(data),
+            Self::AppDrawer(s) => s.clear_dirty(data),
+            Self::Notifications(s) => s.clear_dirty(data),
         }
     }
 

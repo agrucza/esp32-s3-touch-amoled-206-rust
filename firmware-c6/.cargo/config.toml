@@ -2,11 +2,12 @@
 target = "riscv32imac-unknown-none-elf"
 
 [target.riscv32imac-unknown-none-elf]
-# No --partition-table flag yet - espflash will synthesise a
-# single-app layout that's good enough for the smoke test. When
-# persistent storage lands on C6, add `partitions-c6.csv` next to
-# the S3 one and pass it here, matching firmware/.cargo/config.toml.
-runner = "espflash flash --monitor"
+# `--partition-table` writes our custom layout to 0x8000 on every flash.
+# The CSV reserves a `storage` partition for future LittleFS use; the
+# smoke test doesn't read or write it, but having the layout pinned now
+# means later persistence work can land without a re-flash that would
+# wipe stored data.
+runner = "espflash flash --monitor --partition-table partitions-c6.csv"
 rustflags = [
     # Pull in esp-hal's linker script, which sets up all memory sections.
     "-C", "link-arg=-Tlinkall.x",

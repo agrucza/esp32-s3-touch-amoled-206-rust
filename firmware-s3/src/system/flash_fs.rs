@@ -17,12 +17,16 @@
 //! partition table at runtime (yet), so drift between the two
 //! lands writes in the wrong region.
 //!
-//! | Board | Start         | Size      | Blocks | Partition CSV                                      |
-//! |-------|---------------|-----------|--------|----------------------------------------------------|
-//! | S3    | `0x0081_0000` | 23.875 MB | 6112   | `firmware/partitions-s3.csv`                       |
-//! | C6    | TBD           | TBD       | TBD    | `firmware/partitions-c6.csv` (once C6 work starts) |
+//! | Board | Start         | Size      | Blocks | Partition CSV                            |
+//! |-------|---------------|-----------|--------|------------------------------------------|
+//! | S3    | `0x0081_0000` | 23.875 MB | 6112   | `firmware-s3/partitions-s3.csv`          |
+//! | C6    | `0x0041_0000` | 11.875 MB | 3040   | `firmware-c6/partitions-c6.csv`          |
 //!
-//! Block size is the flash sector size (4 KB) on both boards.
+//! Block size is the flash sector size (4 KB) across all board variants.
+//! The C6 firmware crate doesn't currently mount this filesystem - the
+//! CSV reserves the region for the eventual port, but the Rust-side
+//! constants below stay gated to `board-s3` until persistence work
+//! actually lands in firmware-c6.
 //!
 //! On S3 the last 64 KB (`0x01FF_0000..0x0200_0000`) is a
 //! `coredump` partition. The factory firmware lives below us at
@@ -64,8 +68,9 @@ use crate::system::fs::{unwrap_blob, wrap_blob};
 // -- Region geometry --------------------------------------------------------
 
 // Board-specific region constants. Exactly one `board-*` Cargo
-// feature must be active; the CSV at `firmware/partitions-<board>.csv`
-// declares the matching `storage` partition.
+// feature must be active; the CSV at
+// `firmware-<board>/partitions-<board>.csv` declares the matching
+// `storage` partition.
 
 #[cfg(not(any(feature = "board-s3", feature = "board-c6")))]
 compile_error!("no board feature enabled - pick exactly one of board-s3 / board-c6");
@@ -73,8 +78,15 @@ compile_error!("no board feature enabled - pick exactly one of board-s3 / board-
 #[cfg(all(feature = "board-s3", feature = "board-c6"))]
 compile_error!("board-s3 and board-c6 are mutually exclusive");
 
+// The CSV exists (`firmware-c6/partitions-c6.csv`, storage at
+// 0x0041_0000, 11.875 MB). What's missing is the Rust-side port -
+// firmware-c6 is its own crate and doesn't import this module yet, so
+// the C6 constants haven't been needed. If a future code path *does*
+// need them under `feature = "board-c6"`, drop this compile_error and
+// add `pub const FLASH_FS_START: u32 = 0x0041_0000;` /
+// `pub const FLASH_FS_SIZE: u32 = 0x00BE_0000;` below.
 #[cfg(feature = "board-c6")]
-compile_error!("board-c6 partition layout not wired yet - add partitions-c6.csv and define FLASH_FS_START / FLASH_FS_SIZE");
+compile_error!("flash_fs.rs is S3-only today - C6 persistence lands when firmware-c6 grows past the smoke test");
 
 /// Start of the LittleFS region, in bytes from the base of flash.
 /// Sector-aligned (4 KB).

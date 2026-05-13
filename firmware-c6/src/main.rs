@@ -16,7 +16,7 @@ use esp_hal::{
     time::Rate,
     timer::timg::TimerGroup,
 };
-use firmware_hal::display as display_hal;
+use firmware_hal::display::{self as display_hal, TILE_H};
 
 esp_bootloader_esp_idf::esp_app_desc!();
 
@@ -35,11 +35,10 @@ const _: () = {
     assert!(board::LCD_RESET == 11, "board::LCD_RESET must match the GPIO11 binding below");
 };
 
-/// Number of panel rows our partial framebuffer covers.
-/// 40 rows * 410 cols * 2 bytes/pixel = 32,800 bytes.
-/// Smoke-test size; will be retuned (likely to LVGL's ~50 rows) once we
-/// move to the long-term partial-FB rendering strategy.
-const FB_ROWS: u16 = 40;
+/// Number of panel rows our partial framebuffer covers. Pulled from
+/// firmware-hal so every firmware variant uses the same tile size; on
+/// the 410-wide panel that's 50 * 410 * 2 = 41,000 bytes in internal SRAM.
+const FB_ROWS: u16 = TILE_H;
 
 /// Expected I2C devices on the C6 shared bus.
 /// Used at scan time to flag any device that doesn't ACK.
@@ -159,13 +158,12 @@ async fn main(_spawner: embassy_executor::Spawner) {
     scan_and_report(&mut i2c, "Bus scan:");
 
     // -- Display bring-up (partial framebuffer, smoke test) ---------------
-    // Allocate the partial FB in internal SRAM via the esp-alloc heap set
-    // up above. `Vec::leak()` gives us a `&'static mut [u8]` we can hand
-    // to the CO5300 driver, mirroring how the S3 firmware leaks a Vec
-    // out of its PSRAM allocator.
-    let fb_bytes = display_hal::fb_bytes_for_rows(FB_ROWS);
-    let fb: &'static mut [u8] = alloc::vec![0u8; fb_bytes].leak();
-    log::info!("Display: allocated {} byte FB ({} rows)", fb_bytes, FB_ROWS);
+    // Framebuffer lives in firmware-hal's static `FRAMEBUFFER` (internal
+    // SRAM BSS). Every firmware variant takes the FB from the same
+    // entrypoint, so the display path stays free of per-board allocator
+    // divergence.
+    let fb: &'static mut [u8] = display_hal::take_framebuffer();
+    log::info!("Display: allocated {} byte FB ({} rows)", fb.len(), FB_ROWS);
 
     let mut display = display_hal::init_display(
         p.SPI2,
@@ -182,10 +180,12 @@ async fn main(_spawner: embassy_executor::Spawner) {
     .await;
 
     // Fill the entire FB region (top FB_ROWS rows of the panel) with red
-    // and push it to the panel. If everything is wired correctly we
-    // should see a red stripe across the top of the screen.
+    // and push it to the panel. `tile_y` defaults to 0 so FB row 0 maps
+    // straight onto panel row 0 - we get a red stripe across the top.
+    // When the C6 grows real UI it'll use the same tile loop as the S3
+    // and walk `tile_y` from 0 to HEIGHT in steps of TILE_H.
     display.fill_solid(0, 0, display_hal::WIDTH, FB_ROWS, color::RED);
-    display.flush_rows(0, FB_ROWS).await;
+    display.flush_tile().await;
     log::info!("Display: pushed {} rows of solid red - smoke test complete", FB_ROWS);
 
     // Heartbeat so we can see the firmware is alive after init.

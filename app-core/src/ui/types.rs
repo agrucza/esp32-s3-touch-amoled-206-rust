@@ -1,6 +1,11 @@
 //! Core UI types - Screen trait, actions, and shared data.
 
-use embedded_graphics::{draw_target::DrawTarget, pixelcolor::Rgb565};
+use embedded_graphics::{
+    draw_target::DrawTarget,
+    geometry::{Point, Size},
+    pixelcolor::Rgb565,
+    primitives::Rectangle,
+};
 
 // Re-export self-test types so screens can pull them from a single
 // place alongside the other UI data structs below. `pub use` also
@@ -716,6 +721,131 @@ pub struct SystemData {
 
 // -- Screen trait -------------------------------------------------------------
 
+// -- Dirty-region tracking ---------------------------------------------------
+
+/// Maximum number of explicit dirty rectangles a screen can declare
+/// per frame before the renderer falls back to a full redraw. Sized
+/// for the worst case in the current UI (clock face: telemetry,
+/// hour digits, minute digits, meta row, bottom tiles) without
+/// burning stack for a wider list.
+pub const MAX_DIRTY_RECTS: usize = 6;
+
+/// What part of the screen needs to be re-rendered this frame.
+///
+/// The renderer walks the panel in tile-sized horizontal bands. Without
+/// per-screen invalidation it has to render every tile in case something
+/// changed inside it (and then hashes the result to decide whether to push
+/// the tile over QSPI). That CPU cost is the same whether anything changed
+/// or not, and the per-tile widget-tree walk dominates render time.
+///
+/// `DirtyRegion` lets a screen narrow that down: it returns the rectangles
+/// where its state actually changed since the last frame, and the renderer
+/// renders only the tiles those rectangles touch. A screen that doesn't
+/// override [`Screen::dirty_rects`] keeps the safe default of [`FullScreen`]
+/// and the renderer behaves exactly as it did before invalidation existed.
+///
+/// [`FullScreen`]: DirtyRegion::FullScreen
+#[derive(Debug, Clone)]
+pub enum DirtyRegion {
+    /// Everything is dirty - render every tile. Safe fallback used by
+    /// the trait's default impl and by the renderer at wake / screen-
+    /// transition (where the panel's GRAM may not match anything we've
+    /// drawn yet).
+    FullScreen,
+    /// A short list of dirty rectangles. Empty means nothing changed
+    /// and no tiles get rendered or pushed.
+    Rects(heapless::Vec<Rectangle, MAX_DIRTY_RECTS>),
+}
+
+impl DirtyRegion {
+    /// Empty region - nothing changed, skip the frame entirely.
+    pub fn empty() -> Self {
+        Self::Rects(heapless::Vec::new())
+    }
+
+    /// Convenience: one-rect region.
+    pub fn rect(x: i32, y: i32, w: u32, h: u32) -> Self {
+        let mut v = heapless::Vec::new();
+        let _ = v.push(Rectangle::new(Point::new(x, y), Size::new(w, h)));
+        Self::Rects(v)
+    }
+
+    /// True when the region has no rectangles.
+    pub fn is_empty(&self) -> bool {
+        matches!(self, Self::Rects(v) if v.is_empty())
+    }
+
+    /// Add a rectangle to the region. Overflows past
+    /// [`MAX_DIRTY_RECTS`] are absorbed by switching to [`FullScreen`]
+    /// so the renderer stays correct without the screen having to
+    /// remember the cap.
+    ///
+    /// [`FullScreen`]: DirtyRegion::FullScreen
+    pub fn add(&mut self, rect: Rectangle) {
+        match self {
+            Self::FullScreen => {}
+            Self::Rects(v) => {
+                if v.push(rect).is_err() {
+                    *self = Self::FullScreen;
+                }
+            }
+        }
+    }
+}
+
+// -- Render context ----------------------------------------------------------
+
+/// Per-call context handed to [`Screen::render`].
+///
+/// The renderer walks the panel in horizontal tiles - one render call
+/// fires per tile. `RenderCtx` tells the screen which slice of the
+/// panel its current call is targeting, so a screen that knows the
+/// y-range of every widget it draws can skip widget setup entirely
+/// for widgets outside the current tile.
+///
+/// Screens that don't care (most: clock, stopwatch, dial-shaped
+/// screens) can ignore the field entirely; the driver still clips
+/// per-pixel inside its draw methods. Screens with virtualizable lists
+/// (settings, alarm list, future scrollable views) use it to skip the
+/// per-row format-string / icon-lookup / iterator-construction work
+/// for rows that fall off this tile.
+///
+/// Wrapping the parameters in a struct keeps the signature
+/// forward-compatible: adding new fields (e.g. `is_scrolling`,
+/// `panel_dims`) later won't break every screen impl.
+#[derive(Debug, Clone, Copy)]
+pub struct RenderCtx {
+    /// Panel-y of the top row of the current tile.
+    pub tile_y: u16,
+    /// Number of rows in the current tile. Equals
+    /// `firmware_hal::display::TILE_H` for every full tile and is
+    /// smaller for the short final tile at the bottom of the panel.
+    pub tile_h: u16,
+}
+
+impl RenderCtx {
+    /// A "render the whole panel" context. Useful for one-shot full
+    /// renders (host tests, full-FB future fallback) where there is
+    /// no tile loop driving the call.
+    pub fn full_panel(panel_h: u16) -> Self {
+        Self { tile_y: 0, tile_h: panel_h }
+    }
+
+    /// Inclusive-exclusive y-range covered by this tile.
+    pub fn y_range(&self) -> (i32, i32) {
+        (self.tile_y as i32, self.tile_y as i32 + self.tile_h as i32)
+    }
+
+    /// True if the rectangle `[y0, y1)` overlaps this tile's y-range.
+    /// Cheap helper for "should I render this widget at all?" checks.
+    pub fn intersects_y(&self, y0: i32, y1: i32) -> bool {
+        let (t0, t1) = self.y_range();
+        y1 > t0 && y0 < t1
+    }
+}
+
+// -- Screen trait -------------------------------------------------------------
+
 /// Trait that all UI screens implement.
 ///
 /// Screens are stateful - they can track animations, scroll positions,
@@ -740,10 +870,23 @@ pub struct SystemData {
 /// screens only override what they need - `render` and usually
 /// `on_event` are the only methods most screens have to provide.
 ///
+/// ## Partial rendering
+///
+/// [`dirty_rects`] and [`clear_dirty`] together let a screen tell the
+/// renderer "only these regions changed since I was last rendered".
+/// Default impls return [`DirtyRegion::FullScreen`] and a no-op
+/// respectively, so screens that don't opt in render exactly as before
+/// (every tile, every frame). Screens that do opt in track their own
+/// "last rendered" snapshot (e.g. last second value, last alarm
+/// string) and emit one rect per field whose value differs from the
+/// snapshot.
+///
 /// [`on_mount`]: Screen::on_mount
 /// [`on_unmount`]: Screen::on_unmount
 /// [`render`]: Screen::render
 /// [`on_event`]: Screen::on_event
+/// [`dirty_rects`]: Screen::dirty_rects
+/// [`clear_dirty`]: Screen::clear_dirty
 pub trait Screen {
     /// Called once when this screen becomes active, before the first
     /// render. Read anything that needs to be loaded on open here.
@@ -753,11 +896,55 @@ pub trait Screen {
     /// dropped. Release resources or persist state here.
     fn on_unmount(&mut self) {}
 
-    /// Render the screen to the display. Called every frame.
-    fn render<D: DrawTarget<Color = Rgb565>>(&self, display: &mut D, data: &SystemData);
+    /// Render the screen to the display. Called once per dirty tile
+    /// per frame (so a screen with `dirty_rects` returning `FullScreen`
+    /// on an 11-tile panel sees 11 `render` calls per frame).
+    ///
+    /// `ctx` tells the screen which horizontal band of the panel this
+    /// call is targeting. Screens with virtualizable list contents
+    /// (settings index, alarm list, ...) use `ctx.intersects_y(...)`
+    /// to skip the per-row format/icon-lookup work for rows entirely
+    /// outside this tile. Screens without that optimization opportunity
+    /// (clock face, dial-shaped views) ignore the field and let the
+    /// driver's per-pixel clip handle out-of-tile writes.
+    fn render<D: DrawTarget<Color = Rgb565>>(
+        &self,
+        display: &mut D,
+        data: &SystemData,
+        ctx: &RenderCtx,
+    );
 
     /// Handle a system event. Return an Action to tell the manager what to do.
     /// `data` is mutable so screens can update shared persistent state
     /// (stopwatch, timer) directly.
     fn on_event(&mut self, event: &SystemEvent, data: &mut SystemData) -> Action;
+
+    /// Compare the screen's own "last rendered" snapshot against the
+    /// current [`SystemData`] and return the regions where the visible
+    /// output would differ from what's already on the panel.
+    ///
+    /// The default impl returns [`DirtyRegion::FullScreen`] - safe, but
+    /// gives up the per-tile-skip optimization. Screens that want the
+    /// optimization should track per-field snapshot state and return a
+    /// list of rectangles describing what would change.
+    ///
+    /// Called with `&self` so it cannot mutate the snapshot - mutation
+    /// happens in [`clear_dirty`] after the renderer has actually
+    /// re-drawn.
+    ///
+    /// [`clear_dirty`]: Screen::clear_dirty
+    fn dirty_rects(&self, _data: &SystemData) -> DirtyRegion {
+        DirtyRegion::FullScreen
+    }
+
+    /// Called by the renderer immediately after a frame has been
+    /// flushed. The screen should update its "last rendered" snapshot
+    /// to match `data` so the next [`dirty_rects`] call has a fresh
+    /// baseline to compare against.
+    ///
+    /// Default impl is a no-op (matches the default
+    /// `dirty_rects = FullScreen`: no snapshot to maintain).
+    ///
+    /// [`dirty_rects`]: Screen::dirty_rects
+    fn clear_dirty(&mut self, _data: &SystemData) {}
 }

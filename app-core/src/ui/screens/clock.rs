@@ -41,7 +41,7 @@ use u8g2_fonts::FontRenderer;
 
 use crate::events::SystemEvent;
 use crate::ui::{fonts, glyphs, layout, theme};
-use crate::ui::types::{Action, Screen, ScreenId, SystemData};
+use crate::ui::types::{Action, DirtyRegion, RenderCtx, Screen, ScreenId, SystemData};
 use crate::ui::widgets::info_tile;
 
 // -- Geometry ---------------------------------------------------------------
@@ -69,21 +69,137 @@ const HERO_MM_TOP: i32 = HERO_HH_TOP + HERO_STACK_GAP;
 /// Y of the meta row (:SS + LAT/LON) under the MM glyphs.
 const META_Y: i32 = HERO_MM_TOP + 84;
 
+// -- Dirty-region rectangles -------------------------------------------------
+//
+// Each visible block of the watch face maps to one rectangle. When the
+// underlying data (seconds, minutes, hours, date, timer remaining)
+// changes, the corresponding rect is the only thing the renderer has to
+// touch. Rects are padded a few pixels around the visible glyph extent
+// so anti-aliased edges aren't clipped if a font happens to overhang
+// its nominal box.
+
+/// Telemetry strip at the very top: SYS-ID + DOW DD MON.
+const TELEMETRY_RECT: Rectangle = Rectangle::new(
+    Point::new(0, TELE_Y - 8),
+    Size::new(theme::SCREEN_W as u32, 40),
+);
+/// Hero HH glyphs (signal-red, top of the stacked hero block).
+const HERO_HH_RECT: Rectangle = Rectangle::new(
+    Point::new(0, HERO_HH_TOP - 10),
+    Size::new(theme::SCREEN_W as u32, 88),
+);
+/// Hero MM glyphs (bone, directly below HH).
+const HERO_MM_RECT: Rectangle = Rectangle::new(
+    Point::new(0, HERO_MM_TOP - 10),
+    Size::new(theme::SCREEN_W as u32, 88),
+);
+/// Meta row: `:SS` and the LAT/LON readout.
+const META_RECT: Rectangle = Rectangle::new(
+    Point::new(0, META_Y - 8),
+    Size::new(theme::SCREEN_W as u32, 36),
+);
+/// Bottom tile row (alarm + timer info tiles).
+const BOTTOM_RECT: Rectangle = Rectangle::new(
+    Point::new(0, layout::BOTTOM_TILE_Y - 4),
+    Size::new(theme::SCREEN_W as u32, (layout::BOTTOM_TILE_H + 8) as u32),
+);
+
 // -- Screen -----------------------------------------------------------------
 
-pub struct ClockScreen;
+/// Snapshot of the inputs that drive the watch face's visible glyphs.
+/// Held by [`ClockScreen`] from one render to the next so
+/// [`Screen::dirty_rects`] can return only the regions whose underlying
+/// fields actually changed.
+#[derive(Debug, Clone, Copy)]
+struct RenderedSnapshot {
+    second: u8,
+    minute: u8,
+    hour: u8,
+    day: u8,
+    month: u8,
+    /// Timer remaining in whole seconds at last render. The displayed
+    /// timer value ticks at 1 Hz; tracking integer seconds means
+    /// dirty_rects only fires the bottom rect when the visible string
+    /// would change.
+    timer_secs: u64,
+}
+
+pub struct ClockScreen {
+    /// `None` until the first render. Avoids a default snapshot that
+    /// could spuriously match real data and return `Empty` for the
+    /// first dirty_rects call.
+    last: Option<RenderedSnapshot>,
+    /// Sticky: when set, the next `dirty_rects` returns `FullScreen`
+    /// regardless of how `last` compares to current data. Used for
+    /// events that change something not represented in
+    /// `RenderedSnapshot` (AlarmFired changes the alarm-tile value
+    /// without touching seconds; TimerExpired clears the timer tile
+    /// the moment the timer hits zero).
+    force_full_next: bool,
+}
 
 impl ClockScreen {
-    pub fn new() -> Self { Self }
+    pub fn new() -> Self {
+        Self { last: None, force_full_next: false }
+    }
 }
 
 impl Screen for ClockScreen {
-    fn render<D: DrawTarget<Color = Rgb565>>(&self, display: &mut D, data: &SystemData) {
+    fn render<D: DrawTarget<Color = Rgb565>>(
+        &self,
+        display: &mut D,
+        data: &SystemData,
+        _ctx: &RenderCtx,
+    ) {
+        // Clock face widgets are fixed-position; the driver clips
+        // per-pixel for the current tile, so we don't gain anything
+        // from acting on `ctx` here.
         draw_telemetry_strip(display, data);
         draw_swipe_hint(display);
         draw_hero_numerals(display, data);
         draw_meta_row(display, data);
         draw_bottom_tiles(display, data);
+    }
+
+    fn dirty_rects(&self, data: &SystemData) -> DirtyRegion {
+        if self.force_full_next {
+            return DirtyRegion::FullScreen;
+        }
+        let Some(prev) = self.last else {
+            // First frame after construction - we have no snapshot to
+            // diff against, so paint the whole face once.
+            return DirtyRegion::FullScreen;
+        };
+
+        let mut region = DirtyRegion::empty();
+        if prev.second != data.time.second {
+            region.add(META_RECT);
+        }
+        if prev.minute != data.time.minute {
+            region.add(HERO_MM_RECT);
+        }
+        if prev.hour != data.time.hour {
+            region.add(HERO_HH_RECT);
+        }
+        if prev.day != data.time.day || prev.month != data.time.month {
+            region.add(TELEMETRY_RECT);
+        }
+        if prev.timer_secs != data.timer.remaining().as_secs() {
+            region.add(BOTTOM_RECT);
+        }
+        region
+    }
+
+    fn clear_dirty(&mut self, data: &SystemData) {
+        self.last = Some(RenderedSnapshot {
+            second: data.time.second,
+            minute: data.time.minute,
+            hour: data.time.hour,
+            day: data.time.day,
+            month: data.time.month,
+            timer_secs: data.timer.remaining().as_secs(),
+        });
+        self.force_full_next = false;
     }
 
     fn on_event(&mut self, event: &SystemEvent, _data: &mut SystemData) -> Action {
@@ -94,13 +210,14 @@ impl Screen for ClockScreen {
             SystemEvent::TimeUpdated { .. } => Action::Redraw,
             // Discrete state transitions that happen between seconds
             // and would otherwise leave the bottom tiles showing
-            // stale data until the next TimeUpdated:
-            // - AlarmFired: an enabled alarm just rang. The Model
-            //   may snooze it / disable it / advance the next-alarm
-            //   pointer, so re-render the alarm tile.
-            // - TimerExpired: the running timer hit zero and reset
-            //   to Idle, so the timer tile should flip to OFF.
-            SystemEvent::AlarmFired { .. } | SystemEvent::TimerExpired { .. } => Action::Redraw,
+            // stale data until the next TimeUpdated. The
+            // `RenderedSnapshot` doesn't capture the alarm-tile string
+            // or the moment-of-expiry timer flip, so flag a one-shot
+            // full repaint to be safe.
+            SystemEvent::AlarmFired { .. } | SystemEvent::TimerExpired { .. } => {
+                self.force_full_next = true;
+                Action::Redraw
+            }
             // Bottom tiles route to their target apps; everywhere else
             // is a no-op. Quick Access opens via swipe-down-from-top
             // and App Drawer via swipe-up-from-bottom (both routed at

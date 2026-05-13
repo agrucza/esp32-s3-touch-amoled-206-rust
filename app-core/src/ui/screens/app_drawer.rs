@@ -29,7 +29,7 @@ use core::fmt::Write;
 
 use crate::events::{SwipeDir, SystemEvent};
 use crate::ui::{fonts, glyphs, theme};
-use crate::ui::types::{Action, Screen, ScreenId, SystemData};
+use crate::ui::types::{Action, RenderCtx, Screen, ScreenId, SystemData};
 use crate::ui::widgets::{home_indicator, status_bar, tile, STATUS_BAR_H};
 
 // -- Icon dispatch -----------------------------------------------------------
@@ -155,7 +155,12 @@ impl AppDrawerScreen {
 }
 
 impl Screen for AppDrawerScreen {
-    fn render<D: DrawTarget<Color = Rgb565>>(&self, display: &mut D, data: &SystemData) {
+    fn render<D: DrawTarget<Color = Rgb565>>(
+        &self,
+        display: &mut D,
+        data: &SystemData,
+        _ctx: &RenderCtx,
+    ) {
         // Top status bar: HH:MM on the left, signal / BT / battery % on
         // the right, signal-red tint.
         let mut time_buf: heapless::String<8> = heapless::String::new();

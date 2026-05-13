@@ -30,7 +30,8 @@ use embedded_graphics::{
 use crate::events::{SwipeDir, SystemEvent};
 use crate::ui::{fonts, layout, theme};
 use crate::ui::types::{
-    Action, Notification, NotificationSeverity, NotificationSource, Screen, SystemData,
+    Action, Notification, NotificationSeverity, NotificationSource, RenderCtx, Screen,
+    SystemData,
 };
 use crate::ui::widgets::{
     app_chrome_back_hit, app_header_rect, chamfered_panel, handle_scroll_drag, header,
@@ -98,7 +99,12 @@ impl NotificationsScreen {
 }
 
 impl Screen for NotificationsScreen {
-    fn render<D: DrawTarget<Color = Rgb565>>(&self, display: &mut D, data: &SystemData) {
+    fn render<D: DrawTarget<Color = Rgb565>>(
+        &self,
+        display: &mut D,
+        data: &SystemData,
+        ctx: &RenderCtx,
+    ) {
         // Header telemetry shows the live count, capped at xNN
         // (heapless::String<8> covers `x99` plus a comfort margin).
         let mut tele: heapless::String<8> = heapless::String::new();
@@ -146,6 +152,7 @@ impl Screen for NotificationsScreen {
             list_viewport_rect(),
             list_content_h(entries.len()),
             ACCENT,
+            ctx,
             |clipped, scroll| {
                 for (row_idx, n) in entries.iter().rev().enumerate() {
                     render_row(clipped, n, row_idx, scroll);

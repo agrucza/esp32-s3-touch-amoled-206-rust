@@ -26,6 +26,7 @@ use embedded_graphics::{
 };
 
 use crate::events::SystemEvent;
+use crate::ui::types::RenderCtx;
 use crate::ui::{layout, primitives, theme};
 
 /// Width of the scrollbar pill drawn on the right edge of a
@@ -63,6 +64,7 @@ pub fn render_scrolled<D, F>(
     viewport: Rectangle,
     content_h: i32,
     accent: Rgb565,
+    ctx: &RenderCtx,
     body: F,
 )
 where
@@ -79,12 +81,19 @@ where
         - SCROLLBAR_W;
     let bar_y = viewport.top_left.y;
     let bar_h = viewport.size.height as i32;
-    primitives::scrollbar_v(
-        display,
-        bar_x, bar_y, SCROLLBAR_W, bar_h,
-        content_h, viewport.size.height as i32, scroll,
-        accent, theme::STEEL_2,
-    );
+    // Skip the scrollbar entirely when its y-range falls outside the
+    // current tile. For a typical app the scrollbar spans the whole
+    // content viewport (~400 px), so it intersects most tiles - but the
+    // very top tile (status bar / header) and the very bottom tile
+    // (home indicator) usually clear it, saving the per-call overhead.
+    if ctx.intersects_y(bar_y, bar_y + bar_h) {
+        primitives::scrollbar_v(
+            display,
+            bar_x, bar_y, SCROLLBAR_W, bar_h,
+            content_h, viewport.size.height as i32, scroll,
+            accent, theme::STEEL_2,
+        );
+    }
 }
 
 /// Compute the maximum valid scroll offset for a viewport / content

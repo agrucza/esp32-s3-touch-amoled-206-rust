@@ -5,23 +5,23 @@
 //! The driver holds a mutable reference to a framebuffer slice provided by the
 //! caller. All drawing operations (fill, blit, DrawTarget) are synchronous RAM
 //! writes into the framebuffer - no bus I/O, no waiting. When the scene is
-//! ready, call `flush_rows(y0, y1)` which pushes the given horizontal band
-//! over the QSPI bus (using DMA or whatever transport the `QspiWrite`
-//! implementor provides). The caller is responsible for deciding which
-//! rows are dirty; the driver just pushes what it's told.
+//! ready, call [`flush_tile`] which pushes the framebuffer over the QSPI bus
+//! (using DMA or whatever transport the `QspiWrite` implementor provides) to
+//! panel rows `[tile_y, tile_y + fb_rows)`.
 //!
-//! On ESP32-S3R8 the framebuffer should be placed in PSRAM:
+//! The framebuffer can be sized for the full panel ([`FB_BYTES`]) or any
+//! whole-row partial window ([`fb_bytes_for_rows`]). Callers always pass
+//! panel-absolute coordinates to draw calls; the driver subtracts the
+//! current `tile_y` (set via [`set_tile_y`]) and clips to the FB. A renderer
+//! that loops `tile_y` across the panel in steps of `fb_rows` covers the
+//! whole screen and works identically on a board with PSRAM (full-panel FB)
+//! and one without (small partial FB).
 //!
-//! ```rust
-//! #[link_section = ".ext_ram.bss"]
-//! static mut FRAMEBUFFER: [u8; co5300::FB_BYTES] = [0; co5300::FB_BYTES];
-//!
-//! let display = CO5300::new(bus, reset, unsafe { &mut FRAMEBUFFER });
-//! ```
-//!
-//! GDMA cannot DMA from PSRAM directly; the `QspiWrite` implementor is
-//! responsible for bouncing data through an internal-SRAM buffer before
-//! handing it to the DMA engine (see `EspQspi` in the firmware crate).
+//! On ESP32-S3R8 the framebuffer is typically placed in PSRAM via
+//! `esp_alloc::psram_allocator!`. GDMA cannot DMA directly from PSRAM, so
+//! the `QspiWrite` implementor is responsible for bouncing the data through
+//! an internal-SRAM buffer before handing it to the DMA engine (see
+//! `EspQspi` in firmware-hal).
 //!
 //! ## Wire format (CO5300 datasheet section 5.2.2)
 //!
@@ -106,19 +106,32 @@ pub enum Rotation {
 ///
 /// `'fb` is the lifetime of the caller-provided framebuffer slice.
 ///
-/// The framebuffer can cover the full panel ([`FB_BYTES`]) or only the top
-/// `N` rows ([`fb_bytes_for_rows`]). When partial, all FB-side operations
-/// clip to the buffer's row count; the panel area outside the buffer is
-/// simply never written by this driver. Useful for chips without PSRAM
-/// that can't spare a full 402 KB.
+/// ## Tile-mode rendering
+///
+/// The framebuffer can cover the full panel ([`FB_BYTES`]) or only `N` rows
+/// of it ([`fb_bytes_for_rows`]). Callers always pass panel-absolute
+/// coordinates to draw calls; the driver subtracts [`tile_y`] (the panel-y
+/// position currently represented by FB row 0) and clips into `[0, fb_rows)`.
+/// [`flush_tile`] then pushes the FB to panel rows `[tile_y, tile_y + fb_rows)`.
+/// Loop the caller over `tile_y` in steps of `fb_rows` to cover the whole
+/// panel, hash the FB per-tile for dirty detection, and you have a
+/// partial-FB renderer that works identically on a board with PSRAM and one
+/// without.
+///
+/// A full-panel FB (`fb_rows == HEIGHT`) with `tile_y == 0` is the
+/// degenerate case: translation is a no-op and a single `flush_tile` pushes
+/// the whole panel.
 pub struct CO5300<'fb, B, RST> {
     bus:         B,
     reset:       RST,
     framebuffer: &'fb mut [u8],
     /// Number of full panel rows that fit in `framebuffer`. Always
     /// `<= HEIGHT` and `framebuffer.len() == fb_rows * WIDTH * 2`.
-    /// FB-side bounds checks use this instead of `HEIGHT`.
     fb_rows:     u16,
+    /// Panel-y of FB row 0. Draw calls subtract this from their y
+    /// coordinate so callers stay in panel-absolute space. Always even
+    /// (the panel requires 2-row-aligned address windows).
+    tile_y:      u16,
 }
 
 // ---- Init / power / config - all async (bus I/O) ----------------------------
@@ -142,7 +155,7 @@ impl<'fb, B: QspiWrite, RST: OutputPin> CO5300<'fb, B, RST> {
             "framebuffer must be at most FB_BYTES bytes (the full panel)",
         );
         let fb_rows = (framebuffer.len() / row_bytes) as u16;
-        Self { bus, reset, framebuffer, fb_rows }
+        Self { bus, reset, framebuffer, fb_rows, tile_y: 0 }
     }
 
     /// Number of panel rows covered by this driver's framebuffer.
@@ -152,6 +165,23 @@ impl<'fb, B: QspiWrite, RST: OutputPin> CO5300<'fb, B, RST> {
     /// flush from caller code.
     pub fn fb_rows(&self) -> u16 {
         self.fb_rows
+    }
+
+    /// Move the FB's "window" to a new panel-y position. Subsequent draw
+    /// calls keep using panel-absolute coordinates; the driver translates
+    /// by `panel_y` before clipping. Pair with [`flush_tile`] which pushes
+    /// to panel rows `[panel_y, panel_y + fb_rows)`.
+    ///
+    /// Must be even (the panel requires 2-row-aligned address windows; all
+    /// FB-y to panel-y mapping math assumes the FB starts on an even row).
+    pub fn set_tile_y(&mut self, panel_y: u16) {
+        debug_assert!(panel_y & 1 == 0, "tile_y must be even (panel needs 2-row alignment)");
+        self.tile_y = panel_y;
+    }
+
+    /// Current panel-y of FB row 0. See [`set_tile_y`].
+    pub fn tile_y(&self) -> u16 {
+        self.tile_y
     }
 
     // ---- Reset helpers (caller provides delays via Timer::after) --------
@@ -191,7 +221,7 @@ impl<'fb, B: QspiWrite, RST: OutputPin> CO5300<'fb, B, RST> {
     /// Timing (datasheet section 5.6.1 / 7.5.12):
     ///   - Wait >= 5 ms after this command before any next command.
     ///   - Wait >= 120 ms after SLPIN before issuing SLPOUT.
-    ///   - Call `flush_rows` only after the 120 ms settle has elapsed.
+    ///   - Call [`flush_tile`] only after the 120 ms settle has elapsed.
     pub async fn wake(&mut self) {
         self.write_cmd(cmd::SLPOUT, &[]).await;
     }
@@ -218,20 +248,25 @@ impl<'fb, B: QspiWrite, RST: OutputPin> CO5300<'fb, B, RST> {
 
     /// Send one raw MIPI DCS command with optional parameters.
     pub async fn write_cmd(&mut self, command: u8, params: &[u8]) {
-        self.bus.write_cmd(command, params).await.ok();
+        // Many call sites (init sequence, SLPOUT/DISPON, brightness)
+        // care that the command actually landed - silent failures here
+        // surface as "panel stuck in sleep" or "wrong color format" with
+        // no log trail. Warn but don't propagate, since the existing
+        // call sites are infallible (`.await` without `.ok()`).
+        if self.bus.write_cmd(command, params).await.is_err() {
+            log::warn!("CO5300: cmd 0x{:02X} write failed", command);
+        }
     }
 
     // ---- Flush ----------------------------------------------------------
 
     /// Send a horizontal band of the framebuffer to the display.
     ///
-    /// Rows `[y0, y1)` are pushed full-width. Because the framebuffer is
-    /// row-major and we always push whole rows, the slice stays contiguous
-    /// and no bounce buffer is needed.
-    ///
-    /// Used by the dirty-row flush path in the main loop, which hashes
-    /// each row to find the vertical band that actually changed since
-    /// the previous frame and only pushes that band.
+    /// Rows `[y0, y1)` are FB-local and panel-local at the same time:
+    /// this method ignores `tile_y` and pushes FB row `y` to panel row
+    /// `y` directly. Useful for callers that are managing the full
+    /// panel from a full FB without the tile abstraction; the normal
+    /// per-tile render path uses [`flush_tile`] instead.
     ///
     /// The CO5300 (like its QSPI AMOLED siblings SH8601 / GC9B71) packs
     /// pixels in 2x1 units internally and requires the row window to be
@@ -242,6 +277,7 @@ impl<'fb, B: QspiWrite, RST: OutputPin> CO5300<'fb, B, RST> {
     /// leaving stale pixels at the edges. To avoid that, `y0` is rounded
     /// down to the nearest even row and `y1` is rounded up, so the band
     /// we actually push always covers the caller's requested range.
+    #[allow(dead_code)]
     pub async fn flush_rows(&mut self, y0: u16, y1: u16) {
         if y1 <= y0 || y0 >= self.fb_rows { return; }
         let y0 = y0 & !1;
@@ -252,6 +288,43 @@ impl<'fb, B: QspiWrite, RST: OutputPin> CO5300<'fb, B, RST> {
         let start  = y0 as usize * stride;
         let end    = y1 as usize * stride;
         self.bus.write_pixels(true, &self.framebuffer[start..end]).await.ok();
+    }
+
+    /// Wait for any DMA started by a previous [`flush_tile`] call to
+    /// finish. Forwarded to [`QspiWrite::flush_pending`]; on bus
+    /// implementations without pipelined DMA this is a no-op. Call at
+    /// the end of a render frame so the bus is idle before other code
+    /// paths (display power transitions, brightness writes) touch it.
+    pub async fn flush_pending(&mut self) {
+        if self.bus.flush_pending().await.is_err() {
+            log::warn!("CO5300: flush_pending bus error");
+        }
+    }
+
+    /// Push the framebuffer to panel rows `[tile_y, tile_y + fb_rows)`.
+    ///
+    /// For the short final tile that overlaps the bottom of the panel
+    /// (e.g. tile_y=500 + fb_rows=50 on a 502-row panel) only the rows
+    /// that fit on the panel are pushed; the rest of the FB is ignored.
+    /// `set_tile_y` enforces 2-row alignment on `tile_y`; together with
+    /// the panel's even `HEIGHT` this keeps every pushed window
+    /// 2-row-aligned without further rounding.
+    pub async fn flush_tile(&mut self) {
+        if self.tile_y >= HEIGHT { return; }
+        let panel_rows = (HEIGHT - self.tile_y).min(self.fb_rows);
+        self.set_addr_window(0, self.tile_y, WIDTH, panel_rows).await;
+        let stride = WIDTH as usize * 2;
+        let end    = panel_rows as usize * stride;
+        // Pixel-write errors leave the panel's GRAM partially updated -
+        // the visible failure mode is a torn or solid-color band where
+        // the dropped bytes should have gone. Surface as a warning so
+        // it's not silent next time MAX_DMA_SIZE or similar trips.
+        if self.bus.write_pixels(true, &self.framebuffer[..end]).await.is_err() {
+            log::warn!(
+                "CO5300: flush_tile write_pixels failed (tile_y={}, bytes={})",
+                self.tile_y, end,
+            );
+        }
     }
 
     /// Read-only access to the framebuffer. The main loop uses this to
@@ -267,27 +340,49 @@ impl<'fb, B: QspiWrite, RST: OutputPin> CO5300<'fb, B, RST> {
         let x1 = x + w - 1 + COL_OFFSET;
         let y0 = y + ROW_OFFSET;
         let y1 = y + h - 1 + ROW_OFFSET;
-        self.bus.write_cmd(cmd::CASET, &[
+        // CASET/RASET failures mean the subsequent RAMWR writes pixels
+        // to the wrong panel region. Warn rather than swallow; the
+        // visible artifact (shifted / wrapped pixels) is much harder to
+        // diagnose without a log trail.
+        if self.bus.write_cmd(cmd::CASET, &[
             (x0 >> 8) as u8, (x0 & 0xFF) as u8,
             (x1 >> 8) as u8, (x1 & 0xFF) as u8,
-        ]).await.ok();
-        self.bus.write_cmd(cmd::RASET, &[
+        ]).await.is_err() {
+            log::warn!("CO5300: CASET write failed (x={}..{})", x0, x1);
+        }
+        if self.bus.write_cmd(cmd::RASET, &[
             (y0 >> 8) as u8, (y0 & 0xFF) as u8,
             (y1 >> 8) as u8, (y1 & 0xFF) as u8,
-        ]).await.ok();
+        ]).await.is_err() {
+            log::warn!("CO5300: RASET write failed (y={}..{})", y0, y1);
+        }
     }
 }
 
 // ---- Sync drawing API (framebuffer writes only) -----------------------------
 
 impl<'fb, B, RST> CO5300<'fb, B, RST> {
-    /// Fill a rectangle with a single RGB565 colour.
+    /// Fill a panel-absolute rectangle with a single RGB565 colour.
+    /// Y is translated by `tile_y` and clipped to `[0, fb_rows)`.
     pub fn fill_solid(&mut self, x: u16, y: u16, w: u16, h: u16, color: u16) {
+        let ty = self.tile_y as i32;
+        let ay0 = y as i32 - ty;
+        let ay1 = ay0 + h as i32;
+        let ax0 = x as i32;
+        let ax1 = ax0 + w as i32;
+        if ax1 <= 0 || ay1 <= 0 || ax0 >= WIDTH as i32 || ay0 >= self.fb_rows as i32 {
+            return;
+        }
+        let cy0 = ay0.max(0) as u16;
+        let cy1 = ay1.min(self.fb_rows as i32) as u16;
+        let cx0 = ax0.max(0) as u16;
+        let cx1 = ax1.min(WIDTH as i32) as u16;
+
         let hi = (color >> 8) as u8;
         let lo = (color & 0xFF) as u8;
-        for row in y..y + h {
+        for row in cy0..cy1 {
             let row_base = row as usize * WIDTH as usize;
-            for col in x..x + w {
+            for col in cx0..cx1 {
                 let idx = (row_base + col as usize) * 2;
                 self.framebuffer[idx]     = hi;
                 self.framebuffer[idx + 1] = lo;
@@ -295,14 +390,35 @@ impl<'fb, B, RST> CO5300<'fb, B, RST> {
         }
     }
 
-    /// Blit a rectangle of RGB565 pixels from a slice.
+    /// Blit a rectangle of RGB565 pixels from a slice into a panel-absolute
+    /// rectangle. Y is translated by `tile_y` and the rect is clipped to
+    /// the FB; source pixels for clipped-away cells are skipped.
     ///
     /// `pixels` must contain exactly `w * h` values.
     pub fn draw_raw(&mut self, x: u16, y: u16, w: u16, h: u16, pixels: &[u16]) {
-        let mut src = 0usize;
-        for row in y..y + h {
+        let ty = self.tile_y as i32;
+        let ay0 = y as i32 - ty;
+        let ay1 = ay0 + h as i32;
+        let ax0 = x as i32;
+        let ax1 = ax0 + w as i32;
+        if ax1 <= 0 || ay1 <= 0 || ax0 >= WIDTH as i32 || ay0 >= self.fb_rows as i32 {
+            return;
+        }
+        let cy0 = ay0.max(0);
+        let cy1 = ay1.min(self.fb_rows as i32);
+        let cx0 = ax0.max(0);
+        let cx1 = ax1.min(WIDTH as i32);
+
+        let skip_left  = (cx0 - ax0) as usize;
+        let skip_right = (ax1 - cx1) as usize;
+        let skip_top   = (cy0 - ay0) as usize;
+        let src_row_w  = w as usize;
+        let mut src = skip_top * src_row_w;
+
+        for row in cy0..cy1 {
+            src += skip_left;
             let row_base = row as usize * WIDTH as usize;
-            for col in x..x + w {
+            for col in cx0..cx1 {
                 if src >= pixels.len() { return; }
                 let px  = pixels[src];
                 let idx = (row_base + col as usize) * 2;
@@ -310,13 +426,15 @@ impl<'fb, B, RST> CO5300<'fb, B, RST> {
                 self.framebuffer[idx + 1] = (px & 0xFF) as u8;
                 src += 1;
             }
+            src += skip_right;
         }
     }
 
-    /// Write a single pixel to the framebuffer.
+    /// Write a single panel-absolute pixel into the framebuffer.
     pub fn draw_pixel(&mut self, x: u16, y: u16, color: u16) {
-        if x < WIDTH && y < self.fb_rows {
-            let idx = (y as usize * WIDTH as usize + x as usize) * 2;
+        let y_local = y as i32 - self.tile_y as i32;
+        if x < WIDTH && y_local >= 0 && y_local < self.fb_rows as i32 {
+            let idx = (y_local as usize * WIDTH as usize + x as usize) * 2;
             self.framebuffer[idx]     = (color >> 8) as u8;
             self.framebuffer[idx + 1] = (color & 0xFF) as u8;
         }
@@ -327,10 +445,10 @@ impl<'fb, B, RST> CO5300<'fb, B, RST> {
 
 impl<'fb, B, RST> OriginDimensions for CO5300<'fb, B, RST> {
     fn size(&self) -> Size {
-        // Report the actual FB area to embedded-graphics so its clipping
-        // and bounding-box queries reflect what the driver can actually
-        // render. For a full-panel FB this is still WIDTH x HEIGHT.
-        Size::new(WIDTH as u32, self.fb_rows as u32)
+        // The conceptual canvas is the full panel; the driver translates
+        // by `tile_y` and clips per-pixel, so callers can draw at any
+        // panel-absolute coordinate and let the tile loop sort it out.
+        Size::new(WIDTH as u32, HEIGHT as u32)
     }
 }
 
@@ -342,18 +460,20 @@ impl<'fb, B, RST> DrawTarget for CO5300<'fb, B, RST> {
     where
         I: IntoIterator<Item = Pixel<Rgb565>>,
     {
+        let ty = self.tile_y as i32;
         for Pixel(pt, color) in pixels {
             // Compare in i32 so values outside the u16 range can't wrap
             // through `as u16` into an apparently-valid coordinate.
+            let y_local = pt.y - ty;
             if pt.x >= 0
-                && pt.y >= 0
+                && y_local >= 0
                 && pt.x < WIDTH  as i32
-                && pt.y < self.fb_rows as i32
+                && y_local < self.fb_rows as i32
             {
                 let raw = ((color.r() as u16) << 11)
                     | ((color.g() as u16) << 5)
                     | (color.b() as u16);
-                let idx = (pt.y as usize * WIDTH as usize + pt.x as usize) * 2;
+                let idx = (y_local as usize * WIDTH as usize + pt.x as usize) * 2;
                 self.framebuffer[idx]     = (raw >> 8) as u8;
                 self.framebuffer[idx + 1] = (raw & 0xFF) as u8;
             }
@@ -373,8 +493,12 @@ impl<'fb, B, RST> DrawTarget for CO5300<'fb, B, RST> {
         // straddle the framebuffer edges (e.g. a rectangle with negative
         // y origin). Casting an i32 < 0 to u16 wraps to a huge value
         // and silently breaks any subsequent .min() clipping.
+        //
+        // y is translated by tile_y before clipping into the FB so the
+        // caller stays in panel-absolute coordinates.
+        let ty  = self.tile_y as i32;
         let ax0 = area.top_left.x;
-        let ay0 = area.top_left.y;
+        let ay0 = area.top_left.y - ty;
         let ax1 = ax0 + area.size.width  as i32; // exclusive
         let ay1 = ay0 + area.size.height as i32; // exclusive
 

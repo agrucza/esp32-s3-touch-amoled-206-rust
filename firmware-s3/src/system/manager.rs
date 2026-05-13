@@ -1,7 +1,7 @@
 extern crate alloc;
 
 use crate::config::Config;
-use firmware_hal::display::{self as display_hal, WIDTH, HEIGHT};
+use firmware_hal::display::{self as display_hal, HEIGHT, NUM_TILES, TILE_H, WIDTH};
 use crate::events::SystemEvent;
 use crate::system::audio::AudioSystem;
 use crate::system::bus::{EVENTS, IMU_COMMAND, RTC_COMMAND, SLEEP_WATCH, SleepState};
@@ -13,7 +13,7 @@ use crate::system::tasks::power::PowerTaskState;
 use crate::system::tasks::rtc::RtcTaskState;
 use crate::system::tasks::touch::TouchTaskState;
 use crate::ui::primitives;
-use crate::ui::types::SystemData;
+use crate::ui::types::{DirtyRegion, RenderCtx, SystemData};
 use embedded_graphics::draw_target::DrawTarget;
 use embassy_futures::select::{select, Either};
 use embassy_time::{Duration, Instant, Timer, with_timeout};
@@ -117,22 +117,63 @@ struct PendingAudio<'d> {
     rx_descriptors: &'static mut [DmaDescriptor],
 }
 
-/// Framebuffer row stride in bytes. Used by the dirty-row flush path.
+/// Framebuffer row stride in bytes. Used when sizing the per-tile
+/// FB slice handed to the hash function.
 const ROW_STRIDE: usize = WIDTH as usize * 2;
 
-/// FNV-1a 32-bit hash of one framebuffer row. Rows are `WIDTH * 2`
-/// bytes = 820 bytes = 205 u32 words, so we process the row as u32
-/// chunks (the row width is hardware-fixed to an even number of u32s,
-/// so there is no tail to worry about).
+/// FNV-1a 32-bit hash over a contiguous slice of the framebuffer.
+/// Used per-tile to detect whether the rendered tile differs from
+/// the previous frame's, so unchanged tiles aren't pushed over QSPI.
+/// `WIDTH * 2 = 820` is a multiple of 4, so every row's byte count
+/// is 4-aligned and `chunks_exact(4)` has no tail to worry about.
 #[inline]
-fn row_hash(row: &[u8]) -> u32 {
+fn fb_hash(bytes: &[u8]) -> u32 {
     let mut h: u32 = 0x811c_9dc5;
-    for chunk in row.chunks_exact(4) {
+    for chunk in bytes.chunks_exact(4) {
         let v = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
         h ^= v;
         h = h.wrapping_mul(0x0100_0193);
     }
     h
+}
+
+/// Bitmask over [`NUM_TILES`] tile indices: bit `i` set means tile `i`
+/// needs to be rendered + hashed this frame.
+type TileMask = u16;
+
+/// Convert a [`DirtyRegion`] into the bitmask of tiles it touches.
+///
+/// [`DirtyRegion::FullScreen`] maps to all-tiles-dirty. Each rectangle
+/// in the [`DirtyRegion::Rects`] variant adds the tiles its y-range
+/// intersects to the mask. Rectangles with x extents outside the panel
+/// are still honored vertically - the renderer will draw them clipped
+/// at the per-pixel level inside the driver.
+fn dirty_to_tile_mask(dirty: &DirtyRegion) -> TileMask {
+    match dirty {
+        DirtyRegion::FullScreen => {
+            // `((1 << NUM_TILES) - 1)` fits in u16 for any NUM_TILES <= 16.
+            // NUM_TILES is 11 today so this is well in range.
+            (1u16 << NUM_TILES) - 1
+        }
+        DirtyRegion::Rects(rects) => {
+            let mut mask: TileMask = 0;
+            for r in rects {
+                let y0 = r.top_left.y;
+                let y1 = y0 + r.size.height as i32; // exclusive
+                if y1 <= 0 || y0 >= HEIGHT as i32 { continue; }
+                let y0 = y0.max(0) as u16;
+                let y1 = (y1 as u16).min(HEIGHT) - 1; // inclusive last row
+                let tile_start = (y0 / TILE_H) as usize;
+                let tile_end   = (y1 / TILE_H) as usize;
+                for t in tile_start..=tile_end {
+                    if t < NUM_TILES {
+                        mask |= 1u16 << t;
+                    }
+                }
+            }
+            mask
+        }
+    }
 }
 
 /// Bundle of per-device task state structs produced by
@@ -196,10 +237,19 @@ pub struct SystemManager<'d> {
     // Pre-allocated drain buffer for the mic RX DMA ring.
     mic_drain_buf: alloc::boxed::Box<[u8]>,
 
-    // Per-row FNV-1a hashes from the previous frame. Compared against
-    // the current frame to determine which rows actually changed, so
-    // only the dirty horizontal band is pushed over QSPI.
-    row_hashes: alloc::boxed::Box<[u32]>,
+    // Per-tile FNV-1a hashes from the previous frame. After each tile is
+    // rendered we hash its FB contents; if the hash differs from this
+    // entry the tile is dirty and gets pushed over QSPI. Sized to
+    // [`NUM_TILES`] so every tile (including the short final tile that
+    // overlaps the bottom of the panel) has its own slot.
+    tile_hashes: [u32; NUM_TILES],
+
+    // Force a full re-render on the next render() call, ignoring the
+    // active screen's `dirty_rects()` opinion. Set after wake / display-
+    // power-on (the panel's GRAM may not match anything we've drawn yet,
+    // so the screen's "last rendered" snapshot can't be trusted).
+    // Cleared by render() after the frame.
+    force_full_redraw: bool,
 
     // RTC controller, used to enter/exit hardware light sleep.
     rtc: esp_hal::rtc_cntl::Rtc<'d>,
@@ -343,8 +393,11 @@ impl SystemManager<'static> {
         let power_state = PowerTaskState::new(pmu);
         Timer::after(Duration::from_millis(20)).await;
 
-        // 3. Framebuffer (PSRAM heap already initialized in `main`)
-        let fb: &'static mut [u8] = alloc::vec![0u8; display_hal::FB_BYTES].leak();
+        // 3. Framebuffer. Lives in internal-SRAM BSS (via firmware-hal's
+        // static `FRAMEBUFFER`), not on the PSRAM heap - keeps the
+        // per-tile flush copy fast (SRAM-to-SRAM into the bus's DMA
+        // buffer) and matches what the C6 already does.
+        let fb: &'static mut [u8] = display_hal::take_framebuffer();
 
         // 4. Display
         let display = crate::system::display::init_display(
@@ -528,7 +581,11 @@ impl SystemManager<'static> {
             model,
             tick_count: 0,
             mic_drain_buf: alloc::vec![0u8; MIC_DRAIN_BUF_SIZE].into_boxed_slice(),
-            row_hashes: alloc::vec![0u32; HEIGHT as usize].into_boxed_slice(),
+            tile_hashes: [0u32; NUM_TILES],
+            // First render after boot has no last-rendered snapshot to
+            // compare against, so force a full pass before letting
+            // dirty_rects take over.
+            force_full_redraw: true,
             rtc,
             store,
             last_storage_usage: initial_usage,
@@ -624,19 +681,31 @@ impl SystemManager<'static> {
         for effect in effects {
             match effect {
                 Effect::TransitionDisplay { from, to } => {
-                    let _ = crate::system::display::transition(
+                    let waking_from_off = crate::system::display::transition(
                         &mut self.display,
                         from,
                         to,
                         &self.model.config().display,
                     ).await;
+                    // Coming out of DISPOFF the panel's GRAM is whatever
+                    // garbage it held while powered down. Ignore the
+                    // per-screen dirty_rects on the next frame and push
+                    // everything so the panel is repopulated from scratch.
+                    if waking_from_off {
+                        self.tile_hashes.fill(0);
+                        self.force_full_redraw = true;
+                    }
                 }
                 Effect::BroadcastSleep(state) => {
                     SLEEP_WATCH.sender().send(state);
                     match state {
                         SleepState::Sleeping => log::info!("system: sleep"),
                         SleepState::Awake => {
-                            self.row_hashes.fill(0); // force full redraw next frame
+                            // Same reasoning as the DISPOFF -> Active
+                            // transition above: stale GRAM + stale
+                            // screen snapshot, so force a full repaint.
+                            self.tile_hashes.fill(0);
+                            self.force_full_redraw = true;
                             log::info!("system: wake");
                         }
                     }
@@ -777,12 +846,34 @@ impl SystemManager<'static> {
     /// `light_slp_reject(false)` stops a pending interrupt (e.g.
     /// a half-minute PCF85063 INT still latched) from silently
     /// cancelling sleep entry.
-    fn enter_light_sleep(&mut self) {
+    async fn enter_light_sleep(&mut self) {
         use esp_hal::delay::Delay;
         use esp_hal::peripherals::GPIO;
         use esp_hal::rtc_cntl::sleep::{
             GpioWakeupSource, RtcSleepConfig, TimerWakeupSource,
         };
+        use embedded_hal::i2c::I2c as I2cTrait;
+        use drivers::touch;
+
+        // Put the FT3168 into Monitor mode synchronously before sleep
+        // entry. In Monitor mode the chip continues to scan at low
+        // power and auto-transitions back to Active on touch, driving
+        // INT# low - that's what wakes us via GPIO38.
+        //
+        // The touch *task* also listens to SLEEP_WATCH and would
+        // attempt the same write asynchronously, but there's a race:
+        // if `rtc.sleep()` fires before the task acquires the I²C
+        // lock, the chip is still in Active mode at sleep entry and
+        // wake-from-touch becomes intermittent. Doing the write here
+        // serializes it with sleep entry, so the chip is in the right
+        // mode 100% of the time. The write is best-effort - if it
+        // NAKs (e.g. the chip is mid-state-transition from a recent
+        // touch) the chip will self-manage to low-power eventually
+        // and a button press still wakes us regardless.
+        {
+            let mut i2c = self.i2c_bus.lock().await;
+            let _ = i2c.write(touch::ADDR, &[touch::REG_POWER_MODE, touch::PowerMode::Monitor as u8]);
+        }
 
         // Re-arm GPIO wake for touch_int(38), boot_btn(0), and
         // rtc_int(39). The embassy async GPIO drivers used by
@@ -902,7 +993,7 @@ impl SystemManager<'static> {
                     return;
                 }
             }
-            self.enter_light_sleep();
+            self.enter_light_sleep().await;
 
             // CPU just woke. The wake-source ISR marked its owning
             // task ready but the task hasn't run yet, so `try_receive`
@@ -955,8 +1046,17 @@ impl SystemManager<'static> {
         self.model.set_tick_count(self.tick_count);
     }
 
-    /// Render the active screen with dirty-row flushing. Only runs
-    /// when awake and `Model::needs_redraw()` is true.
+    /// Render the active screen using per-tile rendering and dirty-tile
+    /// detection. Only runs when awake and `Model::needs_redraw()` is true.
+    ///
+    /// The FB covers `TILE_H` rows. Each iteration parks the FB at a
+    /// different `tile_y` along the panel, clears it, lets the screen
+    /// draw at panel-absolute coordinates (the CO5300 driver translates
+    /// + clips), hashes the rendered tile, and only pushes the tile if
+    /// its hash differs from last frame. The loop is board-agnostic: the
+    /// only thing that varies is whether DMA from the bus's TX buffer is
+    /// pipelined with the next tile's CPU work, which is decided inside
+    /// the bus implementation, not here.
     async fn render(&mut self) {
         let render_start = Instant::now();
         // Clone the cache so we can freely borrow `&mut self.model`
@@ -965,38 +1065,163 @@ impl SystemManager<'static> {
         // the per-frame clone cost is ~400 bytes, well below the
         // render-time budget at any realistic frame cadence.
         let data = self.model.cached_data().clone();
-        self.display.clear(crate::ui::theme::BG).ok();
-        self.model.screen_mut().render(&mut self.display, &data);
-        if let Some(pct) = data.power.battery_percent {
-            primitives::battery_warning_frame(&mut self.display, pct);
+        let battery_pct = data.power.battery_percent;
+
+        // Decide which tiles need to be rendered this frame.
+        //
+        // `force_full_redraw` (set after wake / display-power-on / boot)
+        // overrides the screen's opinion: the panel's GRAM is stale and
+        // the screen's "last rendered" snapshot can't be trusted, so we
+        // repaint everything.
+        //
+        // Otherwise the active screen describes the regions it knows
+        // would differ from what's already on screen via `dirty_rects`.
+        // Screens that don't override the default return `FullScreen`
+        // and behave like the pre-invalidation renderer.
+        let dirty = if self.force_full_redraw {
+            self.force_full_redraw = false;
+            DirtyRegion::FullScreen
+        } else {
+            self.model.screen_mut().dirty_rects(&data)
+        };
+        let tile_mask = dirty_to_tile_mask(&dirty);
+        // On FullScreen frames (scroll, wake, screen-switch) we expect
+        // every rendered tile's content to differ from the panel, so
+        // hashing is wasted work - just push everything. The hash is
+        // only profitable for sparse-dirty frames where some tiles
+        // happen to land on identical pixels (e.g. seconds-tick area
+        // overlapping a static LAT/LON row). One trade: the frame
+        // *after* a FullScreen push has stale `tile_hashes`, so it may
+        // push tiles needlessly if it's a partial-dirty frame. Worth
+        // ~17 ms during continuous scroll for one ~2 ms tax on the
+        // first post-scroll frame.
+        let skip_hash = matches!(dirty, DirtyRegion::FullScreen);
+
+        // Empty dirty region -> nothing to do. Still clear `needs_redraw`
+        // and update the screen's snapshot so the next on_event with no
+        // visual effect doesn't keep waking us up.
+        if tile_mask == 0 {
+            self.model.screen_mut().clear_dirty(&data);
+            self.model.clear_redraw();
+            return;
         }
 
-        // Hash rows, find dirty band, push only the changed range.
-        let fb = self.display.framebuffer();
-        let mut min_y: Option<u16> = None;
-        let mut max_y: u16 = 0;
-        for y in 0..HEIGHT {
-            let off = y as usize * ROW_STRIDE;
-            let h = row_hash(&fb[off..off + ROW_STRIDE]);
-            if h != self.row_hashes[y as usize] {
-                self.row_hashes[y as usize] = h;
-                if min_y.is_none() { min_y = Some(y); }
-                max_y = y;
+        let mut waited_for_te = false;
+
+        // Phase timers - sum of microseconds across the rendered tiles.
+        // Kept while we're iterating on the tile / invalidation strategy.
+        let mut us_clear: u64 = 0;
+        let mut us_screen: u64 = 0;
+        let mut us_hash: u64 = 0;
+        let mut us_flush: u64 = 0;
+        let mut tiles_rendered: u32 = 0;
+        let mut tiles_pushed: u32 = 0;
+
+        for tile_idx in 0..NUM_TILES {
+            if tile_mask & (1u16 << tile_idx) == 0 {
+                // Not in this frame's dirty set - skip render, skip hash,
+                // skip push. The previous frame's contents stay on the
+                // panel; our `tile_hashes[tile_idx]` is the hash of
+                // whatever we last rendered into this tile and remains
+                // valid for next-frame comparison.
+                continue;
+            }
+
+            let tile_y = (tile_idx as u16) * TILE_H;
+            // Short final tile clips to HEIGHT; the rest are full TILE_H.
+            let tile_h = (HEIGHT - tile_y).min(TILE_H);
+            let ctx = RenderCtx { tile_y, tile_h };
+            tiles_rendered += 1;
+
+            // Park the FB at this tile, clear it, render the whole UI.
+            // The screen looks at `ctx` to skip widget setup for things
+            // entirely outside this tile (settings list rows, etc.);
+            // off-tile widgets that the screen *did* try to draw still
+            // get rejected per-pixel inside the driver.
+            self.display.set_tile_y(tile_y);
+            let t0 = Instant::now();
+            self.display.clear(crate::ui::theme::BG).ok();
+            us_clear += t0.elapsed().as_micros();
+
+            let t1 = Instant::now();
+            self.model.screen_mut().render(&mut self.display, &data, &ctx);
+            if let Some(pct) = battery_pct {
+                primitives::battery_warning_frame(&mut self.display, pct);
+            }
+            us_screen += t1.elapsed().as_micros();
+
+            // Decide whether this tile needs to go over QSPI. For
+            // `FullScreen` dirty frames we already know the answer (yes)
+            // - skip the hash entirely. For sparse-dirty frames hash and
+            // compare; tiles whose pixels happen to match the last frame
+            // (e.g. an unchanged LAT/LON row in a seconds-tick) don't
+            // need to be pushed.
+            let should_push = if skip_hash {
+                // Zero the stored hash so the *next* sparse-dirty frame's
+                // hash compare sees a mismatch (any nonzero hash) and
+                // re-pushes correctly. Worst case: one needless push per
+                // tile on the first post-FullScreen frame.
+                self.tile_hashes[tile_idx] = 0;
+                true
+            } else {
+                // Hash only the panel-visible portion of the FB. For the
+                // short final tile (e.g. 2 rows on a 502 / 50 layout) the
+                // unused tail of the FB stays at BG from the clear, but
+                // hashing it would just waste cycles.
+                let panel_rows = (HEIGHT - tile_y).min(TILE_H) as usize;
+                let visible_bytes = panel_rows * ROW_STRIDE;
+                let t2 = Instant::now();
+                let h = fb_hash(&self.display.framebuffer()[..visible_bytes]);
+                us_hash += t2.elapsed().as_micros();
+                if h != self.tile_hashes[tile_idx] {
+                    self.tile_hashes[tile_idx] = h;
+                    true
+                } else {
+                    false
+                }
+            };
+
+            if should_push {
+                // Wait for TE rising edge (vblank) before the first push
+                // of this frame. Subsequent tiles ride the same vblank
+                // window since a 60 Hz panel gives us ~16 ms before
+                // scanout begins. Timeout at ~2 refresh periods in case
+                // TE is silent.
+                if !waited_for_te {
+                    let _ = with_timeout(
+                        Duration::from_millis(30),
+                        self.lcd_te.wait_for_rising_edge(),
+                    ).await;
+                    waited_for_te = true;
+                }
+                let t3 = Instant::now();
+                self.display.flush_tile().await;
+                us_flush += t3.elapsed().as_micros();
+                tiles_pushed += 1;
             }
         }
-        if let Some(y0) = min_y {
-            // Wait for TE rising edge (vblank) before pushing pixels.
-            // Timeout at ~2 refresh periods in case TE is silent.
-            let _ = with_timeout(
-                Duration::from_millis(30),
-                self.lcd_te.wait_for_rising_edge(),
-            ).await;
-            self.display.flush_rows(y0, max_y + 1).await;
-        }
+
+        // Drain any DMA that's still in flight from the last tile's
+        // flush. With pipelined `EspQspi`, `flush_tile().await` returns
+        // before the SPI transfer is finished; this awaits the final
+        // tile's DMA-complete interrupt so the bus is idle by the time
+        // `render` returns and other code paths (display sleep, sleep
+        // power transitions) can talk to the panel.
+        self.display.flush_pending().await;
+
+        // Update the screen's "last rendered" snapshot now that the
+        // frame is on the panel - the next dirty_rects call diffs from
+        // this baseline.
+        self.model.screen_mut().clear_dirty(&data);
         self.model.clear_redraw();
+
         let render_ms = render_start.elapsed().as_millis();
         if render_ms > 10 {
-            log::info!("render: {}ms", render_ms);
+            log::info!(
+                "render: {}ms (clear={}us screen={}us hash={}us flush={}us rendered={}/{} pushed={}/{})",
+                render_ms, us_clear, us_screen, us_hash, us_flush,
+                tiles_rendered, NUM_TILES, tiles_pushed, NUM_TILES,
+            );
         }
     }
 

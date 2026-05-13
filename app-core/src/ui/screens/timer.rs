@@ -40,7 +40,7 @@ use embedded_graphics::{
 
 use crate::events::SystemEvent;
 use crate::ui::{fonts, layout, theme};
-use crate::ui::types::{Action, Screen, SystemData, TimerState};
+use crate::ui::types::{Action, RenderCtx, Screen, SystemData, TimerState};
 use crate::data::TimeData;
 use crate::ui::widgets::{
     action_row_rects, app_chrome_back_hit, chamfered_button, chamfered_panel,
@@ -201,7 +201,12 @@ impl TimerScreen {
 }
 
 impl Screen for TimerScreen {
-    fn render<D: DrawTarget<Color = Rgb565>>(&self, display: &mut D, data: &SystemData) {
+    fn render<D: DrawTarget<Color = Rgb565>>(
+        &self,
+        display: &mut D,
+        data: &SystemData,
+        _ctx: &RenderCtx,
+    ) {
         match self.view {
             TimerView::Main => self.render_main(display, data),
             TimerView::Picker => self.render_picker(display, data),

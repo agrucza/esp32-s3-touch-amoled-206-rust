@@ -29,5 +29,28 @@ pub trait QspiWrite {
     ///   - `false` → RAMWRC (0x3C) - continuation of the current burst
     ///
     /// Wire format: opcode=0x32, address=(cmd<<8), data=bytes
+    ///
+    /// Implementations are free to return *before* the underlying DMA
+    /// transfer has finished, provided `data` has already been copied
+    /// somewhere safe by the time the method returns (so the caller can
+    /// mutate `data` immediately). The next call into the bus (including
+    /// [`flush_pending`]) must await any such in-flight DMA before
+    /// starting its own operation, so the asynchrony is invisible to
+    /// callers that don't care.
+    ///
+    /// [`flush_pending`]: QspiWrite::flush_pending
     async fn write_pixels(&mut self, first: bool, data: &[u8]) -> Result<(), Self::Error>;
+
+    /// Drain any in-flight DMA started by a previous [`write_pixels`]
+    /// call so the bus is fully idle on return.
+    ///
+    /// Call at the end of a render frame to ensure the bus is clean
+    /// before other code (sleep transitions, brightness writes, screen
+    /// switches) interacts with it. Implementations without pipelined
+    /// DMA can leave the default no-op implementation in place.
+    ///
+    /// [`write_pixels`]: QspiWrite::write_pixels
+    async fn flush_pending(&mut self) -> Result<(), Self::Error> {
+        Ok(())
+    }
 }

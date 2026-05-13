@@ -38,7 +38,7 @@ use embedded_graphics::{
 use crate::events::SystemEvent;
 use crate::ui::{fonts, layout, theme};
 use crate::ui::types::{
-    Action, AlarmEntry, Screen, SystemData, MAX_ALARMS,
+    Action, AlarmEntry, RenderCtx, Screen, SystemData, MAX_ALARMS,
 };
 use crate::ui::widgets::{
     action_row_rects, app_chrome_back_hit, chamfered_panel, draw_app_chrome, fmt_2digit,
@@ -161,9 +161,14 @@ impl AlarmScreen {
 }
 
 impl Screen for AlarmScreen {
-    fn render<D: DrawTarget<Color = Rgb565>>(&self, display: &mut D, data: &SystemData) {
+    fn render<D: DrawTarget<Color = Rgb565>>(
+        &self,
+        display: &mut D,
+        data: &SystemData,
+        ctx: &RenderCtx,
+    ) {
         match self.view {
-            AlarmView::List => self.render_list(display, data),
+            AlarmView::List => self.render_list(display, data, ctx),
             AlarmView::Edit { index } => self.render_edit(display, data, index),
         }
     }
@@ -184,7 +189,7 @@ impl Screen for AlarmScreen {
 
 impl AlarmScreen {
     fn render_list<D: DrawTarget<Color = Rgb565>>(
-        &self, display: &mut D, data: &SystemData,
+        &self, display: &mut D, data: &SystemData, ctx: &RenderCtx,
     ) {
         let active_count = data.alarms.entries.iter().filter(|e| e.enabled).count();
         let mut tele_buf: heapless::String<16> = heapless::String::new();
@@ -201,6 +206,7 @@ impl AlarmScreen {
             list_viewport_rect(),
             list_content_h(),
             ACCENT,
+            ctx,
             |clipped, scroll| {
                 for idx in 0..MAX_ALARMS {
                     self.render_row(clipped, data, idx, scroll);

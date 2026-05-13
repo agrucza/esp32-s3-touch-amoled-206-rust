@@ -50,7 +50,7 @@ use core::fmt::Write;
 
 use crate::events::{SwipeDir, SystemEvent};
 use crate::ui::{fonts, glyphs, theme};
-use crate::ui::types::{Action, Screen, ScreenId, SystemData};
+use crate::ui::types::{Action, RenderCtx, Screen, ScreenId, SystemData};
 use crate::ui::widgets::{
     chamfered_panel, home_indicator, slider, slider_value_from_x, status_bar,
     NOTCH, SLIDER_BAR_H, STATUS_BAR_H,
@@ -223,7 +223,12 @@ impl QuickAccessScreen {
 }
 
 impl Screen for QuickAccessScreen {
-    fn render<D: DrawTarget<Color = Rgb565>>(&self, display: &mut D, data: &SystemData) {
+    fn render<D: DrawTarget<Color = Rgb565>>(
+        &self,
+        display: &mut D,
+        data: &SystemData,
+        _ctx: &RenderCtx,
+    ) {
         // Top status bar with cyan tint per the spec (Quick Access is
         // a cyan-accent overlay).
         let mut time_buf: heapless::String<8> = heapless::String::new();

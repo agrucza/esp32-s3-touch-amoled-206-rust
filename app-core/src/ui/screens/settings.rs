@@ -26,7 +26,7 @@ use core::fmt::Write;
 
 use crate::ui::{fonts, glyphs, layout, theme};
 use crate::ui::types::{
-    Action, Screen, SelfTestId, SelfTestResult, SystemData, SystemEvent,
+    Action, RenderCtx, Screen, SelfTestId, SelfTestResult, SystemData, SystemEvent,
 };
 use crate::ui::widgets::{
     action_row_rects, chamfered_button, chamfered_panel, fmt_2digit, handle_scroll_drag,
@@ -88,24 +88,39 @@ fn draw_header<D: DrawTarget<Color = Rgb565>>(
     data: &SystemData,
     title: &str,
     accent: Rgb565,
+    ctx: &RenderCtx,
 ) {
-    let mut time_buf: heapless::String<8> = heapless::String::new();
-    let _ = core::fmt::Write::write_fmt(
-        &mut time_buf,
-        format_args!("{:02}:{:02}", data.time.hour, data.time.minute),
-    );
-    status_bar(
-        display,
-        STATUS_Y,
-        time_buf.as_str(),
-        data.power.battery_percent,
-        accent,
-        STATUS_X_INSET,
-    );
+    // The three chrome pieces sit at fixed y-positions: status bar at
+    // the very top, title header just below it, home indicator at the
+    // very bottom. For each piece, only do its work when this tile's
+    // y-range actually overlaps the piece - otherwise the per-call
+    // setup (string format, glyph lookup, fill_contiguous iterator)
+    // is wasted, since the driver's per-pixel clip would reject every
+    // write anyway.
+    if ctx.intersects_y(STATUS_Y, STATUS_Y + STATUS_BAR_H) {
+        let mut time_buf: heapless::String<8> = heapless::String::new();
+        let _ = core::fmt::Write::write_fmt(
+            &mut time_buf,
+            format_args!("{:02}:{:02}", data.time.hour, data.time.minute),
+        );
+        status_bar(
+            display,
+            STATUS_Y,
+            time_buf.as_str(),
+            data.power.battery_percent,
+            accent,
+            STATUS_X_INSET,
+        );
+    }
 
-    header(display, hdr_rect(), title, "SYS.CFG", accent);
+    if ctx.intersects_y(HDR_TOP, HDR_TOP + HDR_H) {
+        header(display, hdr_rect(), title, "SYS.CFG", accent);
+    }
 
-    home_indicator(display, HOME_BAR_Y, accent);
+    // Home indicator is an 18 px pill at the bottom edge.
+    if ctx.intersects_y(HOME_BAR_Y, HOME_BAR_Y + 18) {
+        home_indicator(display, HOME_BAR_Y, accent);
+    }
 }
 
 /// Y of the first row below the settings header.
@@ -501,23 +516,32 @@ impl SettingsScreen {
 // -- Screen impl -------------------------------------------------------------
 
 impl Screen for SettingsScreen {
-    fn render<D: DrawTarget<Color = Rgb565>>(&self, display: &mut D, data: &SystemData) {
+    fn render<D: DrawTarget<Color = Rgb565>>(
+        &self,
+        display: &mut D,
+        data: &SystemData,
+        ctx: &RenderCtx,
+    ) {
+        // Only the scrolled-list sub-views (currently Index; Imu / Battery
+        // soon) thread `ctx` through their renderers - other sub-views
+        // have fixed-position content where the driver's per-pixel clip
+        // already handles the off-tile case at zero CPU cost.
         match self.view {
-            SettingsView::Index => self.render_index(display, data),
-            SettingsView::Imu => self.render_imu(display, data),
-            SettingsView::Clock => self.render_clock(display, data),
-            SettingsView::TimeEntry => self.render_time_entry(display, data),
-            SettingsView::DateEntry => self.render_date_entry(display, data),
-            SettingsView::Battery => self.render_battery(display, data),
-            SettingsView::Storage => self.render_storage_index(display, data),
-            SettingsView::StorageFlash => self.render_storage_flash(display, data),
-            SettingsView::StorageSd => self.render_storage_sd(display, data),
-            SettingsView::StorageRestoreFlash => self.render_storage_restore(display, data),
-            SettingsView::StorageFactoryReset => self.render_storage_factory_reset(display, data),
-            SettingsView::Display   => self.render_display(display, data),
-            SettingsView::Wifi      => self.render_stub(display, data, "WIFI"),
-            SettingsView::Bluetooth => self.render_stub(display, data, "BLUETOOTH"),
-            SettingsView::Zigbee    => self.render_stub(display, data, "ZIGBEE"),
+            SettingsView::Index => self.render_index(display, data, ctx),
+            SettingsView::Imu => self.render_imu(display, data, ctx),
+            SettingsView::Clock => self.render_clock(display, data, ctx),
+            SettingsView::TimeEntry => self.render_time_entry(display, data, ctx),
+            SettingsView::DateEntry => self.render_date_entry(display, data, ctx),
+            SettingsView::Battery => self.render_battery(display, data, ctx),
+            SettingsView::Storage => self.render_storage_index(display, data, ctx),
+            SettingsView::StorageFlash => self.render_storage_flash(display, data, ctx),
+            SettingsView::StorageSd => self.render_storage_sd(display, data, ctx),
+            SettingsView::StorageRestoreFlash => self.render_storage_restore(display, data, ctx),
+            SettingsView::StorageFactoryReset => self.render_storage_factory_reset(display, data, ctx),
+            SettingsView::Display   => self.render_display(display, data, ctx),
+            SettingsView::Wifi      => self.render_stub(display, data, "WIFI", ctx),
+            SettingsView::Bluetooth => self.render_stub(display, data, "BLUETOOTH", ctx),
+            SettingsView::Zigbee    => self.render_stub(display, data, "ZIGBEE", ctx),
         }
     }
 
@@ -550,13 +574,13 @@ impl Screen for SettingsScreen {
 
 impl SettingsScreen {
     fn render_index<D: DrawTarget<Color = Rgb565>>(
-        &self, display: &mut D, data: &SystemData,
+        &self, display: &mut D, data: &SystemData, ctx: &RenderCtx,
     ) {
-        draw_header(display, data, "SETTINGS", theme::SIGNAL);
+        draw_header(display, data, "SETTINGS", theme::SIGNAL, ctx);
         render_scrolled(
             display, self.index_scroll.offset(),
-            index_viewport_rect(), index_content_h(), theme::SIGNAL,
-            |clipped, scroll| render_rows(clipped, data, INDEX_ROWS, scroll),
+            index_viewport_rect(), index_content_h(), theme::SIGNAL, ctx,
+            |clipped, scroll| render_rows(clipped, data, INDEX_ROWS, scroll, ctx),
         );
     }
 
@@ -613,10 +637,20 @@ fn index_content_h() -> i32 {
 /// toggle rows show a Nightwatch toggle. `scroll` shifts each row's
 /// y by `-scroll` so the caller can render into a clipped viewport.
 fn render_rows<D: DrawTarget<Color = Rgb565>>(
-    display: &mut D, data: &SystemData, rows: &[IndexRow], scroll: i32,
+    display: &mut D, data: &SystemData, rows: &[IndexRow], scroll: i32, ctx: &RenderCtx,
 ) {
     for (i, r) in rows.iter().enumerate() {
         let rect = row_rect(i, scroll);
+        // Skip rows whose y-range falls entirely outside this tile.
+        // This is where the tile-aware optimization lives: without it,
+        // a 10-row index walks all 10 rows for each of the 11 tiles
+        // during scroll, paying per-row format/icon/iterator-construction
+        // cost. With it, each tile walks ~2 rows.
+        let row_y0 = rect.top_left.y;
+        let row_y1 = row_y0 + rect.size.height as i32;
+        if !ctx.intersects_y(row_y0, row_y1) {
+            continue;
+        }
         let kind = r.icon;
         match r.kind {
             RowKind::Navigate { value_fn, .. } => {
@@ -717,9 +751,9 @@ fn draw_clock_panel<D: DrawTarget<Color = Rgb565>>(
 
 impl SettingsScreen {
     fn render_clock<D: DrawTarget<Color = Rgb565>>(
-        &self, display: &mut D, data: &SystemData,
+        &self, display: &mut D, data: &SystemData, ctx: &RenderCtx,
     ) {
-        draw_header(display, data, "CLOCK", theme::SIGNAL);
+        draw_header(display, data, "CLOCK", theme::SIGNAL, ctx);
 
         let mut time_buf: String<12> = String::new();
         let _ = write!(time_buf, "{:02}:{:02}:{:02}",
@@ -783,9 +817,9 @@ impl SettingsScreen {
 
 impl SettingsScreen {
     fn render_time_entry<D: DrawTarget<Color = Rgb565>>(
-        &self, display: &mut D, data: &SystemData,
+        &self, display: &mut D, data: &SystemData, ctx: &RenderCtx,
     ) {
-        draw_header(display, data, "SET TIME", theme::SIGNAL);
+        draw_header(display, data, "SET TIME", theme::SIGNAL, ctx);
 
         let cells = picker_cell_rects();
         self.time_picker.wheels[0].render(display, cells[0], theme::SIGNAL, fmt_2digit);
@@ -845,9 +879,9 @@ impl SettingsScreen {
 
 impl SettingsScreen {
     fn render_date_entry<D: DrawTarget<Color = Rgb565>>(
-        &self, display: &mut D, data: &SystemData,
+        &self, display: &mut D, data: &SystemData, ctx: &RenderCtx,
     ) {
-        draw_header(display, data, "SET DATE", theme::SIGNAL);
+        draw_header(display, data, "SET DATE", theme::SIGNAL, ctx);
 
         let cells = picker_cell_rects();
         self.date_picker.wheels[0].render(display, cells[0], theme::SIGNAL, fmt_2digit);
@@ -1050,14 +1084,15 @@ impl SettingsScreen {
         &self,
         display: &mut D,
         data: &SystemData,
+        ctx: &RenderCtx,
     ) {
-        draw_header(display, data, "MOTION", theme::SIGNAL);
+        draw_header(display, data, "MOTION", theme::SIGNAL, ctx);
 
         let scroll = self.imu_scroll.offset();
         let layout = motion_layout(scroll);
 
         render_scrolled(
-            display, scroll, motion_viewport_rect(), layout.content_h, theme::SIGNAL,
+            display, scroll, motion_viewport_rect(), layout.content_h, theme::SIGNAL, ctx,
             |clipped, _| {
                 // Live readouts.
                 let mut value_buf: heapless::String<12> = heapless::String::new();
@@ -1180,8 +1215,9 @@ impl SettingsScreen {
         &self,
         display: &mut D,
         data: &SystemData,
+        ctx: &RenderCtx,
     ) {
-        draw_header(display, data, "BATTERY", theme::SIGNAL);
+        draw_header(display, data, "BATTERY", theme::SIGNAL, ctx);
 
         // Top: chamfered tag-labeled BATTERY panel with live
         // percent/voltage centered inside.
@@ -1293,12 +1329,13 @@ impl SettingsScreen {
         &self,
         display: &mut D,
         data: &SystemData,
+        ctx: &RenderCtx,
     ) {
-        draw_header(display, data, "STORAGE", theme::SIGNAL);
+        draw_header(display, data, "STORAGE", theme::SIGNAL, ctx);
         // Storage sub-index doesn't scroll today (4 rows always
         // fit). Scroll = 0; if more storage rows land later,
         // give SettingsScreen a second `ScrollState` and viewport.
-        render_rows(display, data, STORAGE_INDEX_ROWS, 0);
+        render_rows(display, data, STORAGE_INDEX_ROWS, 0, ctx);
     }
 
     fn storage_index_event(&mut self, event: &SystemEvent, _data: &mut SystemData) -> Action {
@@ -1336,8 +1373,9 @@ impl SettingsScreen {
         &self,
         display: &mut D,
         data: &SystemData,
+        ctx: &RenderCtx,
     ) {
-        draw_header(display, data, "FLASH", theme::SIGNAL);
+        draw_header(display, data, "FLASH", theme::SIGNAL, ctx);
 
         // Chamfered HUD panel with a hanging FLASH tag ribbon - the
         // spec's "tag-labelled panel" idiom. Body carries the usage
@@ -1406,8 +1444,9 @@ impl SettingsScreen {
         &self,
         display: &mut D,
         data: &SystemData,
+        ctx: &RenderCtx,
     ) {
-        draw_header(display, data, "SD CARD", theme::SIGNAL);
+        draw_header(display, data, "SD CARD", theme::SIGNAL, ctx);
 
         // Status: chamfered tag-labelled panel. Border + tag tint
         // tracks online/offline (green/signal). Read-only - the
@@ -1474,8 +1513,9 @@ impl SettingsScreen {
         &self,
         display: &mut D,
         data: &SystemData,
+        ctx: &RenderCtx,
     ) {
-        draw_header(display, data, "RESTORE FROM SD", theme::SIGNAL);
+        draw_header(display, data, "RESTORE FROM SD", theme::SIGNAL, ctx);
 
         // Warning panel: signal-bordered chamfered panel with a
         // RESTORE tag. Body explains what the action does.
@@ -1563,8 +1603,9 @@ impl SettingsScreen {
         &self,
         display: &mut D,
         data: &SystemData,
+        ctx: &RenderCtx,
     ) {
-        draw_header(display, data, "FACTORY RESET", theme::DANGER);
+        draw_header(display, data, "FACTORY RESET", theme::DANGER, ctx);
 
         // Warning panel: danger-tinted chamfered panel with PURGE
         // tag and irreversible-action copy.
@@ -1635,8 +1676,9 @@ impl SettingsScreen {
         &self,
         display: &mut D,
         data: &SystemData,
+        ctx: &RenderCtx,
     ) {
-        draw_header(display, data, "DISPLAY", theme::SIGNAL);
+        draw_header(display, data, "DISPLAY", theme::SIGNAL, ctx);
 
         let slots = display_slots();
         let always_on = data.config.display.always_on;
@@ -1782,8 +1824,9 @@ impl SettingsScreen {
         display: &mut D,
         data: &SystemData,
         title: &str,
+        ctx: &RenderCtx,
     ) {
-        draw_header(display, data, title, theme::SIGNAL);
+        draw_header(display, data, title, theme::SIGNAL, ctx);
         let mut s = layout::VStack::new(LEAF_TOP_Y);
         let panel = s.slot(80);
         chamfered_panel(display, panel, NOTCH, theme::STEEL, 1);
