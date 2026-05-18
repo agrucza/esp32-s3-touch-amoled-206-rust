@@ -1,12 +1,12 @@
-use crate::config::DisplayConfig;
+use app_core::config::DisplayConfig;
 use embassy_time::{Duration, Timer};
 use esp_hal::gpio::Output;
 use firmware_hal::display::{CO5300, EspQspi};
 
 /// Concrete type of the display handle the rest of the firmware uses.
 /// Parameterized over the esp-hal peripheral lifetime `'d`; the
-/// framebuffer is `'static` because it's leaked out of a PSRAM Vec
-/// at init time in the manager.
+/// framebuffer is `'static` because it's leaked out of a Vec at init
+/// time in the manager.
 pub type Display<'d> = CO5300<'static, EspQspi<'d>, Output<'d>>;
 
 // `DisplayState` lives in `app_core::ui::types` so Model / UI can
@@ -15,10 +15,10 @@ pub type Display<'d> = CO5300<'static, EspQspi<'d>, Output<'d>>;
 pub use app_core::ui::types::DisplayState;
 
 // The display init sequence (QSPI bus build, reset pulse, CO5300 init,
-// wake, display-on) lives in `firmware-hal` so both firmware-s3 and
-// firmware-c6 share one implementation. Re-export it here so the existing
-// `crate::system::display::init_display(...)` call site in manager.rs
-// keeps compiling unchanged.
+// wake, display-on) lives in `firmware-hal` so every board shares one
+// implementation. Re-export it here so the existing
+// `display::init_display(...)` call site in the manager keeps
+// compiling unchanged.
 pub use firmware_hal::display::init_display;
 
 /// Apply a display-state transition. Issues the necessary DCS

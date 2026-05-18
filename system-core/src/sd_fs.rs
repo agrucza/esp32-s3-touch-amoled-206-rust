@@ -487,7 +487,7 @@ fn close_dirs(
 
 // -- Storage trait impl -----------------------------------------------------
 
-impl<'d> crate::system::fs::Storage for SdFs<'d> {
+impl<'d> crate::fs::Storage for SdFs<'d> {
     type Error = SdmmcError<SdCardError>;
 
     fn append_line(&mut self, path: &str, bytes: &[u8]) -> Result<(), Self::Error> {

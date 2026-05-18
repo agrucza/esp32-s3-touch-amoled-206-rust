@@ -3,18 +3,19 @@ name    = "firmware-hal"
 version = "0.1.0"
 edition = "2021"
 
-# Shared hardware-init helpers used by both firmware-s3 and firmware-c6.
-# Contains the chip-agnostic-but-esp-hal-coupled init flow for each on-board
-# subsystem (display today, audio later, etc.). The bin crates carry their
-# own `board.rs` (pin maps) and `main.rs` (peripheral wiring with concrete
-# pin numbers) and call into this crate for the actual subsystem bring-up.
+# Display HAL shared by the board bin crates: the esp-hal-coupled
+# QSPI bus build, the CO5300 driver wrapper, init_display, and the
+# framebuffer statics. The bin crates carry their own board.rs (pin
+# maps) and main.rs (peripheral wiring) and call in here for display
+# bring-up. The board-agnostic system layer + storage subsystem live
+# in system-core.
 #
-# NOTE on esp-hal feature unification: this crate declares `esp-hal` with no
-# chip feature - the leaf bin crates (firmware-s3, firmware-c6) set `esp32s3`
-# vs `esp32c6` and Cargo's feature unification carries that choice into the
-# build of firmware-hal automatically. The two bins are built independently
-# from their respective directories (different toolchains), so the features
-# never need to coexist in a single build.
+# NOTE on esp-hal feature unification: this crate declares `esp-hal`
+# with no chip feature - the leaf bin sets the chip feature and
+# Cargo's feature unification carries that choice into this crate's
+# build. The bins build independently from their own directories
+# under different toolchains, so the chip features never coexist in
+# one build.
 
 [dependencies]
 esp-hal      = { version = "1.1.0-rc.0", features = ["unstable"] }

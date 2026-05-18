@@ -2,18 +2,20 @@
 //!
 //! Two things live here:
 //!
-//! * The [`Storage`] trait, implemented by both
-//!   [`crate::system::flash_fs::FlashFs`] and
-//!   [`crate::system::sd_fs::SdFs`]. Unifies the line-oriented +
-//!   whole-file operations common to any filesystem-like persistent
-//!   backend so generic code (e.g. the Store composite's "wipe every
-//!   backend" path) can dispatch uniformly across the two.
+//! * The [`Storage`] trait, implemented by the filesystem backends
+//!   ([`crate::flash_fs::FlashFs`] and the SD backend). Unifies the
+//!   line-oriented + whole-file operations common to any
+//!   filesystem-like persistent backend so generic code (e.g. the
+//!   `Store` composite's "wipe every backend" path) can dispatch
+//!   uniformly across the backends.
 //!
 //! * A small set of versioned-blob helpers ([`StoredBlob`],
-//!   [`wrap_blob`], [`unwrap_blob`]). Shared so both `FlashFs`
-//!   (primary writer) and [`crate::system::storage::Store`] (mirror
-//!   writer) encode config / alarm records identically - SD-side
-//!   blob files become byte-for-byte copies of their flash peers.
+//!   [`wrap_blob`], [`unwrap_blob`]). Shared so the flash primary
+//!   writer and the mirror writer encode config / alarm records
+//!   identically - mirrored blob files are byte-for-byte copies of
+//!   their flash peers.
+//!
+//! Part of the storage subsystem in `system-core`; board-agnostic.
 
 use alloc::vec::Vec;
 use core::ops::ControlFlow;
@@ -24,9 +26,8 @@ use serde::{Deserialize, Serialize};
 /// A filesystem-like persistent backend.
 ///
 /// Each method is best-effort and takes an absolute `path`. All
-/// paths are expected to be rooted at `/system/...` on both current
-/// backends (see `flash_fs.rs` and `sd_fs.rs` for the on-disk
-/// layout).
+/// paths are expected to be rooted at `/system/...` on every backend
+/// (see `flash_fs.rs` / `sd_fs.rs` for the on-disk layout).
 ///
 /// The associated `Error` type lets each backend keep its native
 /// error (littlefs vs. sdmmc) without an erasure layer. Consumers
@@ -34,14 +35,13 @@ use serde::{Deserialize, Serialize};
 ///
 /// ### Why the trait exists
 ///
-/// `Store` doesn't dispatch through `&mut dyn Storage` today - it
-/// calls `self.flash.<op>()` / `self.sd.<op>()` directly, because
-/// the two backends compose in non-identical ways (SD writes are
-/// gated by the online flag; flash is authoritative). The trait's
-/// job is to enforce that the two backends have matching shapes,
-/// so the "mirror op" patterns in `Store` stay symmetrical and new
-/// backends (e.g. a third tier for the C6 variant) can be added
-/// without widening the composite's surface.
+/// The `Store` composite doesn't dispatch through `&mut dyn Storage`
+/// today - it calls `self.flash.<op>()` / `self.sd.<op>()` directly,
+/// because the two backends compose in non-identical ways (SD writes
+/// are gated by the online flag; flash is authoritative). The trait's
+/// job is to enforce that the backends have matching shapes, so the
+/// "mirror op" patterns stay symmetrical and a flash-only
+/// configuration can be supported without widening the surface.
 #[allow(dead_code)] // contract enforcer, not a dispatch point
 pub trait Storage {
     /// Native error type for this backend.
@@ -101,7 +101,7 @@ pub(crate) struct StoredBlob<T> {
 /// prefix on success, or `None` if `buf` is too small. Callers size
 /// the buffer based on the biggest blob they persist (512 B is
 /// generous for today's `Config` / `AlarmState`).
-pub(crate) fn wrap_blob<'b, T: Serialize>(
+pub fn wrap_blob<'b, T: Serialize>(
     buf: &'b mut [u8],
     version: u8,
     value: &T,
@@ -118,7 +118,7 @@ pub(crate) fn wrap_blob<'b, T: Serialize>(
 /// Deserialise a versioned blob from `bytes`. Returns the inner
 /// value if the envelope's `version` matches `expected_version`;
 /// otherwise logs a warning and returns `None`.
-pub(crate) fn unwrap_blob<T>(bytes: &[u8], expected_version: u8) -> Option<T>
+pub fn unwrap_blob<T>(bytes: &[u8], expected_version: u8) -> Option<T>
 where
     T: for<'de> Deserialize<'de>,
 {

@@ -33,9 +33,9 @@
 //! }
 //! ```
 
-use crate::events::{SwipeDir, SwipeRegion, SystemEvent};
-use crate::system::bus::{EVENTS, SharedI2c};
-use crate::ui::theme::{EDGE_GESTURE_ZONE, SCREEN_H, SCREEN_W};
+use app_core::events::{SwipeDir, SwipeRegion, SystemEvent};
+use crate::bus::{EVENTS, SharedI2c};
+use app_core::ui::theme::{EDGE_GESTURE_ZONE, SCREEN_H, SCREEN_W};
 use drivers::touch::{FT3168, TouchEvent};
 use embassy_time::{Duration, Timer};
 use embedded_hal::i2c::I2c as I2cTrait;
@@ -76,7 +76,7 @@ pub async fn touch_task(bus: &'static SharedI2c, mut state: TouchTaskState<'stat
 const SWIPE_THRESHOLD: i32 = 60;
 
 // `TouchData` struct lives in `app_core::data`. Re-exported so
-// `crate::system::tasks::touch::TouchData` imports keep resolving.
+// `crate::tasks::touch::TouchData` imports keep resolving.
 pub use app_core::data::TouchData;
 
 pub struct TouchTaskState<'d> {

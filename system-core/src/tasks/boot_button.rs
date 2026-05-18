@@ -14,8 +14,8 @@
 //! detector. Bounces during the guard window are invisible to the
 //! event channel.
 
-use crate::events::SystemEvent;
-use crate::system::bus::EVENTS;
+use app_core::events::SystemEvent;
+use crate::bus::EVENTS;
 use embassy_time::{Duration, Timer};
 use esp_hal::gpio::Input;
 

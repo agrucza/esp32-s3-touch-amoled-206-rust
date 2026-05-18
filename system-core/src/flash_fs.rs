@@ -9,30 +9,16 @@
 //! * **Text log files** - `append_line` / `for_each_line` for the
 //!   event log.
 //!
-//! ## Flash layout (per board)
+//! ## Flash layout
 //!
-//! Addresses below **mirror** the `storage` partition declared in
-//! each board's partition CSV. If you edit a CSV, update the
-//! corresponding constants here - firmware doesn't read the
-//! partition table at runtime (yet), so drift between the two
-//! lands writes in the wrong region.
-//!
-//! | Board | Start         | Size      | Blocks | Partition CSV                            |
-//! |-------|---------------|-----------|--------|------------------------------------------|
-//! | S3    | `0x0081_0000` | 23.875 MB | 6112   | `firmware-s3/partitions-s3.csv`          |
-//! | C6    | `0x0041_0000` | 11.875 MB | 3040   | `firmware-c6/partitions-c6.csv`          |
-//!
-//! Block size is the flash sector size (4 KB) across all board variants.
-//! The C6 firmware crate doesn't currently mount this filesystem - the
-//! CSV reserves the region for the eventual port, but the Rust-side
-//! constants below stay gated to `board-s3` until persistence work
-//! actually lands in firmware-c6.
-//!
-//! On S3 the last 64 KB (`0x01FF_0000..0x0200_0000`) is a
-//! `coredump` partition. The factory firmware lives below us at
-//! `0x0001_0000..0x0081_0000` (8 MB). The obsolete `system::nvs`
-//! module used to park data at `0x00FB_0000`; after this
-//! migration that region is no longer accessed by firmware code.
+//! This module is board-agnostic: the bin crate passes its
+//! [`FlashRegion`] (start + size) into [`FlashFs::mount_or_format`].
+//! The bin owns its partition CSV and is the single source of truth
+//! for its own flash geometry; firmware doesn't read the partition
+//! table at runtime, so the region passed in must match the bin's
+//! `storage` partition exactly or writes land in the wrong place.
+//! Block size is the flash sector size (4 KB) on every supported
+//! part.
 //!
 //! ## Layout on the filesystem
 //!
@@ -63,46 +49,46 @@ use littlefs_rust::{
 pub use littlefs_rust::Error as LfsError;
 use serde::{Deserialize, Serialize};
 
-use crate::system::fs::{unwrap_blob, wrap_blob};
+use crate::fs::{unwrap_blob, wrap_blob};
 
 // -- Region geometry --------------------------------------------------------
 
-// Board-specific region constants. Exactly one `board-*` Cargo
-// feature must be active; the CSV at
-// `firmware-<board>/partitions-<board>.csv` declares the matching
-// `storage` partition.
+/// Flash erase-sector size, in bytes. Board-agnostic - this is the
+/// NOR flash sector size on every supported part (4 KB).
+const BLOCK_SIZE: u32 = 4096;
 
-#[cfg(not(any(feature = "board-s3", feature = "board-c6")))]
-compile_error!("no board feature enabled - pick exactly one of board-s3 / board-c6");
+/// The flash slice this filesystem lives in.
+///
+/// Passed in by the bin crate, which owns its partition CSV and is
+/// the single source of truth for its own flash geometry. This crate
+/// stays board-agnostic: no `cfg`-selected region constants, no board
+/// identity. `start` and `size` must be `BLOCK_SIZE`-aligned and
+/// match the bin's `storage` partition exactly - drift lands writes
+/// in the wrong region (firmware doesn't read the partition table at
+/// runtime).
+#[derive(Debug, Clone, Copy)]
+pub struct FlashRegion {
+    /// Byte offset of the region from the base of flash.
+    pub start: u32,
+    /// Region length in bytes.
+    pub size: u32,
+}
 
-#[cfg(all(feature = "board-s3", feature = "board-c6"))]
-compile_error!("board-s3 and board-c6 are mutually exclusive");
+impl FlashRegion {
+    pub const fn new(start: u32, size: u32) -> Self {
+        Self { start, size }
+    }
 
-// The CSV exists (`firmware-c6/partitions-c6.csv`, storage at
-// 0x0041_0000, 11.875 MB). What's missing is the Rust-side port -
-// firmware-c6 is its own crate and doesn't import this module yet, so
-// the C6 constants haven't been needed. If a future code path *does*
-// need them under `feature = "board-c6"`, drop this compile_error and
-// add `pub const FLASH_FS_START: u32 = 0x0041_0000;` /
-// `pub const FLASH_FS_SIZE: u32 = 0x00BE_0000;` below.
-#[cfg(feature = "board-c6")]
-compile_error!("flash_fs.rs is S3-only today - C6 persistence lands when firmware-c6 grows past the smoke test");
+    /// Exclusive end offset.
+    pub const fn end(&self) -> u32 {
+        self.start + self.size
+    }
 
-/// Start of the LittleFS region, in bytes from the base of flash.
-/// Sector-aligned (4 KB).
-#[cfg(feature = "board-s3")]
-pub const FLASH_FS_START: u32 = 0x0081_0000;
-
-/// Size of the LittleFS region. On S3: 23.875 MB = 6112 erase blocks.
-#[cfg(feature = "board-s3")]
-pub const FLASH_FS_SIZE: u32 = 0x017E_0000;
-
-/// End offset (exclusive).
-#[allow(dead_code)] // available for any future caller that needs the upper bound
-pub const FLASH_FS_END: u32 = FLASH_FS_START + FLASH_FS_SIZE;
-
-const BLOCK_SIZE:  u32 = 4096;
-const BLOCK_COUNT: u32 = FLASH_FS_SIZE / BLOCK_SIZE;
+    /// Number of LittleFS blocks (erase sectors) in the region.
+    pub const fn block_count(&self) -> u32 {
+        self.size / BLOCK_SIZE
+    }
+}
 
 // -- Storage adapter --------------------------------------------------------
 
@@ -111,27 +97,30 @@ const BLOCK_COUNT: u32 = FLASH_FS_SIZE / BLOCK_SIZE;
 /// underlying `FlashStorage`.
 pub struct FlashFsStorage<'d> {
     flash: FlashStorage<'d>,
+    /// Byte offset of the region base - block addresses are relative
+    /// to this. Supplied by the bin via [`FlashRegion`].
+    start: u32,
 }
 
 impl<'d> FlashFsStorage<'d> {
-    pub fn new(flash: FLASH<'d>) -> Self {
-        Self { flash: FlashStorage::new(flash) }
+    pub fn new(flash: FLASH<'d>, start: u32) -> Self {
+        Self { flash: FlashStorage::new(flash), start }
     }
 }
 
 impl<'d> LfsStorage for FlashFsStorage<'d> {
     fn read(&mut self, block: u32, offset: u32, buf: &mut [u8]) -> Result<(), LfsError> {
-        let addr = FLASH_FS_START + block * BLOCK_SIZE + offset;
+        let addr = self.start + block * BLOCK_SIZE + offset;
         self.flash.read(addr, buf).map_err(map_storage_err)
     }
 
     fn write(&mut self, block: u32, offset: u32, data: &[u8]) -> Result<(), LfsError> {
-        let addr = FLASH_FS_START + block * BLOCK_SIZE + offset;
+        let addr = self.start + block * BLOCK_SIZE + offset;
         self.flash.write(addr, data).map_err(map_storage_err)
     }
 
     fn erase(&mut self, block: u32) -> Result<(), LfsError> {
-        let from = FLASH_FS_START + block * BLOCK_SIZE;
+        let from = self.start + block * BLOCK_SIZE;
         let to   = from + BLOCK_SIZE;
         self.flash.erase(from, to).map_err(map_storage_err)
     }
@@ -156,6 +145,8 @@ fn map_storage_err(e: FlashStorageError) -> LfsError {
 /// once at boot by [`FlashFs::mount_or_format`].
 pub struct FlashFs<'d> {
     fs: Filesystem<FlashFsStorage<'d>>,
+    /// Region length in bytes - reported by [`Self::usage`].
+    region_size: u32,
 }
 
 impl<'d> FlashFs<'d> {
@@ -163,20 +154,23 @@ impl<'d> FlashFs<'d> {
     /// Blank flash / corrupted superblock / version mismatch all
     /// fall through the format path on first boot.
     ///
-    /// Panics on format-then-mount failure; at that point the flash
-    /// hardware itself is suspect and there's nothing we can do.
-    pub fn mount_or_format(flash: FLASH<'d>) -> Self {
-        let storage = FlashFsStorage::new(flash);
-        let fs = match Filesystem::mount(storage, LfsConfig::new(BLOCK_SIZE, BLOCK_COUNT)) {
+    /// `region` is the flash slice to host the filesystem in,
+    /// supplied by the bin (single source of truth for its own
+    /// partition geometry). Panics on format-then-mount failure; at
+    /// that point the flash hardware itself is suspect.
+    pub fn mount_or_format(flash: FLASH<'d>, region: FlashRegion) -> Self {
+        let block_count = region.block_count();
+        let storage = FlashFsStorage::new(flash, region.start);
+        let fs = match Filesystem::mount(storage, LfsConfig::new(BLOCK_SIZE, block_count)) {
             Ok(fs) => {
-                log::info!("flash_fs: mounted ({} blocks, {} KB)", BLOCK_COUNT, FLASH_FS_SIZE / 1024);
+                log::info!("flash_fs: mounted ({} blocks, {} KB)", block_count, region.size / 1024);
                 fs
             }
             Err((e, mut storage)) => {
                 log::warn!("flash_fs: mount failed ({:?}), formatting", e);
-                Filesystem::format(&mut storage, &LfsConfig::new(BLOCK_SIZE, BLOCK_COUNT))
+                Filesystem::format(&mut storage, &LfsConfig::new(BLOCK_SIZE, block_count))
                     .expect("flash_fs: format failed");
-                let fs = Filesystem::mount(storage, LfsConfig::new(BLOCK_SIZE, BLOCK_COUNT))
+                let fs = Filesystem::mount(storage, LfsConfig::new(BLOCK_SIZE, block_count))
                     .map_err(|(e, _)| e)
                     .expect("flash_fs: mount after format failed");
                 log::info!("flash_fs: formatted + mounted");
@@ -192,7 +186,7 @@ impl<'d> FlashFs<'d> {
         let _ = fs.mkdir("/system/config");
         let _ = fs.mkdir("/system/logs");
         let _ = fs.mkdir("/system/sounds");
-        Self { fs }
+        Self { fs, region_size: region.size }
     }
 
     // -- Versioned blob helpers --------------------------------------------
@@ -419,7 +413,7 @@ impl<'d> FlashFs<'d> {
                 files += entries.iter().filter(|e| e.file_type == FileType::File).count() as u32;
             }
         }
-        FsUsage { files, total_bytes: FLASH_FS_SIZE }
+        FsUsage { files, total_bytes: self.region_size }
     }
 }
 
@@ -432,7 +426,7 @@ pub struct FsUsage {
 
 // -- Storage trait impl -----------------------------------------------------
 
-impl<'d> crate::system::fs::Storage for FlashFs<'d> {
+impl<'d> crate::fs::Storage for FlashFs<'d> {
     type Error = LfsError;
 
     fn append_line(&mut self, path: &str, bytes: &[u8]) -> Result<(), Self::Error> {

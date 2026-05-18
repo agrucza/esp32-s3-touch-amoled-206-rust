@@ -1,7 +1,7 @@
 //! Event log (flash + optional SD mirror).
 //!
 //! Appends a CSV line for each loggable [`SystemEvent`] to the
-//! on-flash event log (always, via [`crate::system::storage::Store`])
+//! on-flash event log (always, via [`crate::storage::Store`])
 //! and also to the SD card if present. Both sides use an identical
 //! text format, so the SD mirror is a straight file-append - no
 //! translation step.
@@ -43,7 +43,7 @@
 //! flip the `Store`'s online flag off so later writes skip the SD
 //! side until the user re-probes.
 
-use crate::system::storage::Store;
+use crate::storage::Store;
 use app_core::data::{BatteryHistory, BatterySample, TimeData};
 use app_core::events::{LoggedEvent, SystemEvent, classify_for_log};
 use app_core::log::parse_log_line;
@@ -134,8 +134,10 @@ pub fn backfill_sd(store: &mut Store) {
 
     // Split borrow: flash and SD are disjoint fields on the Store,
     // so we can hold both `&mut`s at once and stream flash->SD in
-    // a single pass without intermediate buffering.
-    let (flash, sd) = store.parts_mut();
+    // a single pass without intermediate buffering. `sd` is `None`
+    // on boards with no SD slot - but `sd_online()` is always false
+    // there, so we already returned above; the `else` is for safety.
+    let (flash, Some(sd)) = store.parts_mut() else { return };
 
     // Phase 1: learn the SD's highest seq.
     let mut sd_max: u32 = 0;

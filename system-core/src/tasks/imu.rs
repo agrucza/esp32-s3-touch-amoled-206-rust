@@ -39,8 +39,8 @@
 //! set bit 2 (WoM) in the STATUS1 register. Reading STATUS1 [...]
 //! will clear the WoM bit").
 
-use crate::events::{NUM_SELF_TESTS, SelfTestError, SelfTestId, SelfTestResult, SystemEvent};
-use crate::system::bus::{EVENTS, IMU_COMMAND, ImuCommand, SleepState, SharedI2c, SLEEP_WATCH};
+use app_core::events::{NUM_SELF_TESTS, SelfTestError, SelfTestId, SelfTestResult, SystemEvent};
+use crate::bus::{EVENTS, IMU_COMMAND, ImuCommand, SleepState, SharedI2c, SLEEP_WATCH};
 use drivers::imu::{ImuData, Qmi8658, Config as ImuConfig, Odr, WomConfig, WomInterrupt};
 use embassy_futures::select::{select, select3, Either, Either3};
 use embassy_time::{Duration, Timer};
@@ -167,7 +167,7 @@ const WOM_BLANKING_SAMPLES: u8 = 63;
 const GYRO_BIAS_SAMPLES: u8 = 64;
 
 // `MotionData` (struct + Default + From<&ImuData>) lives in
-// `app_core::data`. Re-exported so `crate::system::tasks::imu::
+// `app_core::data`. Re-exported so `crate::tasks::imu::
 // MotionData` imports in firmware keep resolving.
 pub use app_core::data::MotionData;
 

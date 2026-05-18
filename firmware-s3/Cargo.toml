@@ -9,16 +9,9 @@ path  = "src/main.rs"
 test  = false
 bench = false
 
-# -- Board selection ---------------------------------------------------------
-# Exactly one of these should be enabled. Board-specific layout
-# constants (flash partition sizes, pin maps, etc.) key off them.
-# The C6 port isn't active yet; `board-c6` exists so the
-# filesystem constants compile in both shapes and the numbers
-# show up next to each other.
-[features]
-default  = ["board-s3"]
-board-s3 = []
-board-c6 = []
+# No board-selection features: this bin *is* the board. Its flash
+# region geometry is a constant in `board.rs`, passed into the shared
+# `system_core::flash_fs` at construction - not a cfg feature.
 
 [dependencies]
 # --- Espressif bootloader descriptor (required by espflash to verify the image) ---
@@ -68,6 +61,7 @@ embedded-hal-bus   = { version = "0.3.0" }
 app-core     = { path = "../app-core",     features = ["serde"] }
 drivers      = { path = "../drivers",      features = ["display", "imu", "pmu", "rtc", "touch", "sdcard", "es8311", "es7210"] }
 firmware-hal = { path = "../firmware-hal" }
+system-core  = { path = "../system-core" }
 
 embedded-graphics-core = { workspace = true }
 embedded-graphics      = "0.8.2"

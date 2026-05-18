@@ -59,8 +59,8 @@
 //! }
 //! ```
 
-use crate::events::SystemEvent;
-use crate::system::bus::{EVENTS, SLEEP_WATCH, SharedI2c, SleepState};
+use app_core::events::SystemEvent;
+use crate::bus::{EVENTS, SLEEP_WATCH, SharedI2c, SleepState};
 use drivers::pmu::{InterruptSource, Pmu};
 use embassy_futures::select::{select, Either};
 use embassy_time::{Duration, Timer};
@@ -171,7 +171,7 @@ pub const SLEEP_POLL_INTERVAL_MS: u64 = 5_000;
 /// their inactive state when the read fails (screens treat that
 /// as "nothing is happening").
 // `PowerData` struct lives in `app_core::data`. Re-exported so
-// existing `crate::system::tasks::power::PowerData` imports keep
+// existing `crate::tasks::power::PowerData` imports keep
 // resolving; the snapshot() below constructs and returns it.
 pub use app_core::data::PowerData;
 

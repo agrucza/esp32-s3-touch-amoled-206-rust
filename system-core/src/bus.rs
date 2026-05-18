@@ -14,11 +14,11 @@
 //!     between Active and Monitor power modes, the power task
 //!     stretches its PMU poll cadence).
 //!
-//! Everything here is initialised in `main()` and then referenced
+//! Everything here is initialised by the manager and then referenced
 //! by tasks via `&'static` references, so lifetimes work out for
 //! `#[embassy_executor::task]` definitions.
 
-use crate::events::SystemEvent;
+use app_core::events::SystemEvent;
 use embassy_sync::{
     blocking_mutex::raw::CriticalSectionRawMutex,
     channel::Channel,
@@ -96,6 +96,6 @@ pub static RTC_COMMAND: Signal<CriticalSectionRawMutex, RtcCommand> = Signal::ne
 /// per-device coordination.
 pub type SharedI2c = Mutex<CriticalSectionRawMutex, I2c<'static, Blocking>>;
 
-/// One-time storage for the shared I2C bus. Initialised in
-/// `SystemManager::init` and handed to tasks as `&'static SharedI2c`.
+/// One-time storage for the shared I2C bus. Initialised by the
+/// manager and handed to tasks as `&'static SharedI2c`.
 pub static I2C_BUS: StaticCell<SharedI2c> = StaticCell::new();

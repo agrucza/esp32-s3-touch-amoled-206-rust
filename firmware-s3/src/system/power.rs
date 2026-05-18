@@ -1,23 +1,29 @@
-//! Power subsystem GPIO controls.
+//! Power subsystem GPIO controls - the S3 `Board` impl.
 //!
-//! Holds the non-I2C power hardware that the main task needs
-//! direct synchronous access to:
+//! Holds the non-I2C, board-specific power hardware:
 //!
-//!   * **SYS_OUT latch** (GPIO10) - holds the board power rail
-//!     on; released on `shutdown()` to power down.
+//!   * **SYS_OUT latch** (GPIO10) - holds the board power rail on;
+//!     released on `shutdown()` to power down.
 //!   * **Motor** (GPIO18) - haptic feedback for button presses.
+//!
+//! Plus the S3 light-sleep wake-pin arming (touch INT GPIO38, BOOT
+//! GPIO0, RTC INT GPIO39). This is the concrete
+//! `system_core::board::Board` implementation for this board; the
+//! shared manager calls it through that trait and is otherwise
+//! board-blind.
 //!
 //! The I2C side of the PMU (AXP2101 register access, battery
 //! readings, interrupt polling) lives in
-//! `system::tasks::power::PowerTaskState`. Initialization of
-//! the PMU itself happens here in `PowerControls::init` since
-//! the rails must be enabled before any other I2C subsystem
-//! can be used, and the caller receives a `Pmu` handle that
-//! then gets wrapped in `PowerTaskState`.
+//! `system_core::tasks::power::PowerTaskState`. PMU init happens
+//! here in [`PowerControls::init`] since the rails must be enabled
+//! before any other I2C subsystem; the caller wraps the returned
+//! `Pmu` in a `PowerTaskState` for the polling task.
 
 use drivers::pmu::{Config as PmuConfig, Pmu};
 use embedded_hal::i2c::I2c;
 use esp_hal::gpio::Output;
+use esp_hal::peripherals::GPIO;
+use system_core::board::Board;
 
 /// Snapshot of power-related readings at one point in time.
 /// Produced by `PowerTaskState::snapshot`; consumed by the UI
@@ -71,20 +77,39 @@ impl<'d> PowerControls<'d> {
 
         Ok((Self { sys_out, motor }, pmu))
     }
+}
 
-    /// Release the SYS_OUT latch - powers down the board.
-    pub fn shutdown(&mut self) {
-        log::info!("PWR: releasing SYS_OUT latch - powering off");
-        self.sys_out.set_high();
-    }
-
+impl<'d> Board for PowerControls<'d> {
     /// Drive the haptic motor high (start buzz).
-    pub fn buzz(&mut self) {
+    fn buzz(&mut self) {
         self.motor.set_high();
     }
 
     /// Drive the haptic motor low (stop buzz).
-    pub fn buzz_stop(&mut self) {
+    fn buzz_stop(&mut self) {
         self.motor.set_low();
+    }
+
+    /// Release the SYS_OUT latch - powers down the board.
+    fn shutdown(&mut self) {
+        log::info!("PWR: releasing SYS_OUT latch - powering off");
+        self.sys_out.set_high();
+    }
+
+    /// Re-arm GPIO wake for touch_int(38), boot_btn(0), and
+    /// rtc_int(39). The embassy async GPIO drivers used by those
+    /// pins' tasks call `listen_with_options(..., wake_up_from_
+    /// light_sleep=false)` on every wait, which clears the
+    /// `wakeup_enable` bit set at init. We set it back immediately
+    /// before `rtc.sleep()`. `int_type=4` is LowLevel, which is what
+    /// the INT lines drive when active (active-low on all three) and
+    /// is the only type esp-hal allows for wake-from-light-sleep.
+    fn arm_wake_sources(&mut self) {
+        for &gpio_num in &[0u8, 38u8, 39u8] {
+            GPIO::regs().pin(gpio_num as usize).modify(|_, w| unsafe {
+                w.wakeup_enable().set_bit();
+                w.int_type().bits(4)
+            });
+        }
     }
 }

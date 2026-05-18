@@ -36,8 +36,8 @@
 //! }
 //! ```
 
-use crate::events::SystemEvent;
-use crate::system::bus::{EVENTS, RTC_COMMAND, RtcCommand, SharedI2c};
+use app_core::events::SystemEvent;
+use crate::bus::{EVENTS, RTC_COMMAND, RtcCommand, SharedI2c};
 use drivers::rtc::{Alarm, Rtc, Config as RtcConfig, DateTime as RtcDateTime, TimerClock, TimerOutput};
 use embassy_futures::select::{select3, Either3};
 use embassy_time::{Duration, Timer};
@@ -114,7 +114,7 @@ pub async fn rtc_task(bus: &'static SharedI2c, mut state: RtcTaskState<'static>)
 }
 
 // `TimeData` (struct + Default + From<&RtcDateTime>) lives in
-// `app_core::data`. Re-exported so existing `crate::system::tasks::
+// `app_core::data`. Re-exported so existing `crate::tasks::
 // rtc::TimeData` imports in firmware keep resolving.
 pub use app_core::data::TimeData;
 

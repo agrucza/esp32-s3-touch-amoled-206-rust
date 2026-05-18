@@ -4,6 +4,7 @@ members = [
     "app-core",
     "drivers",
     "firmware-hal",
+    "system-core",
     "firmware-s3",
     "firmware-c6",
 ]
@@ -16,6 +17,7 @@ default-members = [
     "app-core",
     "drivers",
     "firmware-hal",
+    "system-core",
     "firmware-s3",
 ]
 

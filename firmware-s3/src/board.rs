@@ -115,3 +115,14 @@ pub const MIC_PA_CTRL:   u8 = 46;  // PA enable (active high)
 // Haptic motor
 // =============================================================================
 pub const MOTOR_PIN: u8 = 18;
+
+// =============================================================================
+// Flash filesystem region (LittleFS)
+//
+// This bin owns its partition geometry. Keep in sync with the
+// `storage` row in `partitions-s3.csv` (0x810000, 0x17E0000) - the
+// shared `system_core::flash_fs` takes these as a `FlashRegion` and
+// has no board identity of its own.
+// =============================================================================
+pub const FLASH_FS_START: u32 = 0x0081_0000; // byte offset
+pub const FLASH_FS_SIZE:  u32 = 0x017E_0000; // 23.875 MB

@@ -1,10 +1,13 @@
 #![no_std]
 
-//! Shared hardware-init helpers for the ESP32-{S3, C6}-Touch-AMOLED-2.06 boards.
+//! Display hardware-init helpers shared by the board bin crates.
 //!
-//! See the crate-level comment in `Cargo.toml` for the design intent: this
-//! crate hosts esp-hal-coupled init code that both `firmware-s3` and
-//! `firmware-c6` consume. Board-specific pin maps and main-loop wiring stay
-//! in the bin crates.
+//! This crate is the display HAL: the esp-hal-coupled QSPI bus build,
+//! the CO5300 driver wrapper, `init_display`, and the framebuffer
+//! statics. The bin crates carry their own `board.rs` (pin maps) and
+//! call into this crate for display bring-up.
+//!
+//! Everything else board-agnostic (the system layer + the storage
+//! subsystem, including `flash_fs`/`fs`) lives in `system-core`.
 
 pub mod display;

@@ -1,29 +1,20 @@
-extern crate alloc;
-
-use crate::config::Config;
-use firmware_hal::display::{self as display_hal, HEIGHT, NUM_TILES, TILE_H, WIDTH};
-use crate::events::SystemEvent;
-use crate::system::audio::AudioSystem;
-use crate::system::bus::{EVENTS, IMU_COMMAND, RTC_COMMAND, SLEEP_WATCH, SleepState};
-use crate::system::display::Display;
-use crate::system::power::PowerControls;
-use crate::system::tasks::boot_button::BootButtonTaskState;
-use crate::system::tasks::imu::ImuTaskState;
-use crate::system::tasks::power::PowerTaskState;
-use crate::system::tasks::rtc::RtcTaskState;
-use crate::system::tasks::touch::TouchTaskState;
-use crate::ui::primitives;
-use crate::ui::types::{DirtyRegion, RenderCtx, SystemData};
+use app_core::config::Config;
+use firmware_hal::display::{HEIGHT, NUM_TILES, TILE_H, WIDTH};
+use app_core::events::SystemEvent;
+use crate::board::Board;
+use crate::bus::{EVENTS, IMU_COMMAND, RTC_COMMAND, SLEEP_WATCH, SleepState};
+use crate::display::Display;
+use crate::tasks::boot_button::BootButtonTaskState;
+use crate::tasks::imu::ImuTaskState;
+use crate::tasks::power::PowerTaskState;
+use crate::tasks::rtc::RtcTaskState;
+use crate::tasks::touch::TouchTaskState;
+use app_core::ui::primitives;
+use app_core::ui::types::{DirtyRegion, RenderCtx, SystemData};
 use embedded_graphics::draw_target::DrawTarget;
 use embassy_futures::select::{select, Either};
 use embassy_time::{Duration, Instant, Timer, with_timeout};
-use esp_hal::{
-    dma::DmaDescriptor,
-    gpio::{Input, InputConfig, Level, Output, OutputConfig, Pull},
-    i2c::master::{Config as I2cConfig, I2c},
-    i2s::master::asynch::{I2sReadDmaTransferAsync, I2sWriteDmaTransferAsync},
-    time::Rate,
-};
+use esp_hal::gpio::Input;
 
 // -- CPU frequency scaling ---------------------------------------------------
 
@@ -70,15 +61,6 @@ fn set_cpu_freq(freq: CpuFreq) {
     esp_hal::rom::ets_update_cpu_frequency_rom(freq_mhz);
 }
 
-// Type aliases for complex generic types. `Display<'d>` lives in
-// `system::display` since it's fundamentally a display concern.
-pub type AudioTx<'d> = I2sWriteDmaTransferAsync<'d, &'static mut [u8]>;
-pub type AudioRx<'d> = I2sReadDmaTransferAsync<'d, &'static mut [u8]>;
-
-/// Size of the per-tick mic RX drain buffer. Matches the I2S RX DMA
-/// buffer in `main.rs` so one `pop()` can empty a full buffer.
-const MIC_DRAIN_BUF_SIZE: usize = 16_384;
-
 // -- Persistence paths + versions -------------------------------------------
 //
 // Used by both the boot-time load (in `init()`) and the
@@ -91,31 +73,6 @@ const ALARMS_PATH:    &str = "/system/config/alarms.bin";
 const CONFIG_VERSION: u8   = 1;
 const ALARMS_VERSION: u8   = 1;
 
-/// Peripheral tokens for the audio subsystem, stashed on
-/// `SystemManager` until `start_audio()` consumes them. Keeping the
-/// whole bundle in one struct lets us `.take()` it as a single move
-/// when audio is eventually brought online, without re-plumbing
-/// peripherals from outside the manager.
-///
-/// The audio subsystem is intentionally NOT started in `init()` so the
-/// ES8311 DAC, ES7210 ADC, I2S DMA, MCLK, and speaker amp all stay in
-/// their post-reset low-power state. When a feature needs audio, it
-/// calls `SystemManager::start_audio()` which wires everything up via
-/// `crate::system::audio::init_audio`.
-struct PendingAudio<'d> {
-    i2s0: esp_hal::peripherals::I2S0<'d>,
-    dma_ch1: esp_hal::peripherals::DMA_CH1<'d>,
-    audio_mclk: esp_hal::peripherals::GPIO16<'d>,
-    audio_bclk: esp_hal::peripherals::GPIO41<'d>,
-    audio_ws: esp_hal::peripherals::GPIO45<'d>,
-    audio_dout: esp_hal::peripherals::GPIO40<'d>,
-    audio_din: esp_hal::peripherals::GPIO42<'d>,
-    audio_pa: esp_hal::peripherals::GPIO46<'d>,
-    tx_buffer: &'static mut [u8],
-    rx_buffer: &'static mut [u8],
-    tx_descriptors: &'static mut [DmaDescriptor],
-    rx_descriptors: &'static mut [DmaDescriptor],
-}
 
 /// Framebuffer row stride in bytes. Used when sizing the per-tile
 /// FB slice handed to the hash function.
@@ -193,37 +150,31 @@ pub struct TaskBundle {
     pub power: PowerTaskState,
 }
 
-// `audio`, `storage`, and `tx_transfer` are held-but-not-read once
-// populated: they own hardware resources whose Drop impls would
-// deinitialize the peripherals. They stay as fields so the hardware
-// keeps running after `start_audio` brings them online.
+/// The board-agnostic system brain. Generic over the [`Board`] seam;
+/// everything board-specific is injected via `board` or constructed
+/// in the bin and passed to [`SystemManager::new`].
+///
+/// The audio *stack* lives in [`crate::audio`] (shared, generic).
+/// Audio bring-up wiring (concrete peripheral tokens) is deferred to
+/// the bin until there's a real caller - it was dead code here.
 #[allow(dead_code)]
-pub struct SystemManager<'d> {
+pub struct SystemManager<'d, B: Board> {
     // Shared I2C bus behind an async mutex. Lives in the global
     // `I2C_BUS` StaticCell; tasks and the main loop lock it before
-    // each access. See `system::bus` for details.
-    i2c_bus: &'static crate::system::bus::SharedI2c,
+    // each access. See `crate::bus` for details.
+    i2c_bus: &'static crate::bus::SharedI2c,
 
-    // Non-I2C power hardware (SYS_OUT latch, haptic motor). The
-    // I2C side of the PMU lives in the power task.
-    pub power: PowerControls<'d>,
+    // The board seam: haptic, power-off, wake-source arming.
+    pub board: B,
 
     // Peripherals
     pub display: Display<'d>,
-    pub audio: Option<AudioSystem<'d>>,
 
     // Tearing-effect line from the display. We wait for its rising
     // edge (vblank start) before pushing pixels so partial flushes
-    // don't land mid-scanout.
-    lcd_te: Input<'d>,
-
-    // DMA transfers - populated by `start_audio`, `None` until then.
-    tx_transfer: Option<AudioTx<'d>>,
-    rx_transfer: Option<AudioRx<'d>>,
-
-    // Raw audio peripheral tokens stashed at boot, consumed by
-    // `start_audio`. `None` after audio has been started once.
-    pending_audio: Option<PendingAudio<'d>>,
+    // don't land mid-scanout. `None` on boards with no TE GPIO -
+    // the wait is then skipped entirely (no timeout penalty).
+    lcd_te: Option<Input<'d>>,
 
     // UI + app state: screen, nav stack, sleep flag, display
     // state, cached snapshots, dim/idle timers, buzz pattern,
@@ -233,9 +184,6 @@ pub struct SystemManager<'d> {
 
     // Periodic loop counter (diagnostics).
     tick_count: u32,
-
-    // Pre-allocated drain buffer for the mic RX DMA ring.
-    mic_drain_buf: alloc::boxed::Box<[u8]>,
 
     // Per-tile FNV-1a hashes from the previous frame. After each tile is
     // rendered we hash its FB contents; if the hash differs from this
@@ -259,7 +207,7 @@ pub struct SystemManager<'d> {
     // SD-mirror online flag. Mirrored writes, flash-only escape
     // hatch (`flash_mut`) and SD-only escape hatch (`sd_mut`) all
     // live on this one handle. See `system::storage` for the API.
-    store: crate::system::storage::Store<'d>,
+    store: crate::storage::Store<'d>,
 
     // Last storage usage pushed into the event channel. Compared
     // against a fresh summary after each save / boot; we only
@@ -284,253 +232,58 @@ const SD_RECOVER_INTERVAL: Duration = Duration::from_secs(5);
 // `app_core::nav` so the stack's push/pop semantics are
 // host-testable.
 
-/// All peripheral tokens needed by the system manager.
-///
-/// Groups the raw esp-hal peripheral tokens so `SystemManager::init()` has
-/// a single parameter instead of 30+ individual pins. Created in main()
-/// right after `esp_hal::init()`.
-pub struct Peripherals<'d> {
-    // I2C bus
-    pub i2c0: esp_hal::peripherals::I2C0<'d>,
-    pub i2c_sda: esp_hal::peripherals::GPIO15<'d>,
-    pub i2c_scl: esp_hal::peripherals::GPIO14<'d>,
-
-    // Power
-    pub sys_out_pin: esp_hal::peripherals::GPIO10<'d>,
-    pub motor_pin: esp_hal::peripherals::GPIO18<'d>,
-
-    // Display
-    pub spi2: esp_hal::peripherals::SPI2<'d>,
-    pub lcd_sclk: esp_hal::peripherals::GPIO11<'d>,
-    pub lcd_sio0: esp_hal::peripherals::GPIO4<'d>,
-    pub lcd_sio1: esp_hal::peripherals::GPIO5<'d>,
-    pub lcd_sio2: esp_hal::peripherals::GPIO6<'d>,
-    pub lcd_sio3: esp_hal::peripherals::GPIO7<'d>,
-    pub lcd_cs: esp_hal::peripherals::GPIO12<'d>,
-    pub dma_ch0: esp_hal::peripherals::DMA_CH0<'d>,
-    pub lcd_reset: esp_hal::peripherals::GPIO8<'d>,
-    pub lcd_te: esp_hal::peripherals::GPIO13<'d>,
-
-    // Input
-    pub btn_boot: esp_hal::peripherals::GPIO0<'d>,
-    pub touch_rst: esp_hal::peripherals::GPIO9<'d>,
-    pub touch_int: esp_hal::peripherals::GPIO38<'d>,
-    pub rtc_int: esp_hal::peripherals::GPIO39<'d>,
-    pub imu_int1: esp_hal::peripherals::GPIO21<'d>,
-
-    // SD card
-    pub spi3: esp_hal::peripherals::SPI3<'d>,
-    pub sd_sck: esp_hal::peripherals::GPIO2<'d>,
-    pub sd_mosi: esp_hal::peripherals::GPIO1<'d>,
-    pub sd_miso: esp_hal::peripherals::GPIO3<'d>,
-    pub sd_cs: esp_hal::peripherals::GPIO17<'d>,
-
-    // Audio
-    pub i2s0: esp_hal::peripherals::I2S0<'d>,
-    pub dma_ch1: esp_hal::peripherals::DMA_CH1<'d>,
-    pub audio_mclk: esp_hal::peripherals::GPIO16<'d>,
-    pub audio_bclk: esp_hal::peripherals::GPIO41<'d>,
-    pub audio_ws: esp_hal::peripherals::GPIO45<'d>,
-    pub audio_dout: esp_hal::peripherals::GPIO40<'d>,
-    pub audio_din: esp_hal::peripherals::GPIO42<'d>,
-    pub audio_pa: esp_hal::peripherals::GPIO46<'d>,
-
-    // RTC controller (for light sleep)
-    pub lpwr: esp_hal::peripherals::LPWR<'d>,
-
-    // Flash controller (for esp-storage / NVS).
-    pub flash: esp_hal::peripherals::FLASH<'d>,
-
-    // Audio DMA buffers (from dma_circular_buffers! macro in main)
-    pub tx_buffer: &'static mut [u8],
-    pub rx_buffer: &'static mut [u8],
-    pub tx_descriptors: &'static mut [DmaDescriptor],
-    pub rx_descriptors: &'static mut [DmaDescriptor],
-}
-
-impl SystemManager<'static> {
-    /// Initialize all subsystems and assemble the system manager.
+impl<B: Board> SystemManager<'static, B> {
+    /// Assemble the manager from already-constructed, board-specific
+    /// pieces. The bin builds all hardware (I2C bus + tasks, power /
+    /// `Board` impl, display, TE input, RTC controller, `Store` with
+    /// its `FlashRegion`) and takes the initial sensor snapshots;
+    /// `new` does the board-agnostic remainder: load Config/Alarms
+    /// from flash, recover the event-log seq, probe SD, log boot,
+    /// seed the UI snapshot, build the `Model`, and assemble.
     ///
-    /// This is the single entry point for the entire system. Call it from
-    /// main() after HAL init, timer start, and logger setup.
-    ///
-    /// Requires `'static` peripherals (from `esp_hal::init`) so the
-    /// I2C bus can be stored in the global `I2C_BUS` static mutex
-    /// for sharing with peripheral tasks.
-    ///
-    /// Init order is critical:
-    /// 1. I2C bus (shared by PMU, touch, IMU, RTC, codecs)
-    /// 2. Power (enables all rails, must be first peripheral)
-    /// 3. Framebuffer allocation (PSRAM heap is already set up
-    ///    by `main` before this function is called)
-    /// 4. Display
-    /// 5. Input (touch + buttons)
-    /// 6. SD card
-    /// 7. Sensors (RTC + IMU with ~500ms gyro calibration)
-    /// 8. Audio peripherals stashed into `pending_audio` but NOT
-    ///    started. A caller invokes `start_audio()` later to actually
-    ///    bring the codecs, I2S DMA, and speaker amp online. This
-    ///    keeps idle current low on battery by default.
-    ///
-    /// Returns `(SystemManager, TaskBundle)` - the bundle holds the
-    /// per-device task state structs that `main` then passes to
-    /// `spawner.spawn()` to start the peripheral tasks.
-    pub async fn init(p: Peripherals<'static>) -> (Self, TaskBundle) {
-        // 1. I2C bus
-        let mut i2c = I2c::new(p.i2c0, I2cConfig::default().with_frequency(Rate::from_khz(400)))
-            .unwrap()
-            .with_sda(p.i2c_sda)
-            .with_scl(p.i2c_scl);
-
-        // 2. Power - must init first (enables all power rails).
-        // PowerControls owns the GPIO sides (sys_out latch, motor);
-        // PowerTaskState owns the I2C-driver Pmu handle for polling.
-        let (power, pmu) = PowerControls::init(
-            Output::new(p.sys_out_pin, Level::Low, OutputConfig::default()),
-            Output::new(p.motor_pin, Level::Low, OutputConfig::default()),
-            &mut i2c,
-        ).expect("PMU init failed - halting");
-        let power_state = PowerTaskState::new(pmu);
-        Timer::after(Duration::from_millis(20)).await;
-
-        // 3. Framebuffer. Lives in internal-SRAM BSS (via firmware-hal's
-        // static `FRAMEBUFFER`), not on the PSRAM heap - keeps the
-        // per-tile flush copy fast (SRAM-to-SRAM into the bus's DMA
-        // buffer) and matches what the C6 already does.
-        let fb: &'static mut [u8] = display_hal::take_framebuffer();
-
-        // 4. Display
-        let display = crate::system::display::init_display(
-            p.spi2, p.lcd_sclk, p.lcd_sio0, p.lcd_sio1,
-            p.lcd_sio2, p.lcd_sio3, p.lcd_cs, p.dma_ch0,
-            Output::new(p.lcd_reset, Level::High, OutputConfig::default()),
-            fb,
-        ).await;
-
-        // TE (tearing-effect) input. The CO5300 init already enabled
-        // TE in vblank-only mode (cmd 0x35 [0x00]); we just need to
-        // watch the rising edge before each flush.
-        let lcd_te = Input::new(p.lcd_te, InputConfig::default().with_pull(Pull::None));
-
-        // 5. Touch + BOOT button task states.
-        //
-        // `TouchTaskState::init` does the FT3168 reset sequence,
-        // reads the chip ID, and captures the INT# input. The BOOT
-        // button is just an async GPIO wait.
-        //
-        // Arm RTC-wake on the touch INT, BOOT button, and PCF85063
-        // INT lines before handing them to the tasks. `wakeup_enable`
-        // sets a persistent hardware register bit; the async edge
-        // waits done by the tasks coexist with it.
-        let mut touch_int = Input::new(p.touch_int, InputConfig::default().with_pull(Pull::Up));
-        let mut boot_btn = Input::new(p.btn_boot, InputConfig::default().with_pull(Pull::Up));
-        let mut rtc_int = Input::new(p.rtc_int, InputConfig::default().with_pull(Pull::Up));
-        let _ = touch_int.wakeup_enable(true, esp_hal::gpio::WakeEvent::LowLevel);
-        let _ = boot_btn.wakeup_enable(true, esp_hal::gpio::WakeEvent::LowLevel);
-        let _ = rtc_int.wakeup_enable(true, esp_hal::gpio::WakeEvent::LowLevel);
-
-        let touch_state = TouchTaskState::init(
-            Output::new(p.touch_rst, Level::High, OutputConfig::default()),
-            touch_int,
-            &mut i2c,
-        ).await;
-        let boot_button_state = BootButtonTaskState::new(boot_btn);
-
-        // 6. Persistent storage: flash + SD behind one handle.
-        // Mounts the on-flash LittleFS (formats on first boot /
-        // corrupted superblock) and builds the SD volume manager.
-        // Neither touches SD media yet - `store.probe_sd()` below
-        // does that once the system clock is seeded.
-        let mut store = crate::system::storage::Store::init(
-            p.flash,
-            p.spi3, p.sd_sck, p.sd_mosi, p.sd_miso,
-            Output::new(p.sd_cs, Level::High, OutputConfig::default()),
-        );
-
-        // 7. Sensors (RTC + IMU). Each owns its INT line and driver.
-        // `RtcTaskState::init` brings the PCF85063A up, sets a default
-        // time if the oscillator stopped, and arms the half-minute
-        // interrupt. `ImuTaskState::init` resets the QMI8658C and
-        // collects ~512 ms of gyro-bias samples.
-        let rtc_state = RtcTaskState::init(
-            rtc_int,
-            &mut i2c,
-        );
-        let imu_state = ImuTaskState::init(
-            Input::new(p.imu_int1, InputConfig::default().with_pull(Pull::Down)),
-            &mut i2c,
-        ).await;
-
-        // Seed the cached data so the first frame has something
-        // reasonable to render before task events arrive.
-        let initial_time = rtc_state.snapshot(&mut i2c);
-        let initial_power = power_state.snapshot(&mut i2c);
-
-        // Seed the shared wall clock so any SD writes that happen
-        // before the first `TimeUpdated` event (e.g. the boot line
-        // below) see the real calendar time.
+    /// Returns `(SystemManager, TaskBundle)` - the bin spawns one
+    /// task per peripheral from the bundle.
+    pub fn new(
+        i2c_bus: &'static crate::bus::SharedI2c,
+        board: B,
+        display: Display<'static>,
+        lcd_te: Option<Input<'static>>,
+        rtc: esp_hal::rtc_cntl::Rtc<'static>,
+        mut store: crate::storage::Store<'static>,
+        initial_time: app_core::data::TimeData,
+        initial_power: app_core::data::PowerData,
+        touch_state: TouchTaskState<'static>,
+        boot_button_state: BootButtonTaskState<'static>,
+        rtc_state: RtcTaskState<'static>,
+        imu_state: ImuTaskState<'static>,
+        power_state: PowerTaskState,
+    ) -> (Self, TaskBundle) {
+        // Seed the shared wall clock so any SD writes before the
+        // first `TimeUpdated` (e.g. the boot line) see real calendar
+        // time.
         drivers::sdcard::update_wall_clock(
-            initial_time.year,   initial_time.month,  initial_time.day,
-            initial_time.hour,   initial_time.minute, initial_time.second,
+            initial_time.year, initial_time.month, initial_time.day,
+            initial_time.hour, initial_time.minute, initial_time.second,
         );
 
-        // 8. Stash audio peripherals for later `start_audio()`.
-        // Hardware stays in post-reset low-power state until then.
-        let pending_audio = Some(PendingAudio {
-            i2s0: p.i2s0,
-            dma_ch1: p.dma_ch1,
-            audio_mclk: p.audio_mclk,
-            audio_bclk: p.audio_bclk,
-            audio_ws: p.audio_ws,
-            audio_dout: p.audio_dout,
-            audio_din: p.audio_din,
-            audio_pa: p.audio_pa,
-            tx_buffer: p.tx_buffer,
-            rx_buffer: p.rx_buffer,
-            tx_descriptors: p.tx_descriptors,
-            rx_descriptors: p.rx_descriptors,
-        });
-
-        log::info!("System: all subsystems initialized (audio stashed)");
-
-        // Dump PMU status now that all ADC channels have had time to
-        // settle during display, touch, SD, and sensor init (~1 s).
-        power_state.dump_status(&mut i2c);
-
-        // Move the I2C bus into the global StaticCell-backed mutex.
-        // From here on, every access goes through `i2c_bus.lock()`.
-        // The `i2c` local is consumed and no longer accessible.
-        let i2c_bus: &'static crate::system::bus::SharedI2c = crate::system::bus::I2C_BUS
-            .init(embassy_sync::mutex::Mutex::new(i2c));
-
-        // Load Config / AlarmState from their flash files, falling
-        // back to defaults if either is missing, version-mismatched,
-        // or fails to deserialise. Flash is the authoritative source
-        // for both; the SD mirror (if present) is a copy.
+        // Load Config / AlarmState from flash; fall back to defaults
+        // on missing / version-mismatch / deserialise failure.
         let stored_config = store.load_blob::<Config>(CONFIG_PATH, CONFIG_VERSION);
-        let stored_alarms = store.load_blob::<app_core::ui::types::AlarmState>(ALARMS_PATH, ALARMS_VERSION);
+        let stored_alarms =
+            store.load_blob::<app_core::ui::types::AlarmState>(ALARMS_PATH, ALARMS_VERSION);
         let config_source = if stored_config.is_some() { "loaded" } else { "default" };
         let alarms_source = if stored_alarms.is_some() { "loaded" } else { "default" };
         let loaded_config = stored_config.unwrap_or_else(Config::default);
         let loaded_alarms = stored_alarms.unwrap_or_default();
 
-        // Recover the monotonic seq counter by scanning
-        // /system/logs/events.log on flash. Must happen before the
-        // first log line is emitted.
-        crate::system::event_log::init_seq_from_flash(&mut store);
+        // Recover the monotonic seq counter before the first log line.
+        crate::event_log::init_seq_from_flash(&mut store);
 
-        // Probe for an SD card. On success, the store internally
-        // runs the flash->SD event-log backfill so any entries the
-        // card missed while absent land before the fresh boot line.
+        // Probe SD; on success the store backfills the event log.
         let sd_online = store.probe_sd();
 
-        // Record the power-up in the event log. Writes
-        // /system/logs/events.log on flash (always) and on SD if
-        // the mirror is online.
-        crate::system::event_log::log_boot(&mut store, &initial_time);
+        crate::event_log::log_boot(&mut store, &initial_time);
 
-        // Recompute filesystem usage after log_boot - first boot
-        // creates events.log, so the file count bumps by 1.
         let fs_usage = store.usage();
         let initial_usage = app_core::data::StorageUsage {
             files: fs_usage.files,
@@ -544,47 +297,30 @@ impl SystemManager<'static> {
             if sd_online { "online" } else { "offline" },
         );
 
-        // Seed the initial cached-data snapshot so the first frame
-        // renders against sensible values before any task events
-        // arrive. Default-initialize everything else.
+        // Seed the first cached-data snapshot before task events.
         let mut cached_data = SystemData::default();
         cached_data.time = initial_time;
         cached_data.power = initial_power;
         cached_data.alarms = loaded_alarms;
         cached_data.storage = initial_usage;
-        // Back-fill the battery-history ring buffer from the flash
-        // log so the battery settings graph has something to render
-        // before the first new BatteryChanged event arrives.
-        crate::system::event_log::load_battery_history(
+        crate::event_log::load_battery_history(
             &mut store, &mut cached_data.battery_history,
         );
 
-        // Construct the Model (UI + cached state + dispatch).
         let model = app_core::model::Model::new(
-            cached_data,
-            loaded_config,
-            Instant::now(),
+            cached_data, loaded_config, Instant::now(),
         );
-
-        // Construct the RTC controller for hardware light sleep.
-        let rtc = esp_hal::rtc_cntl::Rtc::new(p.lpwr);
 
         let manager = Self {
             i2c_bus,
-            power,
+            board,
             display,
-            audio: None,
             lcd_te,
-            tx_transfer: None,
-            rx_transfer: None,
-            pending_audio,
             model,
             tick_count: 0,
-            mic_drain_buf: alloc::vec![0u8; MIC_DRAIN_BUF_SIZE].into_boxed_slice(),
             tile_hashes: [0u32; NUM_TILES],
-            // First render after boot has no last-rendered snapshot to
-            // compare against, so force a full pass before letting
-            // dirty_rects take over.
+            // First render after boot has no snapshot to diff; force
+            // a full pass before dirty_rects takes over.
             force_full_redraw: true,
             rtc,
             store,
@@ -600,8 +336,7 @@ impl SystemManager<'static> {
             power: power_state,
         };
 
-        // Drop to 80 MHz baseline after init. Render boosts
-        // to 160 MHz temporarily for frame throughput.
+        // Baseline clock; render boosts to 160 MHz per-frame.
         set_cpu_freq(CpuFreq::Mhz80);
 
         (manager, bundle)
@@ -613,61 +348,8 @@ impl SystemManager<'static> {
     /// to each spawned peripheral task after `init` returns. The
     /// underlying field stays private; every runtime I2C user in
     /// manager goes through `self.i2c_bus.lock().await` directly.
-    pub fn i2c_bus(&self) -> &'static crate::system::bus::SharedI2c {
+    pub fn i2c_bus(&self) -> &'static crate::bus::SharedI2c {
         self.i2c_bus
-    }
-
-    /// Bring the audio subsystem online. Consumes the peripheral
-    /// tokens stashed at boot and calls `init_audio`, which starts
-    /// I2S DMA (MCLK/BCLK/LRCK output), configures the ES8311 DAC and
-    /// ES7210 ADC over I2C, and enables the NS4150B speaker amp.
-    ///
-    /// Only succeeds once per boot - if audio has already been
-    /// started (or this is called a second time), it logs and
-    /// returns without touching the hardware.
-    #[allow(dead_code)]
-    pub async fn start_audio(&mut self) {
-        let Some(pa) = self.pending_audio.take() else {
-            log::warn!("Audio: start_audio called but already started");
-            return;
-        };
-        log::info!("Audio: bringing subsystem online...");
-
-        // Enable the audio analog rail (ALDO1 → A3V3) before any
-        // codec / ADC access. The rail is held off at boot by
-        // `Pmu::init` to save idle current while the audio stack
-        // is dormant, so it MUST be turned on here before
-        // `init_audio` touches the ES8311 or ES7210 over I²C.
-        // Leaving this step out will manifest as I²C NAKs or
-        // silent corruption inside the codec / ADC init routines,
-        // so this block is deliberately part of `start_audio`
-        // rather than a separate method the caller might forget
-        // to invoke. See `Pmu::set_audio_rail` for the full
-        // audio-init contract.
-        {
-            let mut i2c = self.i2c_bus.lock().await;
-            let pmu = drivers::pmu::Pmu::new(drivers::pmu::Config::default());
-            match pmu.set_audio_rail(&mut *i2c, true) {
-                Ok(()) => log::info!("Audio: ALDO1 (A3V3) enabled"),
-                Err(_) => log::warn!("Audio: failed to enable ALDO1 - codec/ADC init will likely fail"),
-            }
-        }
-        // Let the LDO settle before driving I²C to the codec/ADC.
-        Timer::after(Duration::from_millis(10)).await;
-
-        let mut i2c = self.i2c_bus.lock().await;
-        let (audio, tx_transfer, rx_transfer) = crate::system::audio::init_audio(
-            pa.i2s0, pa.dma_ch1,
-            pa.audio_mclk, pa.audio_bclk, pa.audio_ws,
-            pa.audio_dout, pa.audio_din,
-            Output::new(pa.audio_pa, Level::Low, OutputConfig::default()),
-            pa.tx_buffer, pa.rx_buffer, pa.tx_descriptors, pa.rx_descriptors,
-            &mut *i2c,
-        ).await;
-        drop(i2c);
-        self.audio = Some(audio);
-        self.tx_transfer = Some(tx_transfer);
-        self.rx_transfer = Some(rx_transfer);
     }
 
     // ================= Effect executor ===========================================
@@ -681,7 +363,7 @@ impl SystemManager<'static> {
         for effect in effects {
             match effect {
                 Effect::TransitionDisplay { from, to } => {
-                    let waking_from_off = crate::system::display::transition(
+                    let waking_from_off = crate::display::transition(
                         &mut self.display,
                         from,
                         to,
@@ -715,22 +397,22 @@ impl SystemManager<'static> {
                 // suppresses haptic feedback when disabled.
                 Effect::MotorOn => {
                     if self.model.config().haptics_enabled {
-                        self.power.buzz();
+                        self.board.buzz();
                     }
                 }
-                Effect::MotorOff => self.power.buzz_stop(),
+                Effect::MotorOff => self.board.buzz_stop(),
                 Effect::MotorPulse { duration_ms } => {
                     if self.model.config().haptics_enabled {
-                        self.power.buzz();
+                        self.board.buzz();
                         Timer::after(Duration::from_millis(duration_ms as u64)).await;
-                        self.power.buzz_stop();
+                        self.board.buzz_stop();
                     }
                 }
                 Effect::RtcCommand(cmd) => RTC_COMMAND.signal(cmd),
                 Effect::ImuCommand(cmd) => IMU_COMMAND.signal(cmd),
                 Effect::Shutdown => {
                     log::info!("System: shutdown requested");
-                    self.power.shutdown();
+                    self.board.shutdown();
                 }
                 Effect::FactoryReset => {
                     log::info!("factory reset: wiping flash + SD mirror");
@@ -848,7 +530,6 @@ impl SystemManager<'static> {
     /// cancelling sleep entry.
     async fn enter_light_sleep(&mut self) {
         use esp_hal::delay::Delay;
-        use esp_hal::peripherals::GPIO;
         use esp_hal::rtc_cntl::sleep::{
             GpioWakeupSource, RtcSleepConfig, TimerWakeupSource,
         };
@@ -874,21 +555,12 @@ impl SystemManager<'static> {
             let _ = i2c.write(touch::ADDR, &[touch::REG_POWER_MODE, touch::PowerMode::Monitor as u8]);
         }
 
-        // Re-arm GPIO wake for touch_int(38), boot_btn(0), and
-        // rtc_int(39). The embassy async GPIO drivers used by
-        // those pins' tasks call `listen_with_options(...,
-        // wake_up_from_light_sleep=false)` on every wait, which
-        // clears the wakeup_enable bit we set at init. We have to
-        // set it back immediately before rtc.sleep(). int_type=4
-        // is LowLevel, which is what the INT lines drive when
-        // active (active-low on all three) and is the only type
-        // esp-hal allows for wake-from-light-sleep.
-        for &gpio_num in &[0u8, 38u8, 39u8] {
-            GPIO::regs().pin(gpio_num as usize).modify(|_, w| unsafe {
-                w.wakeup_enable().set_bit();
-                w.int_type().bits(4)
-            });
-        }
+        // Re-arm this board's wake sources. The embassy async GPIO
+        // drivers used by the INT-pin tasks call `listen_with_options
+        // (..., wake_up_from_light_sleep=false)` on every wait, which
+        // clears the `wakeup_enable` bits set at init; the board sets
+        // them back here, immediately before `rtc.sleep()`.
+        self.board.arm_wake_sources();
 
         let gpio_wake = GpioWakeupSource::new();
         // 5 s matches the power task's sleep-mode poll interval,
@@ -966,7 +638,7 @@ impl SystemManager<'static> {
         // if the event isn't loggable. Runs before the model so the
         // log captures the triggering event even if the model
         // transitions into sleep or shuts down.
-        crate::system::event_log::try_log(
+        crate::event_log::try_log(
             &mut self.store,
             &self.model.cached_data().time,
             &event,
@@ -1128,7 +800,7 @@ impl SystemManager<'static> {
             // off-tile widgets that the screen *did* try to draw still
             // get rejected per-pixel inside the driver.
             self.display.set_tile_y(tile_y);
-            self.display.clear(crate::ui::theme::BG).ok();
+            self.display.clear(app_core::ui::theme::BG).ok();
 
             self.model.screen_mut().render(&mut self.display, &data, &ctx);
             if let Some(pct) = battery_pct {
@@ -1169,12 +841,16 @@ impl SystemManager<'static> {
                 // of this frame. Subsequent tiles ride the same vblank
                 // window since a 60 Hz panel gives us ~16 ms before
                 // scanout begins. Timeout at ~2 refresh periods in case
-                // TE is silent.
+                // TE is silent. Boards with no TE GPIO (`lcd_te:
+                // None`) skip the wait entirely - zero delay, no
+                // timeout penalty; nothing to sync to anyway.
                 if !waited_for_te {
-                    let _ = with_timeout(
-                        Duration::from_millis(30),
-                        self.lcd_te.wait_for_rising_edge(),
-                    ).await;
+                    if let Some(te) = &mut self.lcd_te {
+                        let _ = with_timeout(
+                            Duration::from_millis(30),
+                            te.wait_for_rising_edge(),
+                        ).await;
+                    }
                     waited_for_te = true;
                 }
                 self.display.flush_tile().await;
