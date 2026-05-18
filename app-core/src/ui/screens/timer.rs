@@ -40,13 +40,13 @@ use embedded_graphics::{
 
 use crate::events::SystemEvent;
 use crate::ui::{fonts, layout, theme};
-use crate::ui::types::{Action, RenderCtx, Screen, SystemData, TimerState};
+use crate::ui::types::{Action, DirtyRegion, RenderCtx, Screen, SystemData, TimerState};
 use crate::data::TimeData;
 use crate::ui::widgets::{
     action_row_rects, app_chrome_back_hit, chamfered_button, chamfered_panel,
     draw_app_chrome, fmt_2digit, render_action_row, tag_label, ButtonVariant,
     Picker, Wheel,
-    APP_CONTENT_TOP, NOTCH, TAG_LABEL_H, WHEEL_TOTAL_H,
+    APP_CONTENT_TOP, NOTCH, STATUS_BAR_H, TAG_LABEL_H, WHEEL_TOTAL_H,
 };
 
 // -- Constants ---------------------------------------------------------------
@@ -104,6 +104,35 @@ const FLASH_PHASE_TICKS: u8 = 5;
 /// Total flash ticks for the clamp-warning animation (4 phases = 1 s).
 const FLASH_TOTAL_TICKS: u8 = FLASH_PHASE_TICKS * 4;
 
+// -- Dirty rects -------------------------------------------------------------
+//
+// Main-view regions. The picker view animates wheels and flashes the
+// accent, so it stays on the safe full-redraw path (see `dirty_rects`).
+
+/// Top status bar - `HH:MM` + battery%. Repaints on the minute roll
+/// or a battery-percent change so the clock stays live while the
+/// timer counts down.
+const STATUS_RECT: Rectangle = Rectangle::new(
+    Point::new(0, 0),
+    Size::new(theme::SCREEN_W as u32, (STATUS_BAR_H + 4) as u32),
+);
+/// Readout panel - the `HH:MM:SS` hero numerals. Repaints when the
+/// displayed second changes. Same geometry as [`readout_rect`].
+const READOUT_RECT: Rectangle = Rectangle::new(
+    Point::new(SIDE_MARGIN, READOUT_TOP),
+    Size::new(
+        (theme::SCREEN_W as i32 - SIDE_MARGIN * 2) as u32,
+        READOUT_H as u32,
+    ),
+);
+/// Bottom action row - START/PAUSE/RESUME label and the RESET button
+/// variant. Repaints only on a run-state edge or the zero<->non-zero
+/// edge, not every second.
+const ACTION_ROW_RECT: Rectangle = Rectangle::new(
+    Point::new(0, layout::BOTTOM_TILE_Y - 4),
+    Size::new(theme::SCREEN_W as u32, (layout::BOTTOM_TILE_H + 8) as u32),
+);
+
 // -- Internal types ----------------------------------------------------------
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -114,10 +143,36 @@ enum TimerView {
 
 // -- Screen ------------------------------------------------------------------
 
+/// Snapshot of the inputs that drive the main view's visible glyphs,
+/// held from one render to the next so [`Screen::dirty_rects`] can
+/// return only the regions whose underlying fields actually changed.
+/// Only meaningful while `view == Main`; the picker view stays on the
+/// full-redraw path.
+#[derive(Debug, Clone, Copy)]
+struct RenderedSnapshot {
+    /// Whole remaining seconds at last render - drives the readout.
+    remaining_secs: u64,
+    /// Timer was in the running state - drives the left button label.
+    running: bool,
+    /// Remaining was zero - drives the RESET button variant.
+    zero: bool,
+    /// Wall-clock minute - drives the status-bar `HH:MM`.
+    minute: u8,
+    /// Battery percent - drives the status-bar battery glyph.
+    battery_pct: Option<u8>,
+}
+
 pub struct TimerScreen {
     view: TimerView,
     /// Last displayed remaining second, gates 1 Hz redraw.
     last_rendered_sec: u64,
+    /// `None` until the first render - avoids a default snapshot that
+    /// could spuriously match real data and skip the first frame.
+    last: Option<RenderedSnapshot>,
+    /// Sticky: forces the next `dirty_rects` to `FullScreen`. Set on
+    /// picker -> main transitions, where the header text and panel
+    /// change but the `RenderedSnapshot` fields may not.
+    force_full_next: bool,
     /// HH:MM:SS wheel picker for duration entry. Seeded from the
     /// current duration on entry; values read back into a Duration
     /// on Set.
@@ -132,6 +187,8 @@ impl TimerScreen {
         Self {
             view: TimerView::Main,
             last_rendered_sec: 0,
+            last: None,
+            force_full_next: false,
             picker: Picker::new([
                 Wheel::new(0, MAX_TIMER_H, 0),
                 Wheel::new(0, 59, 0).with_wrap(true),
@@ -242,6 +299,46 @@ impl Screen for TimerScreen {
             TimerView::Main => self.main_event(event, data),
             TimerView::Picker => self.picker_event(event, data),
         }
+    }
+
+    fn dirty_rects(&self, data: &SystemData) -> DirtyRegion {
+        // The picker view animates wheels on drag and flashes the
+        // accent on a clamp; per-widget invalidation there is deferred,
+        // so it stays on the safe full-redraw path.
+        if self.force_full_next || self.view == TimerView::Picker {
+            return DirtyRegion::FullScreen;
+        }
+        let Some(prev) = self.last else {
+            // First frame after construction - no snapshot to diff
+            // against, so paint the whole screen once.
+            return DirtyRegion::FullScreen;
+        };
+
+        let mut region = DirtyRegion::empty();
+        if prev.remaining_secs != data.timer.remaining().as_secs() {
+            region.add(READOUT_RECT);
+        }
+        let zero = data.timer.remaining().as_secs() == 0;
+        if prev.running != data.timer.is_running() || prev.zero != zero {
+            region.add(ACTION_ROW_RECT);
+        }
+        if prev.minute != data.time.minute
+            || prev.battery_pct != data.power.battery_percent
+        {
+            region.add(STATUS_RECT);
+        }
+        region
+    }
+
+    fn clear_dirty(&mut self, data: &SystemData) {
+        self.last = Some(RenderedSnapshot {
+            remaining_secs: data.timer.remaining().as_secs(),
+            running: data.timer.is_running(),
+            zero: data.timer.remaining().as_secs() == 0,
+            minute: data.time.minute,
+            battery_pct: data.power.battery_percent,
+        });
+        self.force_full_next = false;
     }
 }
 
@@ -439,6 +536,7 @@ impl TimerScreen {
             // Header chevron == CANCEL: discard and return to Main.
             SystemEvent::Tap { x, y } if app_chrome_back_hit(*x, *y) => {
                 self.flash_ticks = 0;
+                self.force_full_next = true;
                 self.view = TimerView::Main;
                 Action::Redraw
             }
@@ -447,6 +545,7 @@ impl TimerScreen {
                 let (cancel, set) = action_row_rects();
                 if rect_hit(cancel, *x, *y) {
                     self.flash_ticks = 0;
+                    self.force_full_next = true;
                     self.view = TimerView::Main;
                     return Action::Redraw;
                 }
@@ -462,6 +561,7 @@ impl TimerScreen {
                         return Action::Redraw;
                     }
                     data.timer = TimerState::Idle { duration: dur };
+                    self.force_full_next = true;
                     self.view = TimerView::Main;
                     return Action::Redraw;
                 }
@@ -505,13 +605,7 @@ fn picker_cell_rects() -> [Rectangle; 3] {
 // -- Helpers -----------------------------------------------------------------
 
 fn readout_rect() -> Rectangle {
-    Rectangle::new(
-        Point::new(SIDE_MARGIN, READOUT_TOP),
-        Size::new(
-            (theme::SCREEN_W as i32 - SIDE_MARGIN * 2) as u32,
-            READOUT_H as u32,
-        ),
-    )
+    READOUT_RECT
 }
 
 fn rect_hit(rect: Rectangle, x: u16, y: u16) -> bool {

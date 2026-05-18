@@ -852,7 +852,6 @@ impl SystemManager<'static> {
         use esp_hal::rtc_cntl::sleep::{
             GpioWakeupSource, RtcSleepConfig, TimerWakeupSource,
         };
-        use embedded_hal::i2c::I2c as I2cTrait;
         use drivers::touch;
 
         // Put the FT3168 into Monitor mode synchronously before sleep
@@ -1108,15 +1107,6 @@ impl SystemManager<'static> {
 
         let mut waited_for_te = false;
 
-        // Phase timers - sum of microseconds across the rendered tiles.
-        // Kept while we're iterating on the tile / invalidation strategy.
-        let mut us_clear: u64 = 0;
-        let mut us_screen: u64 = 0;
-        let mut us_hash: u64 = 0;
-        let mut us_flush: u64 = 0;
-        let mut tiles_rendered: u32 = 0;
-        let mut tiles_pushed: u32 = 0;
-
         for tile_idx in 0..NUM_TILES {
             if tile_mask & (1u16 << tile_idx) == 0 {
                 // Not in this frame's dirty set - skip render, skip hash,
@@ -1131,7 +1121,6 @@ impl SystemManager<'static> {
             // Short final tile clips to HEIGHT; the rest are full TILE_H.
             let tile_h = (HEIGHT - tile_y).min(TILE_H);
             let ctx = RenderCtx { tile_y, tile_h };
-            tiles_rendered += 1;
 
             // Park the FB at this tile, clear it, render the whole UI.
             // The screen looks at `ctx` to skip widget setup for things
@@ -1139,16 +1128,12 @@ impl SystemManager<'static> {
             // off-tile widgets that the screen *did* try to draw still
             // get rejected per-pixel inside the driver.
             self.display.set_tile_y(tile_y);
-            let t0 = Instant::now();
             self.display.clear(crate::ui::theme::BG).ok();
-            us_clear += t0.elapsed().as_micros();
 
-            let t1 = Instant::now();
             self.model.screen_mut().render(&mut self.display, &data, &ctx);
             if let Some(pct) = battery_pct {
                 primitives::battery_warning_frame(&mut self.display, pct);
             }
-            us_screen += t1.elapsed().as_micros();
 
             // Decide whether this tile needs to go over QSPI. For
             // `FullScreen` dirty frames we already know the answer (yes)
@@ -1170,9 +1155,7 @@ impl SystemManager<'static> {
                 // hashing it would just waste cycles.
                 let panel_rows = (HEIGHT - tile_y).min(TILE_H) as usize;
                 let visible_bytes = panel_rows * ROW_STRIDE;
-                let t2 = Instant::now();
                 let h = fb_hash(&self.display.framebuffer()[..visible_bytes]);
-                us_hash += t2.elapsed().as_micros();
                 if h != self.tile_hashes[tile_idx] {
                     self.tile_hashes[tile_idx] = h;
                     true
@@ -1194,10 +1177,7 @@ impl SystemManager<'static> {
                     ).await;
                     waited_for_te = true;
                 }
-                let t3 = Instant::now();
                 self.display.flush_tile().await;
-                us_flush += t3.elapsed().as_micros();
-                tiles_pushed += 1;
             }
         }
 
@@ -1217,11 +1197,7 @@ impl SystemManager<'static> {
 
         let render_ms = render_start.elapsed().as_millis();
         if render_ms > 10 {
-            log::info!(
-                "render: {}ms (clear={}us screen={}us hash={}us flush={}us rendered={}/{} pushed={}/{})",
-                render_ms, us_clear, us_screen, us_hash, us_flush,
-                tiles_rendered, NUM_TILES, tiles_pushed, NUM_TILES,
-            );
+            log::info!("render: {}ms", render_ms);
         }
     }
 
