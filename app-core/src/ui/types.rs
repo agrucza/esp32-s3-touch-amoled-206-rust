@@ -713,10 +713,12 @@ pub struct SystemData {
     /// goes through `Action::PersistConfig` / `Action::SetBrightness`
     /// etc., never by a screen editing this field.
     pub config: crate::config::Config,
-    /// Wall-time seconds since chip power-on. Sourced by the manager
-    /// from the SoC's RTC slow-clock counter
-    /// (`Rtc::time_since_power_up`) - always-on through light sleep,
-    /// so this advances continuously regardless of duty cycle.
+    /// Wall-time seconds since this boot. Sourced by the manager from
+    /// the SoC's RTC slow-clock counter (`Rtc::time_since_power_up`),
+    /// rebaselined at boot - always-on through light sleep, so it
+    /// advances continuously regardless of duty cycle, but resets on
+    /// each boot/reflash (the raw counter itself survives digital
+    /// resets, so the manager subtracts a boot baseline).
     pub uptime_secs: u32,
 
     /// Embassy-active seconds since the Model was constructed: the

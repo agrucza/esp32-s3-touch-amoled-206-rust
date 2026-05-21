@@ -182,6 +182,15 @@ pub struct SystemManager<'d, B: Board> {
     // RTC controller, used to enter/exit hardware light sleep.
     rtc: esp_hal::rtc_cntl::Rtc<'d>,
 
+    // SoC RTC slow-clock counter (whole seconds) captured at
+    // construction. `uptime_secs` is reported relative to this so it
+    // means "since this boot", not since the last hard power-on: the
+    // RTC timer lives in the always-on RTC domain and survives digital
+    // resets (reflash / software reset), so the raw counter keeps
+    // climbing across reboots. Subtracting this baseline still counts
+    // time spent in light sleep (the counter advances during sleep).
+    boot_uptime_secs: u32,
+
     // Unified persistent-storage facade. Owns the on-flash
     // LittleFS and the SD volume manager together with the
     // SD-mirror online flag. Mirrored writes, flash-only escape
@@ -293,6 +302,10 @@ impl<B: Board> SystemManager<'static, B> {
             cached_data, loaded_config, Instant::now(),
         );
 
+        // Baseline the always-on RTC counter at boot (see the field
+        // docs) so uptime is measured from this boot.
+        let boot_uptime_secs = rtc.time_since_power_up().as_secs() as u32;
+
         let mut manager = Self {
             i2c_bus,
             board,
@@ -305,6 +318,7 @@ impl<B: Board> SystemManager<'static, B> {
             // a full pass before dirty_rects takes over.
             force_full_redraw: true,
             rtc,
+            boot_uptime_secs,
             store,
             last_storage_usage: initial_usage,
             last_sd_recover_attempt: None,
@@ -671,10 +685,13 @@ impl<B: Board> SystemManager<'static, B> {
 
         // Advance time-driven Model state (buzz phase, dim/idle
         // sleep transitions) and execute the resulting effects.
-        // `wall_uptime_secs` from the SoC RTC slow-clock counter
-        // survives light sleep, unlike `Instant::now()` which pauses;
-        // `Model::tick` uses each for its respective snapshot field.
-        let wall_uptime_secs = self.rtc.time_since_power_up().as_secs() as u32;
+        // `wall_uptime_secs` is the SoC RTC counter rebaselined to this
+        // boot (`boot_uptime_secs`); it survives light sleep, unlike
+        // `Instant::now()` which pauses. `Model::tick` uses each for its
+        // respective snapshot field. `saturating_sub` is belt-and-braces
+        // - the counter is monotonic so it can't actually underflow.
+        let wall_uptime_secs = (self.rtc.time_since_power_up().as_secs() as u32)
+            .saturating_sub(self.boot_uptime_secs);
         let effects = self.model.tick(Instant::now(), wall_uptime_secs);
         self.execute_effects(effects).await;
 
