@@ -186,14 +186,16 @@ async fn main(spawner: embassy_executor::Spawner) {
         esp_hal::Config::default().with_cpu_clock(esp_hal::clock::CpuClock::max()),
     );
 
-    // PSRAM allocator (esp-hal 1.1 takes the config via the macro).
-    let psram_config = esp_hal::psram::PsramConfig {
-        mode: esp_hal::psram::PsramMode::OctalSpi,
-        ram_frequency: esp_hal::psram::SpiRamFreq::Freq80m,
-        core_clock: Some(esp_hal::psram::SpiTimingConfigCoreClock::SpiTimingConfigCoreClock160m),
-        ..Default::default()
-    };
-    esp_alloc::psram_allocator!(peripherals.PSRAM, esp_hal::psram, psram_config);
+    // Internal-SRAM heap, unified with the C6 (no PSRAM). PSRAM was
+    // only ever the heap backing on this board - the framebuffer and
+    // the DMA TxBuf are internal-SRAM statics - and live heap use is
+    // ~12 KB, so the 8 MB OPI PSRAM was pure headroom. Dropping it
+    // removes the dominant idle/sleep power draw here (the OPI PSRAM
+    // runs at 80 MHz and is never gated during light sleep). 128 KB is
+    // generous next to the C6's 64 KB - the S3 has the internal SRAM
+    // to spare - and covers the ~16 KB audio drain + file-read buffers
+    // with margin. `peripherals.PSRAM` is now simply left unused.
+    esp_alloc::heap_allocator!(size: 128 * 1024);
 
     let timg0 = TimerGroup::new(peripherals.TIMG0);
     let sw_int =
