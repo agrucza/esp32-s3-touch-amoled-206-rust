@@ -23,7 +23,7 @@ use drivers::pmu::{Config as PmuConfig, Pmu};
 use embedded_hal::i2c::I2c;
 use esp_hal::gpio::Output;
 use esp_hal::peripherals::GPIO;
-use system_core::board::Board;
+use system_core::board::{Board, CpuFreq};
 
 /// Snapshot of power-related readings at one point in time.
 /// Produced by `PowerTaskState::snapshot`; consumed by the UI
@@ -111,5 +111,46 @@ impl<'d> Board for PowerControls<'d> {
                 w.int_type().bits(4)
             });
         }
+    }
+
+    /// Switch CPU frequency at runtime via the `SYSTEM.cpu_per_conf`
+    /// divider (PLL stays the source - APB stays 80 MHz so I2C/SPI
+    /// are unaffected; the XTAL-systimer-based embassy timers too).
+    ///
+    /// `esp_hal::clock::cpu_clock()` keeps reporting the init-time
+    /// clock regardless - esp-hal caches it in a static `Clocks` at
+    /// init and never re-reads. The silicon scales correctly; only
+    /// esp-hal's view is stale. Verified on esp-hal 1.1.0-rc.0 by
+    /// reading `cpu_per_conf` back after each write. (Relocated
+    /// verbatim from the shared manager - behavior-identical.)
+    fn set_cpu_freq(&mut self, freq: CpuFreq) {
+        use esp_hal::peripherals::SYSTEM;
+        let (period_sel, freq_mhz) = match freq {
+            CpuFreq::Mhz80 => (0u8, 80u32),
+            CpuFreq::Mhz160 => (1u8, 160u32),
+            CpuFreq::Mhz240 => (2u8, 240u32),
+        };
+        SYSTEM::regs().cpu_per_conf().modify(|_, w| unsafe {
+            w.pll_freq_sel().set_bit();
+            w.cpuperiod_sel().bits(period_sel)
+        });
+        esp_hal::rom::ets_update_cpu_frequency_rom(freq_mhz);
+    }
+
+    /// The light-sleep config that reliably wakes on this chip
+    /// (validated via `bin/sleep_test.rs`):
+    /// - `xtal_fpu(true)` keeps the main XTAL powered (CPU can't
+    ///   resume clocking on wake without it).
+    /// - `rtc_regulator_fpu(true)` keeps the RTC regulator on so the
+    ///   RTC domain stays functional during sleep.
+    /// - `light_slp_reject(false)` tolerates a pending interrupt at
+    ///   sleep entry (e.g. a latched PCF85063 INT line).
+    fn tune_sleep_config(
+        &self,
+        cfg: &mut esp_hal::rtc_cntl::sleep::RtcSleepConfig,
+    ) {
+        cfg.set_rtc_regulator_fpu(true);
+        cfg.set_xtal_fpu(true);
+        cfg.set_light_slp_reject(false);
     }
 }

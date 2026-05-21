@@ -713,10 +713,17 @@ pub struct SystemData {
     /// goes through `Action::PersistConfig` / `Action::SetBrightness`
     /// etc., never by a screen editing this field.
     pub config: crate::config::Config,
-    /// Seconds since the Model was constructed (i.e., system boot).
-    /// Updated by the Model on every `tick`. Read by screens that
-    /// want to show uptime (Battery, future Vitals).
+    /// Wall-time seconds since chip power-on. Sourced by the manager
+    /// from the SoC's RTC slow-clock counter
+    /// (`Rtc::time_since_power_up`) - always-on through light sleep,
+    /// so this advances continuously regardless of duty cycle.
     pub uptime_secs: u32,
+
+    /// Embassy-active seconds since the Model was constructed: the
+    /// `Instant::now() - boot` delta, which **pauses during light
+    /// sleep** because the time driver (TIMG0) is gated then. Pair
+    /// with `uptime_secs` to read off the device's duty cycle.
+    pub active_secs: u32,
 }
 
 // -- Screen trait -------------------------------------------------------------

@@ -4,195 +4,215 @@
 extern crate alloc;
 
 mod board;
+mod system;
 
-use drivers::display::color;
-use drivers::pmu::{Config as PmuConfig, Pmu};
-use embassy_time::{Duration, Timer};
-use embedded_hal::i2c::I2c as I2cTrait;
-use esp_backtrace as _;
-use esp_hal::{
-    gpio::{Level, Output, OutputConfig},
-    i2c::master::{Config as I2cConfig, I2c},
-    time::Rate,
-    timer::timg::TimerGroup,
+use crate::system::power::C6Board;
+use system_core::display::{init_display, Display};
+use system_core::flash_fs::FlashRegion;
+use system_core::manager::{run, Bringup};
+use system_core::storage::Store;
+use system_core::tasks::{
+    boot_button::BootButtonTaskState,
+    imu::ImuTaskState,
+    power::PowerTaskState,
+    rtc::RtcTaskState,
+    touch::TouchTaskState,
 };
-use firmware_hal::display::{self as display_hal, TILE_H};
+use embassy_time::{Duration, Timer};
+use esp_backtrace as _;
+use esp_hal::gpio::{Input, InputConfig, Level, Output, OutputConfig, Pull, WakeEvent};
+use esp_hal::i2c::master::{Config as I2cConfig, I2c};
+use esp_hal::peripherals as p;
+use esp_hal::time::Rate;
+use esp_hal::timer::timg::TimerGroup;
+use esp_hal::Blocking;
 
 esp_bootloader_esp_idf::esp_app_desc!();
 
-// Tie the literal GPIO bindings in `main` back to the board pin map.
-// If the schematic-derived constants drift away from the literal
-// peripheral fields, the build fails instead of silently miswiring.
-const _: () = {
-    assert!(board::I2C_SDA  ==  8, "board::I2C_SDA must match the GPIO8 binding below");
-    assert!(board::I2C_SCL  ==  7, "board::I2C_SCL must match the GPIO7 binding below");
-    assert!(board::LCD_SCLK ==  0, "board::LCD_SCLK must match the GPIO0 binding below");
-    assert!(board::LCD_SDIO0 == 1, "board::LCD_SDIO0 must match the GPIO1 binding below");
-    assert!(board::LCD_SDIO1 == 2, "board::LCD_SDIO1 must match the GPIO2 binding below");
-    assert!(board::LCD_SDIO2 == 3, "board::LCD_SDIO2 must match the GPIO3 binding below");
-    assert!(board::LCD_SDIO3 == 4, "board::LCD_SDIO3 must match the GPIO4 binding below");
-    assert!(board::LCD_CS    == 5, "board::LCD_CS must match the GPIO5 binding below");
-    assert!(board::LCD_RESET == 11, "board::LCD_RESET must match the GPIO11 binding below");
-};
-
-/// Number of panel rows our partial framebuffer covers. Pulled from
-/// firmware-hal so every firmware variant uses the same tile size; on
-/// the 410-wide panel that's 50 * 410 * 2 = 41,000 bytes in internal SRAM.
-const FB_ROWS: u16 = TILE_H;
-
-/// Expected I2C devices on the C6 shared bus.
-/// Used at scan time to flag any device that doesn't ACK.
-const EXPECTED: [(u8, &str); 6] = [
-    (0x18, "ES8311 codec"),
-    (0x34, "AXP2101 PMU"),
-    (board::TOUCH_I2C_ADDR, "FT3168 touch"),
-    (0x40, "ES7210 mic ADC"),
-    (0x51, "PCF85063 RTC"),
-    (0x6B, "QMI8658 IMU"),
-];
-
-fn device_name(addr: u8) -> &'static str {
-    EXPECTED
-        .iter()
-        .find_map(|(a, name)| if *a == addr { Some(*name) } else { None })
-        .unwrap_or("unknown")
+/// C6 boot-construction seam. Mirrors `firmware-s3`'s `S3Bringup` in
+/// role; differs only where the hardware does: no SD slot
+/// (`init_flash_only`), no TE GPIO (`lcd_te: None`), no RTC_INT GPIO
+/// (`RtcTaskState::init(None, ...)`), and an FT3168 wake-from-MONITOR
+/// poll in `wait_for_peripherals`.
+struct C6Bringup {
+    i2c0: Option<p::I2C0<'static>>,
+    i2c_sda: Option<p::GPIO8<'static>>,
+    i2c_scl: Option<p::GPIO7<'static>>,
+    spi2: Option<p::SPI2<'static>>,
+    lcd_sclk: Option<p::GPIO0<'static>>,
+    lcd_sio0: Option<p::GPIO1<'static>>,
+    lcd_sio1: Option<p::GPIO2<'static>>,
+    lcd_sio2: Option<p::GPIO3<'static>>,
+    lcd_sio3: Option<p::GPIO4<'static>>,
+    lcd_cs: Option<p::GPIO5<'static>>,
+    dma_ch0: Option<p::DMA_CH0<'static>>,
+    lcd_reset: Option<p::GPIO11<'static>>,
+    touch_rst: Option<p::GPIO10<'static>>,
+    touch_int: Option<p::GPIO15<'static>>,
+    btn_boot: Option<p::GPIO9<'static>>,
+    imu_int1: Option<p::GPIO16<'static>>,
+    flash: Option<p::FLASH<'static>>,
+    lpwr: Option<p::LPWR<'static>>,
 }
 
-/// Probe every 7-bit address with a 1-byte read and report ACKs.
-/// Side-effect-free: no register pointer gets written on the slave side.
-fn scan_and_report<I2C, E>(i2c: &mut I2C, label: &str)
-where
-    I2C: I2cTrait<Error = E>,
-{
-    log::info!("{}", label);
-    let mut mask: u128 = 0;
-    let mut count: u32 = 0;
-    for addr in 0x08u8..0x78 {
-        let mut byte = [0u8; 1];
-        if i2c.read(addr, &mut byte).is_ok() {
-            mask |= 1u128 << addr;
-            count += 1;
+impl Bringup for C6Bringup {
+    type Board = C6Board;
+
+    fn make_i2c(&mut self) -> I2c<'static, Blocking> {
+        I2c::new(
+            self.i2c0.take().unwrap(),
+            I2cConfig::default().with_frequency(Rate::from_khz(400)),
+        )
+        .unwrap()
+        .with_sda(self.i2c_sda.take().unwrap())
+        .with_scl(self.i2c_scl.take().unwrap())
+    }
+
+    fn make_power(
+        &mut self,
+        i2c: &mut I2c<'static, Blocking>,
+    ) -> (Self::Board, PowerTaskState) {
+        // No rail config: the AXP retains rail state across resets on
+        // this board. C6Board::init only sanity-checks the chip ID.
+        let (board, pmu) = C6Board::init(i2c);
+        (board, PowerTaskState::new(pmu))
+    }
+
+    async fn wait_for_peripherals(&mut self, i2c: &mut I2c<'static, Blocking>) {
+        // The FT3168 is left in TOUCH_POWER_MONITOR by prior firmware
+        // and doesn't ACK its I2C address for ~2-3 s after boot.
+        const TIMEOUT_MS: u32 = 5000;
+        const POLL_MS: u32 = 500;
+        log::info!(
+            "Waiting for FT3168 (0x{:02X}) to wake (timeout {} ms)...",
+            board::TOUCH_I2C_ADDR, TIMEOUT_MS,
+        );
+        let mut elapsed = 0u32;
+        let mut awake = false;
+        while elapsed < TIMEOUT_MS {
+            Timer::after(Duration::from_millis(POLL_MS as u64)).await;
+            elapsed += POLL_MS;
+            let mut byte = [0u8; 1];
+            if i2c.read(board::TOUCH_I2C_ADDR, &mut byte).is_ok() {
+                log::info!("  FT3168 awake after {} ms", elapsed);
+                awake = true;
+                break;
+            }
+        }
+        if !awake {
+            log::warn!("  FT3168 did not ACK within {} ms", TIMEOUT_MS);
         }
     }
-    log::info!("  {} device(s) ACKed", count);
-    for addr in 0x08u8..0x78 {
-        if (mask >> addr) & 1 == 1 {
-            log::info!("    0x{:02X}  {}", addr, device_name(addr));
-        }
+
+    async fn make_display(&mut self) -> Display<'static> {
+        let fb: &'static mut [u8] = firmware_hal::display::take_framebuffer();
+        init_display(
+            self.spi2.take().unwrap(),
+            self.lcd_sclk.take().unwrap(),
+            self.lcd_sio0.take().unwrap(),
+            self.lcd_sio1.take().unwrap(),
+            self.lcd_sio2.take().unwrap(),
+            self.lcd_sio3.take().unwrap(),
+            self.lcd_cs.take().unwrap(),
+            self.dma_ch0.take().unwrap(),
+            Output::new(self.lcd_reset.take().unwrap(), Level::High, OutputConfig::default()),
+            fb,
+        )
+        .await
     }
-    for &(addr, name) in EXPECTED.iter() {
-        if (mask >> addr) & 1 == 0 {
-            log::warn!("    0x{:02X}  MISSING - expected {}", addr, name);
-        }
+
+    /// No TE GPIO on this board - the manager skips the vblank wait
+    /// entirely (zero delay, no timeout).
+    fn make_lcd_te(&mut self) -> Option<Input<'static>> {
+        None
+    }
+
+    async fn make_input(
+        &mut self,
+        i2c: &mut I2c<'static, Blocking>,
+    ) -> (TouchTaskState<'static>, BootButtonTaskState<'static>) {
+        let mut touch_int = Input::new(
+            self.touch_int.take().unwrap(),
+            InputConfig::default().with_pull(Pull::Up),
+        );
+        let mut boot_btn = Input::new(
+            self.btn_boot.take().unwrap(),
+            InputConfig::default().with_pull(Pull::Up),
+        );
+        let _ = touch_int.wakeup_enable(true, WakeEvent::LowLevel);
+        let _ = boot_btn.wakeup_enable(true, WakeEvent::LowLevel);
+
+        let touch = TouchTaskState::init(
+            Output::new(self.touch_rst.take().unwrap(), Level::High, OutputConfig::default()),
+            touch_int,
+            i2c,
+        )
+        .await;
+        (touch, BootButtonTaskState::new(boot_btn))
+    }
+
+    /// Flash only - no SD slot on this board.
+    fn make_store(&mut self) -> Store<'static> {
+        Store::init_flash_only(
+            self.flash.take().unwrap(),
+            FlashRegion::new(board::FLASH_FS_START, board::FLASH_FS_SIZE),
+        )
+    }
+
+    async fn make_sensors(
+        &mut self,
+        i2c: &mut I2c<'static, Blocking>,
+    ) -> (RtcTaskState<'static>, ImuTaskState<'static>) {
+        // No RTC_INT GPIO routed on this board -> poll-only RTC task.
+        let rtc_state = RtcTaskState::init(None, i2c);
+        let imu = ImuTaskState::init(
+            Input::new(self.imu_int1.take().unwrap(), InputConfig::default().with_pull(Pull::Down)),
+            i2c,
+        )
+        .await;
+        (rtc_state, imu)
+    }
+
+    fn make_rtc_ctrl(&mut self) -> esp_hal::rtc_cntl::Rtc<'static> {
+        esp_hal::rtc_cntl::Rtc::new(self.lpwr.take().unwrap())
     }
 }
 
 #[esp_rtos::main]
-async fn main(_spawner: embassy_executor::Spawner) {
-    let p = esp_hal::init(esp_hal::Config::default());
+async fn main(spawner: embassy_executor::Spawner) {
+    let peripherals = esp_hal::init(esp_hal::Config::default());
 
-    // Internal-SRAM heap. The C6 has no PSRAM, so the framebuffer (32 KB
-    // at FB_ROWS = 40) lives here alongside any other dynamic allocation.
-    // 64 KB total gives us comfortable headroom past the FB.
+    // No PSRAM on this board: internal-SRAM heap (the framebuffer is
+    // in the shared display HAL's static BSS, not the heap).
     esp_alloc::heap_allocator!(size: 64 * 1024);
 
-    let timg0 = TimerGroup::new(p.TIMG0);
-    let sw_int = esp_hal::interrupt::software::SoftwareInterruptControl::new(p.SW_INTERRUPT);
+    let timg0 = TimerGroup::new(peripherals.TIMG0);
+    let sw_int =
+        esp_hal::interrupt::software::SoftwareInterruptControl::new(peripherals.SW_INTERRUPT);
     esp_rtos::start(timg0.timer0, sw_int.software_interrupt0);
-
     esp_println::logger::init_logger(log::LevelFilter::Info);
-    log::info!("--- ESP32-C6-Touch-AMOLED-2.06 ---");
+    log::info!("--- ESP32-C6-Touch-AMOLED-2.06 booting ---");
 
-    // I2C bus: GPIO7 (SCL) / GPIO8 (SDA), 400 kHz.
-    // All six on-board peripherals share this bus.
-    let mut i2c = I2c::new(
-        p.I2C0,
-        I2cConfig::default().with_frequency(Rate::from_khz(400)),
-    )
-    .unwrap()
-    .with_sda(p.GPIO8)
-    .with_scl(p.GPIO7);
+    let bringup = C6Bringup {
+        i2c0: Some(peripherals.I2C0),
+        i2c_sda: Some(peripherals.GPIO8),
+        i2c_scl: Some(peripherals.GPIO7),
+        spi2: Some(peripherals.SPI2),
+        lcd_sclk: Some(peripherals.GPIO0),
+        lcd_sio0: Some(peripherals.GPIO1),
+        lcd_sio1: Some(peripherals.GPIO2),
+        lcd_sio2: Some(peripherals.GPIO3),
+        lcd_sio3: Some(peripherals.GPIO4),
+        lcd_cs: Some(peripherals.GPIO5),
+        dma_ch0: Some(peripherals.DMA_CH0),
+        lcd_reset: Some(peripherals.GPIO11),
+        touch_rst: Some(peripherals.GPIO10),
+        touch_int: Some(peripherals.GPIO15),
+        btn_boot: Some(peripherals.GPIO9),
+        imu_int1: Some(peripherals.GPIO16),
+        flash: Some(peripherals.FLASH),
+        lpwr: Some(peripherals.LPWR),
+    };
 
-    // -- AXP2101 sanity ping ----------------------------------------------
-    // We don't configure any rails: the AXP retains its rail state across
-    // MCU resets (runs from VBUS/VBAT independently), and Waveshare's
-    // reference firmware never enables rails in software either. We just
-    // confirm the chip is reachable and log the chip ID.
-    let pmu = Pmu::new(PmuConfig::default());
-    match pmu.check_device(&mut i2c) {
-        Ok(chip_id) => log::info!(
-            "AXP2101 chip ID: 0x{:02X} (rev {:02b})",
-            chip_id,
-            (chip_id >> 4) & 0x03,
-        ),
-        Err(_) => log::error!("AXP2101 check_device failed - cannot continue safely"),
-    }
-
-    // -- Wait for FT3168 touch to wake from its persisted MONITOR mode ----
-    // The touch IC is left in TOUCH_POWER_MONITOR by the previous firmware
-    // and does not ACK its I2C address for ~2 s after boot. Poll until it
-    // shows up. See project_c6_ft3168_wake_delay.md in memory.
-    const TOUCH_WAKE_TIMEOUT_MS: u32 = 5000;
-    const TOUCH_POLL_INTERVAL_MS: u32 = 500;
-    log::info!(
-        "Waiting for FT3168 (0x{:02X}) to wake (poll every {} ms, timeout {} ms)...",
-        board::TOUCH_I2C_ADDR, TOUCH_POLL_INTERVAL_MS, TOUCH_WAKE_TIMEOUT_MS,
-    );
-    let mut elapsed_ms: u32 = 0;
-    let mut touch_awake = false;
-    while elapsed_ms < TOUCH_WAKE_TIMEOUT_MS {
-        Timer::after(Duration::from_millis(TOUCH_POLL_INTERVAL_MS as u64)).await;
-        elapsed_ms += TOUCH_POLL_INTERVAL_MS;
-        let mut byte = [0u8; 1];
-        if i2c.read(board::TOUCH_I2C_ADDR, &mut byte).is_ok() {
-            log::info!("  FT3168 awake after {} ms", elapsed_ms);
-            touch_awake = true;
-            break;
-        }
-    }
-    if !touch_awake {
-        log::warn!("  FT3168 did not ACK within {} ms", TOUCH_WAKE_TIMEOUT_MS);
-    }
-
-    // -- Final bus scan ---------------------------------------------------
-    scan_and_report(&mut i2c, "Bus scan:");
-
-    // -- Display bring-up (partial framebuffer, smoke test) ---------------
-    // Framebuffer lives in firmware-hal's static `FRAMEBUFFER` (internal
-    // SRAM BSS). Every firmware variant takes the FB from the same
-    // entrypoint, so the display path stays free of per-board allocator
-    // divergence.
-    let fb: &'static mut [u8] = display_hal::take_framebuffer();
-    log::info!("Display: allocated {} byte FB ({} rows)", fb.len(), FB_ROWS);
-
-    let mut display = display_hal::init_display(
-        p.SPI2,
-        p.GPIO0,   // LCD_SCLK
-        p.GPIO1,   // LCD_SDIO0
-        p.GPIO2,   // LCD_SDIO1
-        p.GPIO3,   // LCD_SDIO2
-        p.GPIO4,   // LCD_SDIO3
-        p.GPIO5,   // LCD_CS
-        p.DMA_CH0,
-        Output::new(p.GPIO11, Level::High, OutputConfig::default()),
-        fb,
-    )
-    .await;
-
-    // Fill the entire FB region (top FB_ROWS rows of the panel) with red
-    // and push it to the panel. `tile_y` defaults to 0 so FB row 0 maps
-    // straight onto panel row 0 - we get a red stripe across the top.
-    // When the C6 grows real UI it'll use the same tile loop as the S3
-    // and walk `tile_y` from 0 to HEIGHT in steps of TILE_H.
-    display.fill_solid(0, 0, display_hal::WIDTH, FB_ROWS, color::RED);
-    display.flush_tile().await;
-    log::info!("Display: pushed {} rows of solid red - smoke test complete", FB_ROWS);
-
-    // Heartbeat so we can see the firmware is alive after init.
-    let mut counter: u32 = 0;
-    loop {
-        log::info!("heartbeat #{}", counter);
-        counter = counter.wrapping_add(1);
-        Timer::after(Duration::from_secs(5)).await;
-    }
+    run(bringup, spawner).await
 }

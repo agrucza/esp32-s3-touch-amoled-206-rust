@@ -1260,8 +1260,11 @@ impl SettingsScreen {
         );
         draw_battery_sparkline(display, graph_rect, &data.battery_history);
 
-        // Below the sparkline: UPTIME stat in a smaller chamfered
-        // tag-labeled panel.
+        // Below the sparkline: UPTIME (wall-time since power-on, from
+        // the SoC RTC counter - survives light sleep) and below that
+        // ACTIVE (embassy time since boot - pauses during light
+        // sleep). Together they let the user read off duty cycle:
+        // active / uptime ~= fraction of time the chip was awake.
         let uptime_y = graph_y + graph_h + 14;
         let uptime_rect = Rectangle::new(
             Point::new(panel_x, uptime_y),
@@ -1277,14 +1280,39 @@ impl SettingsScreen {
             NOTCH,
         );
         let mut up_buf: String<16> = String::new();
-        let total = data.uptime_secs;
-        let h = total / 3600;
-        let m = (total % 3600) / 60;
-        let s = total % 60;
-        let _ = write!(up_buf, "{:02}:{:02}:{:02}", h, m, s);
+        let up = data.uptime_secs;
+        let _ = write!(
+            up_buf, "{:02}:{:02}:{:02}",
+            up / 3600, (up % 3600) / 60, up % 60,
+        );
         fonts::draw_centered_in_rect(
             display, &fonts::value(),
             up_buf.as_str(), uptime_rect, theme::FG,
+        );
+
+        let active_y = uptime_y + panel_h + 12;
+        let active_rect = Rectangle::new(
+            Point::new(panel_x, active_y),
+            Size::new(panel_w as u32, panel_h as u32),
+        );
+        chamfered_panel(display, active_rect, NOTCH, theme::CYAN, 1);
+        tag_label(
+            display,
+            active_rect.top_left.x,
+            active_rect.top_left.y,
+            "ACTIVE",
+            theme::CYAN,
+            NOTCH,
+        );
+        let mut act_buf: String<16> = String::new();
+        let act = data.active_secs;
+        let _ = write!(
+            act_buf, "{:02}:{:02}:{:02}",
+            act / 3600, (act % 3600) / 60, act % 60,
+        );
+        fonts::draw_centered_in_rect(
+            display, &fonts::value(),
+            act_buf.as_str(), active_rect, theme::FG,
         );
     }
 

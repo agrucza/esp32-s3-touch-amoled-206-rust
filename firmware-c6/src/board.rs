@@ -156,3 +156,14 @@ pub const MIC_PA_CTRL:   u8 =  6;  // NS4150 amp enable (active high)
 // =============================================================================
 // Haptic motor - not present on this board.
 // =============================================================================
+
+// =============================================================================
+// Flash filesystem region (LittleFS)
+//
+// This bin owns its partition geometry. Keep in sync with the
+// `storage` row in `partitions-c6.csv` (0x410000, 0xBE0000) - the
+// shared `system_core::flash_fs` takes these as a `FlashRegion` and
+// has no board identity of its own.
+// =============================================================================
+pub const FLASH_FS_START: u32 = 0x0041_0000; // byte offset
+pub const FLASH_FS_SIZE:  u32 = 0x00BE_0000; // 11.875 MB

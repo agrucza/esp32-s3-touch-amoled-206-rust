@@ -1,7 +1,7 @@
 use app_core::config::Config;
 use firmware_hal::display::{HEIGHT, NUM_TILES, TILE_H, WIDTH};
 use app_core::events::SystemEvent;
-use crate::board::Board;
+use crate::board::{Board, CpuFreq};
 use crate::bus::{EVENTS, IMU_COMMAND, RTC_COMMAND, SLEEP_WATCH, SleepState};
 use crate::display::Display;
 use crate::tasks::boot_button::BootButtonTaskState;
@@ -15,51 +15,8 @@ use embedded_graphics::draw_target::DrawTarget;
 use embassy_futures::select::{select, Either};
 use embassy_time::{Duration, Instant, Timer, with_timeout};
 use esp_hal::gpio::Input;
-
-// -- CPU frequency scaling ---------------------------------------------------
-
-/// CPU frequency levels for dynamic scaling.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CpuFreq {
-    /// 80 MHz - baseline for idle/low-power operation.
-    Mhz80,
-    /// 160 MHz - mid-range for moderate workloads.
-    Mhz160,
-    /// 240 MHz - full speed for rendering and heavy computation.
-    /// Not currently used at runtime (we boost to 160 MHz for
-    /// render which is enough); kept for future codepaths that
-    /// need absolute max clock.
-    #[allow(dead_code)]
-    Mhz240,
-}
-
-/// Switch CPU frequency at runtime. APB stays at 80 MHz for all
-/// settings so peripheral clocks (I2C, SPI) are unaffected.
-/// Embassy timers use the XTAL-based systimer and are also unaffected.
-///
-/// Note: `esp_hal::clock::cpu_clock()` will keep reporting the
-/// init-time CPU clock (240 MHz with `CpuClock::max()`) regardless
-/// of what we write here. esp-hal caches that value in a static
-/// `Clocks` struct at init and never re-reads the register. The
-/// silicon is actually scaling correctly; only esp-hal's view is
-/// stale. Verified on esp-hal 1.1.0-rc.0 by reading cpu_per_conf
-/// back after each write.
-fn set_cpu_freq(freq: CpuFreq) {
-    use esp_hal::peripherals::SYSTEM;
-
-    let (period_sel, freq_mhz) = match freq {
-        CpuFreq::Mhz80 => (0u8, 80u32),
-        CpuFreq::Mhz160 => (1u8, 160u32),
-        CpuFreq::Mhz240 => (2u8, 240u32),
-    };
-
-    SYSTEM::regs().cpu_per_conf().modify(|_, w| unsafe {
-        w.pll_freq_sel().set_bit();
-        w.cpuperiod_sel().bits(period_sel)
-    });
-
-    esp_hal::rom::ets_update_cpu_frequency_rom(freq_mhz);
-}
+use esp_hal::i2c::master::I2c;
+use esp_hal::Blocking;
 
 // -- Persistence paths + versions -------------------------------------------
 //
@@ -146,6 +103,29 @@ pub struct TaskBundle {
     pub touch: TouchTaskState<'static>,
     pub boot_button: BootButtonTaskState<'static>,
     pub rtc: RtcTaskState<'static>,
+    pub imu: ImuTaskState<'static>,
+    pub power: PowerTaskState,
+}
+
+/// Everything the bin constructs (per-board, chip-specific) and hands
+/// to [`SystemManager::new`] / [`run`]. A parameter object so the
+/// call sites stay readable and adding/removing a piece is a single
+/// named-field edit, not a positional reshuffle in every bin.
+///
+/// `rtc` is the esp-hal RTC controller (used for light sleep);
+/// `rtc_state` is the PCF85063 task state - distinct things.
+pub struct SystemParts<B: Board> {
+    pub i2c_bus: &'static crate::bus::SharedI2c,
+    pub board: B,
+    pub display: Display<'static>,
+    pub lcd_te: Option<Input<'static>>,
+    pub rtc: esp_hal::rtc_cntl::Rtc<'static>,
+    pub store: crate::storage::Store<'static>,
+    pub initial_time: app_core::data::TimeData,
+    pub initial_power: app_core::data::PowerData,
+    pub touch: TouchTaskState<'static>,
+    pub boot_button: BootButtonTaskState<'static>,
+    pub rtc_state: RtcTaskState<'static>,
     pub imu: ImuTaskState<'static>,
     pub power: PowerTaskState,
 }
@@ -243,21 +223,23 @@ impl<B: Board> SystemManager<'static, B> {
     ///
     /// Returns `(SystemManager, TaskBundle)` - the bin spawns one
     /// task per peripheral from the bundle.
-    pub fn new(
-        i2c_bus: &'static crate::bus::SharedI2c,
-        board: B,
-        display: Display<'static>,
-        lcd_te: Option<Input<'static>>,
-        rtc: esp_hal::rtc_cntl::Rtc<'static>,
-        mut store: crate::storage::Store<'static>,
-        initial_time: app_core::data::TimeData,
-        initial_power: app_core::data::PowerData,
-        touch_state: TouchTaskState<'static>,
-        boot_button_state: BootButtonTaskState<'static>,
-        rtc_state: RtcTaskState<'static>,
-        imu_state: ImuTaskState<'static>,
-        power_state: PowerTaskState,
-    ) -> (Self, TaskBundle) {
+    pub fn new(parts: SystemParts<B>) -> (Self, TaskBundle) {
+        let SystemParts {
+            i2c_bus,
+            board,
+            display,
+            lcd_te,
+            rtc,
+            mut store,
+            initial_time,
+            initial_power,
+            touch: touch_state,
+            boot_button: boot_button_state,
+            rtc_state,
+            imu: imu_state,
+            power: power_state,
+        } = parts;
+
         // Seed the shared wall clock so any SD writes before the
         // first `TimeUpdated` (e.g. the boot line) see real calendar
         // time.
@@ -311,7 +293,7 @@ impl<B: Board> SystemManager<'static, B> {
             cached_data, loaded_config, Instant::now(),
         );
 
-        let manager = Self {
+        let mut manager = Self {
             i2c_bus,
             board,
             display,
@@ -337,7 +319,7 @@ impl<B: Board> SystemManager<'static, B> {
         };
 
         // Baseline clock; render boosts to 160 MHz per-frame.
-        set_cpu_freq(CpuFreq::Mhz80);
+        manager.board.set_cpu_freq(CpuFreq::Mhz80);
 
         (manager, bundle)
     }
@@ -574,24 +556,17 @@ impl<B: Board> SystemManager<'static, B> {
             core::time::Duration::from_secs(5),
         );
 
-        // Config that reliably wakes on ESP32-S3 (validated via
-        // `bin/sleep_test.rs`). The critical bits:
-        // - `xtal_fpu(true)` keeps the main XTAL powered, without
-        //   which the CPU can't resume clocking on wake.
-        // - `rtc_regulator_fpu(true)` keeps the RTC regulator on
-        //   so the RTC domain stays functional during sleep.
-        // - `light_slp_reject(false)` tolerates pending interrupts
-        //   at sleep entry (e.g. a latched PCF85063 INT line).
+        // Start from the default and let the board apply its
+        // chip-specific reliability tuning (the available knobs - XTAL
+        // / RTC-regulator force-power-up, light-sleep-reject - differ
+        // per chip family, so they live behind the seam).
         let mut config = RtcSleepConfig::default();
-        config.set_rtc_regulator_fpu(true);
-        config.set_xtal_fpu(true);
-        config.set_light_slp_reject(false);
+        self.board.tune_sleep_config(&mut config);
 
-        // Drop to 80 MHz before sleep. At CpuClock::max() (240 MHz)
-        // the slow-clock alarm programming in TimerWakeupSource
-        // can't latch before the CPU enters sleep, and timer wake
-        // never fires. See esp-hal issue #375 discussion thread.
-        set_cpu_freq(CpuFreq::Mhz80);
+        // Drop to baseline before sleep: at max clock the slow-clock
+        // alarm programming in TimerWakeupSource can't latch before
+        // the CPU gates off and timer wake never fires.
+        self.board.set_cpu_freq(CpuFreq::Mhz80);
 
         // Settle delay before sleep - lets the slow-clock alarm
         // writes latch into the RTC domain before the CPU gates
@@ -602,13 +577,13 @@ impl<B: Board> SystemManager<'static, B> {
 
         self.rtc.sleep(&config, &[&gpio_wake, &timer_wake]);
 
-        // Post-wake settle delay. USB-Serial-JTAG in particular
-        // loses the first ~tens of ms of output after light sleep
-        // wake because the USB host has to re-sync. Without this
-        // delay the first `log::info!` below gets partially eaten
-        // by the host and reads as a bare "INFO - " line. Costs a
-        // bit of idle power but makes on-device debugging usable;
-        // drop or shrink once we're confident this is shipping.
+        // Post-wake settle delay. USB-Serial-JTAG in particular loses
+        // the first ~tens of ms of output after light-sleep wake
+        // because the USB host has to re-sync. Without this delay the
+        // first `log::info!` below gets partially eaten by the host
+        // and reads as a bare "INFO - " line. Costs a bit of idle
+        // power but makes on-device debugging usable; drop or shrink
+        // once we're confident this is shipping.
         delay.delay_millis(100);
 
         log::info!("light_sleep: woke");
@@ -696,7 +671,11 @@ impl<B: Board> SystemManager<'static, B> {
 
         // Advance time-driven Model state (buzz phase, dim/idle
         // sleep transitions) and execute the resulting effects.
-        let effects = self.model.tick(Instant::now());
+        // `wall_uptime_secs` from the SoC RTC slow-clock counter
+        // survives light sleep, unlike `Instant::now()` which pauses;
+        // `Model::tick` uses each for its respective snapshot field.
+        let wall_uptime_secs = self.rtc.time_since_power_up().as_secs() as u32;
+        let effects = self.model.tick(Instant::now(), wall_uptime_secs);
         self.execute_effects(effects).await;
 
         // Auto-recovery for SD: when the mirror is offline, re-probe
@@ -707,9 +686,9 @@ impl<B: Board> SystemManager<'static, B> {
         self.try_sd_auto_recovery().await;
 
         if !self.model.sleeping() && self.model.needs_redraw() {
-            set_cpu_freq(CpuFreq::Mhz160);
+            self.board.set_cpu_freq(CpuFreq::Mhz160);
             self.render().await;
-            set_cpu_freq(CpuFreq::Mhz80);
+            self.board.set_cpu_freq(CpuFreq::Mhz80);
         }
 
         self.log_diagnostics();
@@ -887,5 +866,143 @@ impl<B: Board> SystemManager<'static, B> {
                 esp_alloc::HEAP.free(),
             );
         }
+    }
+}
+
+/// The per-board boot-construction seam.
+///
+/// Implemented once per bin. Peripheral construction names
+/// chip-specific esp-hal types that only exist in that bin's build,
+/// so it is irreducibly per-bin - but the *sequence* (ordering, the
+/// `&mut i2c` borrow choreography, snapshots, `SystemManager::new`,
+/// task spawn, the loop) lives once in [`run`]. Adding a board = one
+/// `Bringup` impl; the orchestration is never duplicated.
+///
+/// The impl holds its raw peripheral tokens - esp-hal singletons
+/// can't be partial-moved through `&mut self`, so typically as
+/// `Option<_>` `.take()`-n in each method. `esp_hal::init` / heap /
+/// `esp_rtos` / logger stay in the bin's `main` (macros/attributes
+/// produce statics); `main` then builds the `Bringup` and calls
+/// [`run`].
+// The async methods never need `Send`: their futures are polled on a
+// single embassy executor (one core, esp-rtos) and never cross
+// threads, so the `async_fn_in_trait` Send-bound caveat doesn't apply
+// here. Consciously suppressed (see the AFIT constraint analysis).
+#[allow(async_fn_in_trait)]
+pub trait Bringup {
+    type Board: Board;
+
+    /// Build the shared I2C bus (board-specific pins, uniform type).
+    fn make_i2c(&mut self) -> I2c<'static, Blocking>;
+
+    /// Bring up power/PMU - the first peripheral. Returns the board
+    /// glue (`Board` impl) and the power task state (the `Pmu`
+    /// handle wrapped for polling).
+    fn make_power(
+        &mut self,
+        i2c: &mut I2c<'static, Blocking>,
+    ) -> (Self::Board, PowerTaskState);
+
+    /// Board-specific wait before touch I2C (e.g. the FT3168
+    /// wake-from-MONITOR poll). Default: nothing.
+    async fn wait_for_peripherals(
+        &mut self,
+        _i2c: &mut I2c<'static, Blocking>,
+    ) {
+    }
+
+    /// Build the display (takes the framebuffer from the shared HAL).
+    async fn make_display(&mut self) -> Display<'static>;
+
+    /// The tearing-effect input, when the board routes one to a GPIO.
+    fn make_lcd_te(&mut self) -> Option<Input<'static>>;
+
+    /// Touch + BOOT-button task states; also arms their wake GPIOs.
+    async fn make_input(
+        &mut self,
+        i2c: &mut I2c<'static, Blocking>,
+    ) -> (TouchTaskState<'static>, BootButtonTaskState<'static>);
+
+    /// Persistent storage (flash, plus SD where the board has a slot).
+    fn make_store(&mut self) -> crate::storage::Store<'static>;
+
+    /// RTC + IMU task states.
+    async fn make_sensors(
+        &mut self,
+        i2c: &mut I2c<'static, Blocking>,
+    ) -> (RtcTaskState<'static>, ImuTaskState<'static>);
+
+    /// The esp-hal RTC controller (used for hardware light sleep).
+    fn make_rtc_ctrl(&mut self) -> esp_hal::rtc_cntl::Rtc<'static>;
+}
+
+/// Shared boot orchestration: build every piece via the board's
+/// [`Bringup`] in the canonical order, assemble the manager, spawn
+/// the per-device tasks, and run the event loop forever. Identical
+/// across boards, so it lives exactly once.
+pub async fn run<T: Bringup>(
+    mut bringup: T,
+    spawner: embassy_executor::Spawner,
+) -> ! {
+    use crate::tasks::{
+        boot_button::boot_button_task, imu::imu_task, power::power_task,
+        rtc::rtc_task, touch::touch_task,
+    };
+
+    // Construction sequence. Order matters: I2C first (shared bus),
+    // power the first peripheral (enables rails), snapshots taken
+    // while we still hold raw `&mut i2c` - before it moves into the
+    // global mutex.
+    let mut i2c = bringup.make_i2c();
+
+    let (board, power_state) = bringup.make_power(&mut i2c);
+    // Post-PMU rail settle.
+    Timer::after(Duration::from_millis(20)).await;
+
+    bringup.wait_for_peripherals(&mut i2c).await;
+
+    let display = bringup.make_display().await;
+    let lcd_te = bringup.make_lcd_te();
+    let (touch, boot_button) = bringup.make_input(&mut i2c).await;
+    let store = bringup.make_store();
+    let (rtc_state, imu) = bringup.make_sensors(&mut i2c).await;
+
+    let initial_time = rtc_state.snapshot(&mut i2c);
+    let initial_power = power_state.snapshot(&mut i2c);
+    power_state.dump_status(&mut i2c);
+
+    let i2c_bus: &'static crate::bus::SharedI2c =
+        crate::bus::I2C_BUS.init(embassy_sync::mutex::Mutex::new(i2c));
+
+    let rtc = bringup.make_rtc_ctrl();
+
+    // Assemble + spawn + run - board-agnostic, single-sourced.
+    let (mut manager, bundle) = SystemManager::new(SystemParts {
+        i2c_bus,
+        board,
+        display,
+        lcd_te,
+        rtc,
+        store,
+        initial_time,
+        initial_power,
+        touch,
+        boot_button,
+        rtc_state,
+        imu,
+        power: power_state,
+    });
+
+    // Each task is spawned exactly once at boot; `.unwrap()` on the
+    // task fn is the "must succeed" shape (embassy-executor 0.10
+    // returns a `Result<SpawnToken, SpawnError>` from the task macro).
+    spawner.spawn(touch_task(i2c_bus, bundle.touch).unwrap());
+    spawner.spawn(boot_button_task(bundle.boot_button).unwrap());
+    spawner.spawn(rtc_task(i2c_bus, bundle.rtc).unwrap());
+    spawner.spawn(imu_task(i2c_bus, bundle.imu).unwrap());
+    spawner.spawn(power_task(i2c_bus, bundle.power).unwrap());
+
+    loop {
+        manager.tick().await;
     }
 }

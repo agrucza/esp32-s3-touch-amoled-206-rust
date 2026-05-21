@@ -316,16 +316,24 @@ impl Model {
 
     /// Time-driven advance: buzz-pattern tick, dim/idle-sleep
     /// checks. Call once per loop iteration.
-    pub fn tick(&mut self, now: Instant) -> Effects {
+    ///
+    /// `now` is `Instant::now()` (drives buzz/dim/idle timers, and
+    /// the `active_secs` field which pauses with embassy time during
+    /// light sleep). `wall_uptime_secs` is the wall-time-since-power-
+    /// on value the bin reads from the SoC RTC counter - it survives
+    /// light sleep and drives the `uptime_secs` field. Passing it in
+    /// keeps `Model` hardware-free / host-testable (no `Rtc` handle).
+    pub fn tick(&mut self, now: Instant, wall_uptime_secs: u32) -> Effects {
         let mut out: Effects = Vec::new();
         self.tick_buzz(now, &mut out);
         self.apply_dim_state(now, &mut out);
         self.check_idle_sleep(now, &mut out);
-        // Update the uptime snapshot screens render. Cheap (one
-        // duration_since + cast); keeps `data.uptime_secs` accurate
-        // to the current tick without screens needing access to
-        // `Instant::now()` themselves.
-        self.cached_data.uptime_secs =
+        // Update the two time-since-boot snapshots screens render.
+        // Both are cheap (one duration_since + cast each); keeps the
+        // values accurate to the current tick without screens needing
+        // any hardware access of their own.
+        self.cached_data.uptime_secs = wall_uptime_secs;
+        self.cached_data.active_secs =
             now.duration_since(self.boot).as_secs() as u32;
         out
     }

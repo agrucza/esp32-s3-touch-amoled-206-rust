@@ -4,43 +4,186 @@
 extern crate alloc;
 
 mod board;
-// The audio stack (ES8311 DAC, ES7210 ADC, I2S DMA, speaker amp)
-// lives in `system_core::audio` - same hardware on every board.
-// It's implemented but not wired into the manager loop yet (idle
-// current); bring-up is reintroduced bin-side when there's a caller.
+// The audio stack (ES8311/ES7210/I2S) lives in `system_core::audio`
+// - same hardware on every board. Implemented but not wired into the
+// manager loop yet (idle current); bring-up is reintroduced bin-side
+// when there's a caller.
 mod system;
-mod tasks;
 
-// `config`, `events`, and `ui` live in the `app-core` crate so they
-// can be host-tested. Re-export at the crate root so existing
-// `crate::config::...` paths keep working.
+// `config`/`events`/`ui` live in `app-core` (host-testable);
+// re-export at the crate root so existing `crate::config::...` paths
+// keep working.
 pub use app_core::{config, events, ui};
 
 use crate::system::power::PowerControls;
-use system_core::manager::SystemManager;
-use system_core::storage::Store;
+use system_core::display::{init_display, Display};
 use system_core::flash_fs::FlashRegion;
+use system_core::manager::{run, Bringup};
+use system_core::storage::Store;
 use system_core::tasks::{
-    boot_button::{boot_button_task, BootButtonTaskState},
-    imu::{imu_task, ImuTaskState},
-    power::{power_task, PowerTaskState},
-    rtc::{rtc_task, RtcTaskState},
-    touch::{touch_task, TouchTaskState},
+    boot_button::BootButtonTaskState,
+    imu::ImuTaskState,
+    power::PowerTaskState,
+    rtc::RtcTaskState,
+    touch::TouchTaskState,
 };
 use esp_backtrace as _;
-use esp_hal::gpio::{Input, InputConfig, Level, Output, OutputConfig, Pull};
+use esp_hal::gpio::{Input, InputConfig, Level, Output, OutputConfig, Pull, WakeEvent};
 use esp_hal::i2c::master::{Config as I2cConfig, I2c};
+use esp_hal::peripherals as p;
 use esp_hal::time::Rate;
 use esp_hal::timer::timg::TimerGroup;
-use embassy_time::{Duration, Timer};
+use esp_hal::Blocking;
 
 esp_bootloader_esp_idf::esp_app_desc!();
 
+/// S3 boot-construction seam. Holds the raw peripheral tokens (esp-hal
+/// singletons can't be partial-moved through `&mut self`, so each is
+/// an `Option` `.take()`-n once by its `Bringup` method). The shared
+/// `system_core::manager::run` drives the canonical sequence.
+struct S3Bringup {
+    i2c0: Option<p::I2C0<'static>>,
+    i2c_sda: Option<p::GPIO15<'static>>,
+    i2c_scl: Option<p::GPIO14<'static>>,
+    sys_out: Option<p::GPIO10<'static>>,
+    motor: Option<p::GPIO18<'static>>,
+    spi2: Option<p::SPI2<'static>>,
+    lcd_sclk: Option<p::GPIO11<'static>>,
+    lcd_sio0: Option<p::GPIO4<'static>>,
+    lcd_sio1: Option<p::GPIO5<'static>>,
+    lcd_sio2: Option<p::GPIO6<'static>>,
+    lcd_sio3: Option<p::GPIO7<'static>>,
+    lcd_cs: Option<p::GPIO12<'static>>,
+    dma_ch0: Option<p::DMA_CH0<'static>>,
+    lcd_reset: Option<p::GPIO8<'static>>,
+    lcd_te: Option<p::GPIO13<'static>>,
+    touch_rst: Option<p::GPIO9<'static>>,
+    touch_int: Option<p::GPIO38<'static>>,
+    btn_boot: Option<p::GPIO0<'static>>,
+    rtc_int: Option<p::GPIO39<'static>>,
+    imu_int1: Option<p::GPIO21<'static>>,
+    flash: Option<p::FLASH<'static>>,
+    spi3: Option<p::SPI3<'static>>,
+    sd_sck: Option<p::GPIO2<'static>>,
+    sd_mosi: Option<p::GPIO1<'static>>,
+    sd_miso: Option<p::GPIO3<'static>>,
+    sd_cs: Option<p::GPIO17<'static>>,
+    lpwr: Option<p::LPWR<'static>>,
+}
+
+impl Bringup for S3Bringup {
+    type Board = PowerControls<'static>;
+
+    fn make_i2c(&mut self) -> I2c<'static, Blocking> {
+        I2c::new(
+            self.i2c0.take().unwrap(),
+            I2cConfig::default().with_frequency(Rate::from_khz(400)),
+        )
+        .unwrap()
+        .with_sda(self.i2c_sda.take().unwrap())
+        .with_scl(self.i2c_scl.take().unwrap())
+    }
+
+    fn make_power(
+        &mut self,
+        i2c: &mut I2c<'static, Blocking>,
+    ) -> (Self::Board, PowerTaskState) {
+        let (power, pmu) = PowerControls::init(
+            Output::new(self.sys_out.take().unwrap(), Level::Low, OutputConfig::default()),
+            Output::new(self.motor.take().unwrap(), Level::Low, OutputConfig::default()),
+            i2c,
+        )
+        .expect("PMU init failed - halting");
+        (power, PowerTaskState::new(pmu))
+    }
+
+    async fn make_display(&mut self) -> Display<'static> {
+        let fb: &'static mut [u8] = firmware_hal::display::take_framebuffer();
+        init_display(
+            self.spi2.take().unwrap(),
+            self.lcd_sclk.take().unwrap(),
+            self.lcd_sio0.take().unwrap(),
+            self.lcd_sio1.take().unwrap(),
+            self.lcd_sio2.take().unwrap(),
+            self.lcd_sio3.take().unwrap(),
+            self.lcd_cs.take().unwrap(),
+            self.dma_ch0.take().unwrap(),
+            Output::new(self.lcd_reset.take().unwrap(), Level::High, OutputConfig::default()),
+            fb,
+        )
+        .await
+    }
+
+    fn make_lcd_te(&mut self) -> Option<Input<'static>> {
+        Some(Input::new(
+            self.lcd_te.take().unwrap(),
+            InputConfig::default().with_pull(Pull::None),
+        ))
+    }
+
+    async fn make_input(
+        &mut self,
+        i2c: &mut I2c<'static, Blocking>,
+    ) -> (TouchTaskState<'static>, BootButtonTaskState<'static>) {
+        let mut touch_int = Input::new(
+            self.touch_int.take().unwrap(),
+            InputConfig::default().with_pull(Pull::Up),
+        );
+        let mut boot_btn = Input::new(
+            self.btn_boot.take().unwrap(),
+            InputConfig::default().with_pull(Pull::Up),
+        );
+        let _ = touch_int.wakeup_enable(true, WakeEvent::LowLevel);
+        let _ = boot_btn.wakeup_enable(true, WakeEvent::LowLevel);
+
+        let touch = TouchTaskState::init(
+            Output::new(self.touch_rst.take().unwrap(), Level::High, OutputConfig::default()),
+            touch_int,
+            i2c,
+        )
+        .await;
+        (touch, BootButtonTaskState::new(boot_btn))
+    }
+
+    fn make_store(&mut self) -> Store<'static> {
+        Store::init(
+            self.flash.take().unwrap(),
+            FlashRegion::new(board::FLASH_FS_START, board::FLASH_FS_SIZE),
+            self.spi3.take().unwrap(),
+            self.sd_sck.take().unwrap(),
+            self.sd_mosi.take().unwrap(),
+            self.sd_miso.take().unwrap(),
+            Output::new(self.sd_cs.take().unwrap(), Level::High, OutputConfig::default()),
+        )
+    }
+
+    async fn make_sensors(
+        &mut self,
+        i2c: &mut I2c<'static, Blocking>,
+    ) -> (RtcTaskState<'static>, ImuTaskState<'static>) {
+        let mut rtc_int = Input::new(
+            self.rtc_int.take().unwrap(),
+            InputConfig::default().with_pull(Pull::Up),
+        );
+        let _ = rtc_int.wakeup_enable(true, WakeEvent::LowLevel);
+        let rtc_state = RtcTaskState::init(Some(rtc_int), i2c);
+        let imu = ImuTaskState::init(
+            Input::new(self.imu_int1.take().unwrap(), InputConfig::default().with_pull(Pull::Down)),
+            i2c,
+        )
+        .await;
+        (rtc_state, imu)
+    }
+
+    fn make_rtc_ctrl(&mut self) -> esp_hal::rtc_cntl::Rtc<'static> {
+        esp_hal::rtc_cntl::Rtc::new(self.lpwr.take().unwrap())
+    }
+}
+
 #[esp_rtos::main]
 async fn main(spawner: embassy_executor::Spawner) {
-    let p = esp_hal::init(
-        esp_hal::Config::default()
-            .with_cpu_clock(esp_hal::clock::CpuClock::max())
+    let peripherals = esp_hal::init(
+        esp_hal::Config::default().with_cpu_clock(esp_hal::clock::CpuClock::max()),
     );
 
     // PSRAM allocator (esp-hal 1.1 takes the config via the macro).
@@ -50,123 +193,46 @@ async fn main(spawner: embassy_executor::Spawner) {
         core_clock: Some(esp_hal::psram::SpiTimingConfigCoreClock::SpiTimingConfigCoreClock160m),
         ..Default::default()
     };
-    esp_alloc::psram_allocator!(p.PSRAM, esp_hal::psram, psram_config);
+    esp_alloc::psram_allocator!(peripherals.PSRAM, esp_hal::psram, psram_config);
 
-    let timg0 = TimerGroup::new(p.TIMG0);
-    let sw_int = esp_hal::interrupt::software::SoftwareInterruptControl::new(p.SW_INTERRUPT);
+    let timg0 = TimerGroup::new(peripherals.TIMG0);
+    let sw_int =
+        esp_hal::interrupt::software::SoftwareInterruptControl::new(peripherals.SW_INTERRUPT);
     esp_rtos::start(timg0.timer0, sw_int.software_interrupt0);
     esp_println::logger::init_logger(log::LevelFilter::Info);
     log::info!("--- ESP32-S3-Touch-AMOLED-2.06 booting ---");
 
-    // ---- Hardware construction (board-specific; concrete pins) -----------
-    //
-    // The shared `system-core` brain is built once below from these
-    // constructed pieces via `SystemManager::new`. Order matters:
-    // I2C first (shared bus), power first peripheral (enables rails).
+    // All board-specific construction lives in the `Bringup` impl;
+    // the shared orchestrator drives the canonical boot sequence.
+    let bringup = S3Bringup {
+        i2c0: Some(peripherals.I2C0),
+        i2c_sda: Some(peripherals.GPIO15),
+        i2c_scl: Some(peripherals.GPIO14),
+        sys_out: Some(peripherals.GPIO10),
+        motor: Some(peripherals.GPIO18),
+        spi2: Some(peripherals.SPI2),
+        lcd_sclk: Some(peripherals.GPIO11),
+        lcd_sio0: Some(peripherals.GPIO4),
+        lcd_sio1: Some(peripherals.GPIO5),
+        lcd_sio2: Some(peripherals.GPIO6),
+        lcd_sio3: Some(peripherals.GPIO7),
+        lcd_cs: Some(peripherals.GPIO12),
+        dma_ch0: Some(peripherals.DMA_CH0),
+        lcd_reset: Some(peripherals.GPIO8),
+        lcd_te: Some(peripherals.GPIO13),
+        touch_rst: Some(peripherals.GPIO9),
+        touch_int: Some(peripherals.GPIO38),
+        btn_boot: Some(peripherals.GPIO0),
+        rtc_int: Some(peripherals.GPIO39),
+        imu_int1: Some(peripherals.GPIO21),
+        flash: Some(peripherals.FLASH),
+        spi3: Some(peripherals.SPI3),
+        sd_sck: Some(peripherals.GPIO2),
+        sd_mosi: Some(peripherals.GPIO1),
+        sd_miso: Some(peripherals.GPIO3),
+        sd_cs: Some(peripherals.GPIO17),
+        lpwr: Some(peripherals.LPWR),
+    };
 
-    // 1. I2C bus.
-    let mut i2c = I2c::new(p.I2C0, I2cConfig::default().with_frequency(Rate::from_khz(400)))
-        .unwrap()
-        .with_sda(p.GPIO15)
-        .with_scl(p.GPIO14);
-
-    // 2. Power: GPIO latch + motor + AXP2101 init. `PowerControls`
-    //    is this board's `system_core::board::Board` impl.
-    let (board, pmu) = PowerControls::init(
-        Output::new(p.GPIO10, Level::Low, OutputConfig::default()),
-        Output::new(p.GPIO18, Level::Low, OutputConfig::default()),
-        &mut i2c,
-    ).expect("PMU init failed - halting");
-    let power_state = PowerTaskState::new(pmu);
-    Timer::after(Duration::from_millis(20)).await;
-
-    // 3. Framebuffer (internal-SRAM BSS, shared display HAL).
-    let fb: &'static mut [u8] = firmware_hal::display::take_framebuffer();
-
-    // 4. Display.
-    let display = system_core::display::init_display(
-        p.SPI2, p.GPIO11, p.GPIO4, p.GPIO5,
-        p.GPIO6, p.GPIO7, p.GPIO12, p.DMA_CH0,
-        Output::new(p.GPIO8, Level::High, OutputConfig::default()),
-        fb,
-    ).await;
-
-    // 5. TE input (this board has the GPIO; `None` boards skip the wait).
-    let lcd_te = Input::new(p.GPIO13, InputConfig::default().with_pull(Pull::None));
-
-    // 6. Touch + BOOT button. Arm RTC-wake on the INT pins before
-    //    handing them to the tasks.
-    let mut touch_int = Input::new(p.GPIO38, InputConfig::default().with_pull(Pull::Up));
-    let mut boot_btn  = Input::new(p.GPIO0,  InputConfig::default().with_pull(Pull::Up));
-    let mut rtc_int   = Input::new(p.GPIO39, InputConfig::default().with_pull(Pull::Up));
-    let _ = touch_int.wakeup_enable(true, esp_hal::gpio::WakeEvent::LowLevel);
-    let _ = boot_btn.wakeup_enable(true, esp_hal::gpio::WakeEvent::LowLevel);
-    let _ = rtc_int.wakeup_enable(true, esp_hal::gpio::WakeEvent::LowLevel);
-
-    let touch_state = TouchTaskState::init(
-        Output::new(p.GPIO9, Level::High, OutputConfig::default()),
-        touch_int,
-        &mut i2c,
-    ).await;
-    let boot_button_state = BootButtonTaskState::new(boot_btn);
-
-    // 7. Persistent storage: flash + SD. The region geometry is this
-    //    bin's (kept in sync with partitions-s3.csv via board.rs).
-    let store = Store::init(
-        p.FLASH,
-        FlashRegion::new(board::FLASH_FS_START, board::FLASH_FS_SIZE),
-        p.SPI3, p.GPIO2, p.GPIO1, p.GPIO3,
-        Output::new(p.GPIO17, Level::High, OutputConfig::default()),
-    );
-
-    // 8. Sensors (RTC + IMU; IMU does ~512 ms gyro-bias calibration).
-    let rtc_state = RtcTaskState::init(rtc_int, &mut i2c);
-    let imu_state = ImuTaskState::init(
-        Input::new(p.GPIO21, InputConfig::default().with_pull(Pull::Down)),
-        &mut i2c,
-    ).await;
-
-    // 9. Initial snapshots (need raw &mut i2c before it's moved into
-    //    the global mutex).
-    let initial_time = rtc_state.snapshot(&mut i2c);
-    let initial_power = power_state.snapshot(&mut i2c);
-    power_state.dump_status(&mut i2c);
-
-    // 10. Move the I2C bus into the global mutex shared with tasks.
-    let i2c_bus: &'static system_core::bus::SharedI2c =
-        system_core::bus::I2C_BUS.init(embassy_sync::mutex::Mutex::new(i2c));
-
-    // 11. RTC controller for hardware light sleep.
-    let rtc = esp_hal::rtc_cntl::Rtc::new(p.LPWR);
-
-    // ---- Assemble the shared brain --------------------------------------
-    let (mut manager, bundle) = SystemManager::new(
-        i2c_bus,
-        board,
-        display,
-        Some(lcd_te),
-        rtc,
-        store,
-        initial_time,
-        initial_power,
-        touch_state,
-        boot_button_state,
-        rtc_state,
-        imu_state,
-        power_state,
-    );
-
-    // Each task is spawned exactly once at boot; `.unwrap()` is the
-    // right "must succeed" shape (embassy-executor 0.10 returns a
-    // `Result<SpawnToken, SpawnError>` from the task macro).
-    spawner.spawn(tasks::heartbeat::heartbeat().unwrap());
-    spawner.spawn(touch_task(i2c_bus, bundle.touch).unwrap());
-    spawner.spawn(boot_button_task(bundle.boot_button).unwrap());
-    spawner.spawn(rtc_task(i2c_bus, bundle.rtc).unwrap());
-    spawner.spawn(imu_task(i2c_bus, bundle.imu).unwrap());
-    spawner.spawn(power_task(i2c_bus, bundle.power).unwrap());
-
-    loop {
-        manager.tick().await;
-    }
+    run(bringup, spawner).await
 }

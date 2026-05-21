@@ -120,16 +120,19 @@ pub use app_core::data::TimeData;
 
 pub struct RtcTaskState<'d> {
     pub rtc: Rtc,
-    int_pin: Input<'d>,
+    /// PCF85063 INT# line, when the board routes it to a GPIO. `None`
+    /// on boards with no RTC_INT pin - the task then runs purely off
+    /// its 1 s software poll, which it already supports.
+    int_pin: Option<Input<'d>>,
     /// How often to poll the RTC for time updates (in seconds).
     poll_secs: u64,
 }
 
 impl<'d> RtcTaskState<'d> {
-    /// Initialize the RTC, set a default time if the oscillator
-    /// stopped, and enable the minute interrupt so GPIO39 pulses
-    /// at second=0.
-    pub fn init(int_pin: Input<'d>, i2c: &mut impl I2cTrait) -> Self {
+    /// Initialize the RTC and set a default time if the oscillator
+    /// stopped. `int_pin` is the PCF85063 INT# GPIO when the board
+    /// routes one, else `None` (poll-only).
+    pub fn init(int_pin: Option<Input<'d>>, i2c: &mut impl I2cTrait) -> Self {
         log::info!("RTC: initializing PCF85063...");
         let rtc = Rtc::new(RtcConfig::default());
         match rtc.init(i2c) {
@@ -243,12 +246,17 @@ impl<'d> RtcTaskState<'d> {
         }
     }
 
-    /// Async wait for any source on the INT# line (GPIO39 falling
-    /// edge). This could be the half-minute tick, a fired alarm,
-    /// or a timer expiry - call `classify_interrupt` afterwards
-    /// to determine which.
+    /// Async wait for any source on the INT# line (falling edge):
+    /// the half-minute tick, a fired alarm, or a timer expiry - call
+    /// `classify_interrupt` afterwards to determine which. On boards
+    /// with no RTC_INT GPIO (`int_pin` is `None`) this never resolves,
+    /// so the task's 1 s software-poll arm of its `select3` drives
+    /// time/alarm updates instead.
     pub async fn wait_for_int(&mut self) {
-        self.int_pin.wait_for_falling_edge().await;
+        match &mut self.int_pin {
+            Some(p) => p.wait_for_falling_edge().await,
+            None => core::future::pending::<()>().await,
+        }
     }
 
     /// Read Control_2 to figure out which INT source fired,

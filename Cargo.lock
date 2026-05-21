@@ -1011,6 +1011,7 @@ version = "0.1.0"
 dependencies = [
  "drivers",
  "embassy-executor",
+ "embassy-sync 0.8.0",
  "embassy-time",
  "embedded-hal 1.0.0",
  "esp-alloc",
@@ -1019,8 +1020,10 @@ dependencies = [
  "esp-hal",
  "esp-println",
  "esp-rtos",
+ "esp-storage",
  "firmware-hal",
  "log",
+ "system-core",
 ]
 
 [[package]]

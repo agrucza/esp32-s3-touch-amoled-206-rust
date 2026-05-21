@@ -41,16 +41,27 @@ esp-println = { version = "0.17.0", features = [
 # --- Embassy async runtime ---
 embassy-executor = { version = "0.10" }
 embassy-time     = { version = "0.5.1" }
+embassy-sync     = { version = "0.8" }   # Mutex for the shared I2C bus
 
 # --- embedded-hal traits (needed to call drivers crate APIs generically) ---
 embedded-hal = { workspace = true }
 
 # --- Local crates ---
-# Pulled in piecewise as each peripheral is brought up.
 # `default-features = false` disables the drivers crate's `defmt`
-# feature; firmware-c6 uses esp-println / log, not defmt.
-drivers      = { path = "../drivers", default-features = false, features = ["pmu", "display"] }
+# feature; firmware-c6 uses esp-println / log, not defmt. Driver
+# features mirror system-core's (the shared system layer compiles
+# every subsystem; the SD backend type must compile even though this
+# board has no SD slot and uses `Store::init_flash_only`).
+drivers      = { path = "../drivers", default-features = false, features = [
+    "display", "imu", "pmu", "rtc", "touch", "es8311", "es7210", "sdcard",
+] }
 firmware-hal = { path = "../firmware-hal" }
+system-core  = { path = "../system-core" }
+
+# Chip-feature carrier for `system-core`'s `esp-storage` (declared
+# there with no chip feature; Cargo unification carries esp32c6 in
+# from here, same pattern as `esp-hal`).
+esp-storage  = { version = "0.9.0", features = ["esp32c6"] }
 
 # --- Internal-SRAM heap allocator ---
 # The C6 has no PSRAM, so the heap lives in HP SRAM. We use a small heap
