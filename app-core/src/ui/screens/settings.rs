@@ -1314,6 +1314,32 @@ impl SettingsScreen {
             display, &fonts::value(),
             act_buf.as_str(), active_rect, theme::FG,
         );
+
+        // SLEEPS: count of completed light-sleep cycles. Diagnostic -
+        // paced by the ~5 s heartbeat when really sleeping (~12/min); a
+        // far higher rate vs UPTIME means the CPU is instant-waking
+        // instead of gating off. 4th panel below ACTIVE, same geometry;
+        // scroll down to see it.
+        let slept_y = active_y + panel_h + 12;
+        let slept_rect = Rectangle::new(
+            Point::new(panel_x, slept_y),
+            Size::new(panel_w as u32, panel_h as u32),
+        );
+        chamfered_panel(display, slept_rect, NOTCH, theme::CYAN, 1);
+        tag_label(
+            display,
+            slept_rect.top_left.x,
+            slept_rect.top_left.y,
+            "SLEEPS",
+            theme::CYAN,
+            NOTCH,
+        );
+        let mut slept_buf: String<16> = String::new();
+        let _ = write!(slept_buf, "{}", data.sleep_cycles);
+        fonts::draw_centered_in_rect(
+            display, &fonts::value(),
+            slept_buf.as_str(), slept_rect, theme::FG,
+        );
     }
 
     fn battery_event(&mut self, event: &SystemEvent, _data: &mut SystemData) -> Action {

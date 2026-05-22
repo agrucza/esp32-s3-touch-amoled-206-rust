@@ -149,8 +149,20 @@ impl<'d> Board for PowerControls<'d> {
         &self,
         cfg: &mut esp_hal::rtc_cntl::sleep::RtcSleepConfig,
     ) {
+        // rtc_regulator_fpu REVERTED to true 2026-05-22: it woke fine
+        // dropped (touch + heartbeat), but we're putting it back to the
+        // recipe value to test whether the BOOT-button (GPIO0) wake-reset
+        // is caused by this knob or was already there with it on.
         cfg.set_rtc_regulator_fpu(true);
-        cfg.set_xtal_fpu(true);
+        // EXPERIMENT 2026-05-22: was `set_xtal_fpu(true)`. Testing
+        // whether the S3 wakes without keeping the 40 MHz main XTAL
+        // powered through light sleep - if it does, that closes much of
+        // the remaining sleep-current gap to the C6. The validated
+        // recipe (project_light_sleep, rule 3) says this is REQUIRED and
+        // that failure is a SILENT HANG (sleeps, never wakes). If the
+        // device won't wake on touch after sleeping, revert this to
+        // `true` and reflash.
+        cfg.set_xtal_fpu(false);
         cfg.set_light_slp_reject(false);
     }
 }

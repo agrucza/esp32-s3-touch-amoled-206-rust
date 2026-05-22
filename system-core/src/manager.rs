@@ -191,6 +191,12 @@ pub struct SystemManager<'d, B: Board> {
     // time spent in light sleep (the counter advances during sleep).
     boot_uptime_secs: u32,
 
+    // Light-sleep diagnostic: count of completed sleep cycles since
+    // boot (incremented after each rtc.sleep() returns). Surfaced via
+    // Model::set_sleep_telemetry each tick; the cycle rate vs uptime
+    // tells whether the CPU is really gating off.
+    sleep_cycles: u32,
+
     // Unified persistent-storage facade. Owns the on-flash
     // LittleFS and the SD volume manager together with the
     // SD-mirror online flag. Mirrored writes, flash-only escape
@@ -319,6 +325,7 @@ impl<B: Board> SystemManager<'static, B> {
             force_full_redraw: true,
             rtc,
             boot_uptime_secs,
+            sleep_cycles: 0,
             store,
             last_storage_usage: initial_usage,
             last_sd_recover_attempt: None,
@@ -590,6 +597,7 @@ impl<B: Board> SystemManager<'static, B> {
         delay.delay_millis(100);
 
         self.rtc.sleep(&config, &[&gpio_wake, &timer_wake]);
+        self.sleep_cycles += 1;
 
         // Post-wake settle delay. USB-Serial-JTAG in particular loses
         // the first ~tens of ms of output after light-sleep wake
@@ -600,7 +608,7 @@ impl<B: Board> SystemManager<'static, B> {
         // once we're confident this is shipping.
         delay.delay_millis(100);
 
-        log::info!("light_sleep: woke");
+        log::info!("light_sleep: woke (cycle {})", self.sleep_cycles);
     }
 
     // ================= Event loop ================================================
@@ -693,6 +701,7 @@ impl<B: Board> SystemManager<'static, B> {
         let wall_uptime_secs = (self.rtc.time_since_power_up().as_secs() as u32)
             .saturating_sub(self.boot_uptime_secs);
         let effects = self.model.tick(Instant::now(), wall_uptime_secs);
+        self.model.set_sleep_telemetry(self.sleep_cycles);
         self.execute_effects(effects).await;
 
         // Auto-recovery for SD: when the mirror is offline, re-probe

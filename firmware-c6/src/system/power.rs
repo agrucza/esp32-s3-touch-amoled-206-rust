@@ -10,8 +10,10 @@
 //!
 //! AXP rails are NOT configured: the AXP retains rail state across
 //! MCU resets and the reference firmware never enables them in
-//! software. We only `check_device` to confirm reachability; the
-//! returned `Pmu` goes to the shared power task.
+//! software. We `check_device` for reachability and `enable_all_adc`
+//! (the board-independent ADC channels - vbus/vsys/die-temp - which
+//! touch no rails), but skip the rail config. The returned `Pmu` goes
+//! to the shared power task.
 
 use drivers::pmu::{Config as PmuConfig, Pmu};
 use embedded_hal::i2c::I2c;
@@ -36,6 +38,16 @@ impl C6Board {
             ),
             Err(_) => log::error!("AXP2101 check_device failed"),
         }
+
+        // Enable the AXP2101 ADC channels (vbus/vsys/die-temp/TS/batt).
+        // Board-independent - the same channels the S3 enables - and it
+        // touches no rails, so it's safe even though we otherwise trust
+        // the AXP's persisted rail state here. Without it, vbus/vsys/
+        // die-temp read 0.
+        if pmu.enable_all_adc(i2c).is_err() {
+            log::error!("AXP2101: enable_all_adc failed");
+        }
+
         (Self, pmu)
     }
 }

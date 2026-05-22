@@ -726,6 +726,12 @@ pub struct SystemData {
     /// sleep** because the time driver (TIMG0) is gated then. Pair
     /// with `uptime_secs` to read off the device's duty cycle.
     pub active_secs: u32,
+
+    /// Diagnostic: count of completed light-sleep cycles since boot.
+    /// Paced by the ~5 s heartbeat when really sleeping (~12/min); a
+    /// far higher rate relative to `uptime_secs` means the CPU is
+    /// instant-waking instead of gating off.
+    pub sleep_cycles: u32,
 }
 
 // -- Screen trait -------------------------------------------------------------

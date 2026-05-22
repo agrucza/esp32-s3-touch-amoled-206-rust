@@ -338,6 +338,15 @@ impl Model {
         out
     }
 
+    /// Inject the manager's completed light-sleep cycle count into the
+    /// cached snapshot. Kept off `tick` so that signature stays
+    /// host-test-stable; the manager calls this right after `tick`
+    /// each loop. The cycle rate vs uptime distinguishes "really
+    /// sleeping" from "active_secs is wrong".
+    pub fn set_sleep_telemetry(&mut self, sleep_cycles: u32) {
+        self.cached_data.sleep_cycles = sleep_cycles;
+    }
+
     // --- internals -----------------------------------------------------------
 
     /// Update cached snapshot fields from snapshot-carrying events.
