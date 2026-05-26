@@ -68,7 +68,7 @@ const BRIGHT_MIN_PCT: u8 = 5;
 #[derive(Clone, Copy)]
 enum TileIcon {
     Dnd,
-    Airplane,  // play triangle (placeholder; no dedicated airplane glyph yet)
+    Vibrate,   // phone-handset glyph, stands in for the haptic toggle
     Flash,     // lightning bolt
     Sounds,    // bell
     Bluetooth,
@@ -83,7 +83,7 @@ fn draw_tile_icon<D: DrawTarget<Color = Rgb565>>(
     let r = 9;
     match kind {
         TileIcon::Dnd       => glyphs::dnd(display, cx, cy, r, color),
-        TileIcon::Airplane  => glyphs::play(display, cx, cy, r, color),
+        TileIcon::Vibrate   => glyphs::phone(display, cx, cy, r, color),
         TileIcon::Flash     => glyphs::bolt(display, cx, cy, r, color),
         TileIcon::Sounds    => glyphs::bell(display, cx, cy, r, color),
         TileIcon::Bluetooth => glyphs::bluetooth_small(display, cx, cy, r, color),
@@ -117,6 +117,7 @@ struct TileDef {
 
 fn dnd_is_on(d: &SystemData) -> bool { d.config.dnd }
 fn haptics_is_on(d: &SystemData) -> bool { d.config.haptics_enabled }
+fn sound_is_on(d: &SystemData) -> bool { d.config.sound_enabled }
 fn night_mode_is_on(d: &SystemData) -> bool { d.config.display.night_mode }
 
 const TILES: [TileDef; 8] = [
@@ -124,11 +125,14 @@ const TILES: [TileDef; 8] = [
         label: "DND", icon: TileIcon::Dnd,
         kind: TileKind::Toggle { is_on: dnd_is_on, action: Action::ToggleDnd },
     },
-    TileDef { label: "AIR",    icon: TileIcon::Airplane,  kind: TileKind::Stub },
+    TileDef {
+        label: "VIBRATE", icon: TileIcon::Vibrate,
+        kind: TileKind::Toggle { is_on: haptics_is_on, action: Action::ToggleHaptics },
+    },
     TileDef { label: "FLASH",  icon: TileIcon::Flash,     kind: TileKind::Stub },
     TileDef {
         label: "SOUNDS", icon: TileIcon::Sounds,
-        kind: TileKind::Toggle { is_on: haptics_is_on, action: Action::ToggleHaptics },
+        kind: TileKind::Toggle { is_on: sound_is_on, action: Action::ToggleSound },
     },
     TileDef { label: "BT",     icon: TileIcon::Bluetooth, kind: TileKind::Stub },
     TileDef { label: "WIFI",   icon: TileIcon::Wifi,      kind: TileKind::Stub },

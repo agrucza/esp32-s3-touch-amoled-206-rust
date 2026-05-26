@@ -197,6 +197,10 @@ pub enum Action {
     /// the manager gates motor effects on the live value.
     ToggleHaptics,
 
+    /// Flip `config.sound_enabled`. Model marks config dirty; the
+    /// manager gates the alarm / timer alert tone on the live value.
+    ToggleSound,
+
     /// Flip `config.dnd`. Pure config flip today - the alarm and
     /// notification routing that should respect this lands when
     /// those screens get real backing.

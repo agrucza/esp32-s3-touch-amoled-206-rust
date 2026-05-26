@@ -2,7 +2,7 @@ use app_core::config::Config;
 use firmware_hal::display::{HEIGHT, NUM_TILES, TILE_H, WIDTH};
 use app_core::events::SystemEvent;
 use crate::board::{Board, CpuFreq};
-use crate::bus::{EVENTS, IMU_COMMAND, RTC_COMMAND, SLEEP_WATCH, SleepState};
+use crate::bus::{AudioCommand, AUDIO_COMMAND, EVENTS, IMU_COMMAND, RTC_COMMAND, RtcCommand, SLEEP_WATCH, SleepState};
 use crate::display::Display;
 use crate::tasks::boot_button::BootButtonTaskState;
 use crate::tasks::imu::ImuTaskState;
@@ -413,6 +413,20 @@ impl<B: Board> SystemManager<'static, B> {
                 }
                 Effect::RtcCommand(cmd) => RTC_COMMAND.signal(cmd),
                 Effect::ImuCommand(cmd) => IMU_COMMAND.signal(cmd),
+                Effect::AudioCommand(cmd) => {
+                    // Gate the alert tone on the live `sound_enabled`
+                    // toggle, mirroring how `MotorOn` gates on
+                    // `haptics_enabled` just above. `Stop` always
+                    // forwards so toggling sound off mid-alert still
+                    // silences the speaker.
+                    let forward = match cmd {
+                        AudioCommand::PlayAlarm => self.model.config().sound_enabled,
+                        AudioCommand::Stop => true,
+                    };
+                    if forward {
+                        AUDIO_COMMAND.signal(cmd);
+                    }
+                }
                 Effect::Shutdown => {
                     log::info!("System: shutdown requested");
                     self.board.shutdown();
@@ -662,6 +676,16 @@ impl<B: Board> SystemManager<'static, B> {
                 }
             }
             self.enter_light_sleep().await;
+
+            // Kick the RTC task to check for an alarm / timer flag
+            // latched while we slept. Boards with no RTC INT line (the
+            // C6) can't wake on expiry at all, and the RTC task's own
+            // software poll is embassy-timed - so it's frozen across
+            // light sleep and never fires on its own here. This makes
+            // detection happen on every heartbeat instead. Harmless on
+            // boards that woke via the RTC GPIO: the flag is read and
+            // cleared exactly once, whichever path reaches it first.
+            RTC_COMMAND.signal(RtcCommand::Poll);
 
             // CPU just woke. The wake-source ISR marked its owning
             // task ready but the task hasn't run yet, so `try_receive`
@@ -960,6 +984,21 @@ pub trait Bringup {
 
     /// The esp-hal RTC controller (used for hardware light sleep).
     fn make_rtc_ctrl(&mut self) -> esp_hal::rtc_cntl::Rtc<'static>;
+
+    /// Spawn the board's audio task, where the board has a speaker.
+    /// Handed the executor and the shared I2C bus (the codec sits on
+    /// it). The task owns the board's I2S peripheral, a DMA channel and
+    /// the speaker GPIOs - all chip-specific concrete types - so the
+    /// spawn lives in the bin (like the per-board pin structs), not in
+    /// the generic orchestrator. It drives the alarm / timer alert tone
+    /// in response to `AUDIO_COMMAND`, bringing the codec up lazily on
+    /// the first tone. Default: no-op for boards without a speaker.
+    fn spawn_audio(
+        &mut self,
+        _spawner: embassy_executor::Spawner,
+        _i2c_bus: &'static crate::bus::SharedI2c,
+    ) {
+    }
 }
 
 /// Shared boot orchestration: build every piece via the board's
@@ -1027,6 +1066,9 @@ pub async fn run<T: Bringup>(
     spawner.spawn(rtc_task(i2c_bus, bundle.rtc).unwrap());
     spawner.spawn(imu_task(i2c_bus, bundle.imu).unwrap());
     spawner.spawn(power_task(i2c_bus, bundle.power).unwrap());
+    // Board-specific: the speaker task, where the board has one. Owns
+    // the I2S / DMA / speaker pins; lazy bring-up on the first tone.
+    bringup.spawn_audio(spawner, i2c_bus);
 
     loop {
         manager.tick().await;

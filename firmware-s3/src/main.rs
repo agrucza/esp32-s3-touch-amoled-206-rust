@@ -4,10 +4,12 @@
 extern crate alloc;
 
 mod board;
-// The audio stack (ES8311/ES7210/I2S) lives in `system_core::audio`
-// - same hardware on every board. Implemented but not wired into the
-// manager loop yet (idle current); bring-up is reintroduced bin-side
-// when there's a caller.
+// The audio stack lives in `system_core::audio` - same hardware on
+// every board. The TX-only speaker path is wired: `spawn_audio` below
+// hands the shared `run_audio_task` this board's I2S / DMA / speaker
+// pins, and it sounds the alarm / timer alert tone (lazy codec
+// bring-up on the first tone). The full-duplex ES7210 mic path is
+// still dormant - reintroduced bin-side when capture has a caller.
 mod system;
 
 // `config`/`events`/`ui` live in `app-core` (host-testable);
@@ -69,6 +71,15 @@ struct S3Bringup {
     sd_miso: Option<p::GPIO3<'static>>,
     sd_cs: Option<p::GPIO17<'static>>,
     lpwr: Option<p::LPWR<'static>>,
+    // Audio - TX-only speaker path. The mic input (ASDOUT GPIO42) is
+    // deliberately left unclaimed for a future capture path.
+    i2s0: Option<p::I2S0<'static>>,
+    dma_ch1: Option<p::DMA_CH1<'static>>,
+    spk_mclk: Option<p::GPIO16<'static>>,
+    spk_bclk: Option<p::GPIO41<'static>>,
+    spk_ws: Option<p::GPIO45<'static>>,
+    spk_dout: Option<p::GPIO40<'static>>,
+    spk_pa: Option<p::GPIO46<'static>>,
 }
 
 impl Bringup for S3Bringup {
@@ -178,6 +189,55 @@ impl Bringup for S3Bringup {
     fn make_rtc_ctrl(&mut self) -> esp_hal::rtc_cntl::Rtc<'static> {
         esp_hal::rtc_cntl::Rtc::new(self.lpwr.take().unwrap())
     }
+
+    fn spawn_audio(
+        &mut self,
+        spawner: embassy_executor::Spawner,
+        i2c_bus: &'static system_core::bus::SharedI2c,
+    ) {
+        // TX circular DMA buffer for the speaker: 4 KB ~= 64 ms at
+        // 16 kHz / 16-bit stereo, enough to ride DMA refills without
+        // audible gaps. The macro allocates these as internal-SRAM
+        // statics (RX side unused -> size 0).
+        let (_, _, tx_buffer, tx_descriptors) = esp_hal::dma_circular_buffers!(0, 4096);
+        spawner.spawn(
+            audio_task(
+                i2c_bus,
+                self.i2s0.take().unwrap(),
+                self.dma_ch1.take().unwrap(),
+                self.spk_mclk.take().unwrap(),
+                self.spk_bclk.take().unwrap(),
+                self.spk_ws.take().unwrap(),
+                self.spk_dout.take().unwrap(),
+                Output::new(self.spk_pa.take().unwrap(), Level::Low, OutputConfig::default()),
+                tx_buffer,
+                tx_descriptors,
+            )
+            .unwrap(),
+        );
+    }
+}
+
+/// Thin per-board wrapper: embassy tasks can't be generic, so each bin
+/// monomorphises the shared `run_audio_task` with its concrete I2S /
+/// DMA / speaker-pin types here.
+#[embassy_executor::task]
+async fn audio_task(
+    i2c_bus: &'static system_core::bus::SharedI2c,
+    i2s: p::I2S0<'static>,
+    dma: p::DMA_CH1<'static>,
+    mclk: p::GPIO16<'static>,
+    bclk: p::GPIO41<'static>,
+    ws: p::GPIO45<'static>,
+    dout: p::GPIO40<'static>,
+    pa: Output<'static>,
+    tx_buffer: &'static mut [u8],
+    tx_descriptors: &'static mut [esp_hal::dma::DmaDescriptor],
+) {
+    system_core::audio::run_audio_task(
+        i2c_bus, i2s, dma, mclk, bclk, ws, dout, pa, tx_buffer, tx_descriptors,
+    )
+    .await
 }
 
 #[esp_rtos::main]
@@ -234,6 +294,13 @@ async fn main(spawner: embassy_executor::Spawner) {
         sd_miso: Some(peripherals.GPIO3),
         sd_cs: Some(peripherals.GPIO17),
         lpwr: Some(peripherals.LPWR),
+        i2s0: Some(peripherals.I2S0),
+        dma_ch1: Some(peripherals.DMA_CH1),
+        spk_mclk: Some(peripherals.GPIO16),
+        spk_bclk: Some(peripherals.GPIO41),
+        spk_ws: Some(peripherals.GPIO45),
+        spk_dout: Some(peripherals.GPIO40),
+        spk_pa: Some(peripherals.GPIO46),
     };
 
     run(bringup, spawner).await

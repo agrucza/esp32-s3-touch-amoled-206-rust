@@ -197,6 +197,7 @@ enum RowIcon {
     Restore,
     Skull,
     Sounds,
+    Vibrate,
     Dnd,
     Display,
     Wifi,
@@ -218,6 +219,7 @@ fn draw_row_icon<D: DrawTarget<Color = Rgb565>>(
         RowIcon::Restore   => glyphs::chip(display, cx, cy, r, color),
         RowIcon::Skull     => glyphs::skull(display, cx, cy, r, color),
         RowIcon::Sounds    => glyphs::bell(display, cx, cy, r, color),
+        RowIcon::Vibrate   => glyphs::phone(display, cx, cy, r, color),
         RowIcon::Dnd       => glyphs::dnd(display, cx, cy, r, color),
         RowIcon::Display   => glyphs::bolt(display, cx, cy, r, color),
         RowIcon::Wifi      => glyphs::signal_small(display, cx, cy, r, color),
@@ -321,6 +323,10 @@ fn haptics_is_on(data: &SystemData) -> bool {
     data.config.haptics_enabled
 }
 
+fn sound_is_on(data: &SystemData) -> bool {
+    data.config.sound_enabled
+}
+
 fn dnd_is_on(data: &SystemData) -> bool {
     data.config.dnd
 }
@@ -362,6 +368,11 @@ const INDEX_ROWS: &[IndexRow] = &[
     IndexRow {
         label: "SOUNDS",
         icon: RowIcon::Sounds,
+        kind: RowKind::Toggle { is_on: sound_is_on, action: Action::ToggleSound },
+    },
+    IndexRow {
+        label: "VIBRATE",
+        icon: RowIcon::Vibrate,
         kind: RowKind::Toggle { is_on: haptics_is_on, action: Action::ToggleHaptics },
     },
     IndexRow {

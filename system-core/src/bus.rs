@@ -33,7 +33,7 @@ use static_cell::StaticCell;
 // so `Effect` can carry them. The `Signal` and `Watch` statics
 // below still live here - they're hardware-coupled (task wakers,
 // interrupt-safe mutexes).
-pub use app_core::commands::{ImuCommand, RtcCommand, SleepState};
+pub use app_core::commands::{AudioCommand, ImuCommand, RtcCommand, SleepState};
 
 /// Size of the system event channel. Should be large enough to
 /// buffer a burst of events without blocking producers but small
@@ -87,6 +87,18 @@ pub static IMU_COMMAND: Signal<CriticalSectionRawMutex, ImuCommand> = Signal::ne
 ///
 /// Single-consumer: only the RTC task should call `wait()` on this.
 pub static RTC_COMMAND: Signal<CriticalSectionRawMutex, RtcCommand> = Signal::new();
+
+/// Main-to-audio command signal.
+///
+/// The main loop publishes an [`AudioCommand`] here when an alarm /
+/// timer alert starts or stops (`Effect::AudioCommand`). The audio
+/// task, spawned bin-side with the board's I2S / DMA / speaker pins,
+/// listens for it and drives the speaker. The codec is brought up
+/// lazily on the first `PlayAlarm` so nothing draws current until a
+/// tone is actually needed.
+///
+/// Single-consumer: only the audio task should call `wait()` on this.
+pub static AUDIO_COMMAND: Signal<CriticalSectionRawMutex, AudioCommand> = Signal::new();
 
 /// Type alias for the shared I2C bus, protected by an async mutex.
 ///

@@ -53,6 +53,15 @@ struct C6Bringup {
     imu_int1: Option<p::GPIO16<'static>>,
     flash: Option<p::FLASH<'static>>,
     lpwr: Option<p::LPWR<'static>>,
+    // Audio - TX-only speaker path. The mic input (ASDOUT GPIO21) is
+    // deliberately left unclaimed for a future capture path.
+    i2s0: Option<p::I2S0<'static>>,
+    dma_ch1: Option<p::DMA_CH1<'static>>,
+    spk_mclk: Option<p::GPIO19<'static>>,
+    spk_bclk: Option<p::GPIO20<'static>>,
+    spk_ws: Option<p::GPIO22<'static>>,
+    spk_dout: Option<p::GPIO23<'static>>,
+    spk_pa: Option<p::GPIO6<'static>>,
 }
 
 impl Bringup for C6Bringup {
@@ -176,6 +185,55 @@ impl Bringup for C6Bringup {
     fn make_rtc_ctrl(&mut self) -> esp_hal::rtc_cntl::Rtc<'static> {
         esp_hal::rtc_cntl::Rtc::new(self.lpwr.take().unwrap())
     }
+
+    fn spawn_audio(
+        &mut self,
+        spawner: embassy_executor::Spawner,
+        i2c_bus: &'static system_core::bus::SharedI2c,
+    ) {
+        // TX circular DMA buffer for the speaker: 4 KB ~= 64 ms at
+        // 16 kHz / 16-bit stereo, enough to ride DMA refills without
+        // audible gaps. The macro allocates these as internal-SRAM
+        // statics (RX side unused -> size 0).
+        let (_, _, tx_buffer, tx_descriptors) = esp_hal::dma_circular_buffers!(0, 4096);
+        spawner.spawn(
+            audio_task(
+                i2c_bus,
+                self.i2s0.take().unwrap(),
+                self.dma_ch1.take().unwrap(),
+                self.spk_mclk.take().unwrap(),
+                self.spk_bclk.take().unwrap(),
+                self.spk_ws.take().unwrap(),
+                self.spk_dout.take().unwrap(),
+                Output::new(self.spk_pa.take().unwrap(), Level::Low, OutputConfig::default()),
+                tx_buffer,
+                tx_descriptors,
+            )
+            .unwrap(),
+        );
+    }
+}
+
+/// Thin per-board wrapper: embassy tasks can't be generic, so each bin
+/// monomorphises the shared `run_audio_task` with its concrete I2S /
+/// DMA / speaker-pin types here.
+#[embassy_executor::task]
+async fn audio_task(
+    i2c_bus: &'static system_core::bus::SharedI2c,
+    i2s: p::I2S0<'static>,
+    dma: p::DMA_CH1<'static>,
+    mclk: p::GPIO19<'static>,
+    bclk: p::GPIO20<'static>,
+    ws: p::GPIO22<'static>,
+    dout: p::GPIO23<'static>,
+    pa: Output<'static>,
+    tx_buffer: &'static mut [u8],
+    tx_descriptors: &'static mut [esp_hal::dma::DmaDescriptor],
+) {
+    system_core::audio::run_audio_task(
+        i2c_bus, i2s, dma, mclk, bclk, ws, dout, pa, tx_buffer, tx_descriptors,
+    )
+    .await
 }
 
 #[esp_rtos::main]
@@ -212,6 +270,13 @@ async fn main(spawner: embassy_executor::Spawner) {
         imu_int1: Some(peripherals.GPIO16),
         flash: Some(peripherals.FLASH),
         lpwr: Some(peripherals.LPWR),
+        i2s0: Some(peripherals.I2S0),
+        dma_ch1: Some(peripherals.DMA_CH1),
+        spk_mclk: Some(peripherals.GPIO19),
+        spk_bclk: Some(peripherals.GPIO20),
+        spk_ws: Some(peripherals.GPIO22),
+        spk_dout: Some(peripherals.GPIO23),
+        spk_pa: Some(peripherals.GPIO6),
     };
 
     run(bringup, spawner).await

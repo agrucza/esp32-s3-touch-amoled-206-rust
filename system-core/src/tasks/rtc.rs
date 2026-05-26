@@ -243,6 +243,14 @@ impl<'d> RtcTaskState<'d> {
                 self.poll_secs = seconds.max(1) as u64;
                 log::info!("RTC: poll interval set to {}s", self.poll_secs);
             }
+            RtcCommand::Poll => {
+                // No-op: the task's command arm already ran
+                // `read_pending_flag` (which emits AlarmFired /
+                // TimerExpired if latched) before this call. `Poll`
+                // exists only to wake the task so that check runs
+                // promptly on a heartbeat - see the manager's
+                // post-light-sleep kick.
+            }
         }
     }
 

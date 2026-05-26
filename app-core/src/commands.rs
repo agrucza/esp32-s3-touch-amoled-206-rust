@@ -23,6 +23,20 @@ pub enum SleepState {
     Sleeping,
 }
 
+/// Main-loop -> audio task commands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AudioCommand {
+    /// Start the repeating alarm / timer alert tone. The audio task
+    /// brings the speaker up lazily on the first `PlayAlarm` (the
+    /// codec stays dormant until then to save idle current) and loops
+    /// the tone until a `Stop` arrives.
+    PlayAlarm,
+    /// Silence the alert tone. Mutes the speaker amplifier; the codec
+    /// is left warm so a re-fire (e.g. snooze) doesn't pay the
+    /// bring-up latency again.
+    Stop,
+}
+
 /// Main-loop -> IMU task commands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ImuCommand {
@@ -58,4 +72,12 @@ pub enum RtcCommand {
     /// settings.
     #[allow(dead_code)]
     SetTimePollInterval { seconds: u8 },
+    /// Check the RTC for a latched alarm / timer flag right now and
+    /// emit the matching `AlarmFired` / `TimerExpired` if one is set.
+    /// This is how alarm/timer expiry is detected on boards with no
+    /// RTC INT line (e.g. the C6): embassy timers - including the RTC
+    /// task's own software poll - pause across light sleep, so the
+    /// manager signals this on each heartbeat wake to catch expiry
+    /// that fired while the device was asleep.
+    Poll,
 }

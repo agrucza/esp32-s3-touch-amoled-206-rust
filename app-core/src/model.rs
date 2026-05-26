@@ -19,7 +19,7 @@ use embassy_time::{Duration, Instant};
 use heapless::Vec;
 
 use crate::buzz::{BuzzAction, BuzzPattern};
-use crate::commands::{ImuCommand, RtcCommand, SleepState};
+use crate::commands::{AudioCommand, ImuCommand, RtcCommand, SleepState};
 use crate::config::Config;
 use crate::data::TouchData;
 use crate::events::{
@@ -67,6 +67,12 @@ pub enum Effect {
 
     /// Forward a command to the IMU task via `IMU_COMMAND`.
     ImuCommand(ImuCommand),
+
+    /// Forward a command to the audio task via `AUDIO_COMMAND`.
+    /// Carries the alarm / timer alert tone start / stop. The manager
+    /// gates `PlayAlarm` on `config.sound_enabled` (mirroring how
+    /// `MotorOn` gates on `haptics_enabled`); `Stop` always forwards.
+    AudioCommand(AudioCommand),
 
     /// Immediate shutdown request (Action::Shutdown from a screen).
     Shutdown,
@@ -524,11 +530,13 @@ impl Model {
             Action::StopBuzz => {
                 self.buzz = None;
                 let _ = out.push(Effect::MotorOff);
+                let _ = out.push(Effect::AudioCommand(AudioCommand::Stop));
                 self.needs_redraw = true;
             }
             Action::DismissAlarm => {
                 self.buzz = None;
                 let _ = out.push(Effect::MotorOff);
+                let _ = out.push(Effect::AudioCommand(AudioCommand::Stop));
                 self.cached_data.alarms.alerting = false;
                 self.cached_data.alarms.snoozed = false;
                 self.needs_redraw = true;
@@ -536,6 +544,7 @@ impl Model {
             Action::SnoozeAlarm => {
                 self.buzz = None;
                 let _ = out.push(Effect::MotorOff);
+                let _ = out.push(Effect::AudioCommand(AudioCommand::Stop));
                 self.cached_data.alarms.alerting = false;
                 self.cached_data.alarms.snoozed = true;
                 let t = &self.cached_data.time;
@@ -611,6 +620,12 @@ impl Model {
             }
             Action::ToggleHaptics => {
                 self.config.haptics_enabled = !self.config.haptics_enabled;
+                self.cached_data.config = self.config;
+                self.config_dirty = true;
+                self.needs_redraw = true;
+            }
+            Action::ToggleSound => {
+                self.config.sound_enabled = !self.config.sound_enabled;
                 self.cached_data.config = self.config;
                 self.config_dirty = true;
                 self.needs_redraw = true;
@@ -694,6 +709,12 @@ impl Model {
             200, 100, self.last_activity,
         ));
         let _ = out.push(Effect::MotorOn);
+        // Audible alert runs in parallel with the buzz: the haptic is
+        // a one-shot edge cycled by `tick_buzz`, the tone is a single
+        // "play until stopped" command owned by the audio task. The
+        // manager gates this on `sound_enabled`; the buzz gates on
+        // `haptics_enabled`, so the two alert independently.
+        let _ = out.push(Effect::AudioCommand(AudioCommand::PlayAlarm));
     }
 
     /// Auto-open the Notifications overlay so the just-pushed

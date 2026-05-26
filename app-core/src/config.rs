@@ -67,6 +67,13 @@ pub struct Config {
     /// every motor-pulse / buzz Effect. Defaults on.
     #[cfg_attr(feature = "serde", serde(default))]
     pub haptics_enabled: bool,
+    /// Master audible-alert enable. When false, the manager drops the
+    /// alarm / timer alert tone (the `AudioCommand::PlayAlarm` effect
+    /// is not forwarded to the audio task). Independent of
+    /// `haptics_enabled` so the buzz and the tone toggle separately.
+    /// Defaults on.
+    #[cfg_attr(feature = "serde", serde(default = "default_true"))]
+    pub sound_enabled: bool,
     /// Do-not-disturb. When true, alarms / notifications still fire
     /// in the model layer (they're still scheduled and recorded) but
     /// the manager suppresses their hardware side effects (haptics,
@@ -92,8 +99,18 @@ impl Config {
             always_on: false,
         },
         haptics_enabled: true,
+        sound_enabled: true,
         dnd: false,
     };
+}
+
+/// Serde fallback for [`Config::sound_enabled`] when loading a blob
+/// persisted before the field existed. Audible alerts default on, so
+/// a missing field must deserialize to `true` (a bare `serde(default)`
+/// would give `false` and silently mute upgraded installs).
+#[cfg(feature = "serde")]
+fn default_true() -> bool {
+    true
 }
 
 impl Default for Config {

@@ -88,3 +88,38 @@ pub fn build_i2s<'d>(
 
     (tx, rx)
 }
+
+/// Build only the I2S TX (playback) channel - the speaker path.
+///
+/// Same master config as [`build_i2s`] but without the RX/mic side.
+/// Used by the alarm-tone path, where capture isn't needed: it claims
+/// one fewer GPIO (no DSDOUT/`din`) and one fewer descriptor set. The
+/// full-duplex [`build_i2s`] is retained for when microphone capture
+/// lands.
+pub fn build_i2s_tx<'d>(
+    i2s:          impl esp_hal::i2s::master::Instance + 'd,
+    dma_channel:  impl DmaChannelFor<AnyI2s<'d>>,
+    mclk:         impl PeripheralOutput<'d>,
+    bclk:         impl PeripheralOutput<'d>,
+    ws:           impl PeripheralOutput<'d>,
+    dout:         impl PeripheralOutput<'d>,
+    tx_desc:      &'static mut [DmaDescriptor],
+) -> I2sTx<'d, Async> {
+    let i2s = I2s::new(
+        i2s,
+        dma_channel,
+        Config::new_tdm_philips()
+            .with_sample_rate(Rate::from_hz(SAMPLE_RATE_HZ))
+            .with_data_format(DataFormat::Data16Channel16)
+            .with_channels(Channels::STEREO),
+    )
+    .unwrap()
+    .with_mclk(mclk)
+    .into_async();
+
+    i2s.i2s_tx
+        .with_bclk(bclk)
+        .with_ws(ws)
+        .with_dout(dout)
+        .build(tx_desc)
+}
