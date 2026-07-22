@@ -63,6 +63,11 @@ system-core  = { path = "../system-core" }
 # from here, same pattern as `esp-hal`).
 esp-storage  = { version = "0.9.0", features = ["esp32c6"] }
 
+# Raw PAC for the `tune_i2s` duplex clock fixups in main.rs - two
+# register bits esp-hal doesn't expose. Version/features mirror
+# esp-hal's own dependency so Cargo dedupes a single copy.
+esp32c6 = { version = "0.23", features = ["critical-section"] }
+
 # --- Internal-SRAM heap allocator ---
 # The C6 has no PSRAM, so the heap lives in HP SRAM. We use a small heap
 # (sized in main.rs via `heap_allocator!`) just to allocate the display

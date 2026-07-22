@@ -339,7 +339,7 @@ impl Pmu {
     ///    touching the codec or ADC over I²C - the ES8311 /
     ///    ES7210 need a stable analog supply before their I²C
     ///    state machines will answer reliably.
-    /// 3. Run `system::audio::init_audio(...)`.
+    /// 3. Build a `system_core::audio` session (see `run_session`).
     ///
     /// Only ALDO1 is touched - all other rail enables in REG 90h
     /// are preserved via a read-modify-write.

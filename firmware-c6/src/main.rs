@@ -53,14 +53,14 @@ struct C6Bringup {
     imu_int1: Option<p::GPIO16<'static>>,
     flash: Option<p::FLASH<'static>>,
     lpwr: Option<p::LPWR<'static>>,
-    // Audio - TX-only speaker path. The mic input (ASDOUT GPIO21) is
-    // deliberately left unclaimed for a future capture path.
+    // Audio - full-duplex (speaker TX + mic RX share one I2S).
     i2s0: Option<p::I2S0<'static>>,
     dma_ch1: Option<p::DMA_CH1<'static>>,
     spk_mclk: Option<p::GPIO19<'static>>,
     spk_bclk: Option<p::GPIO20<'static>>,
     spk_ws: Option<p::GPIO22<'static>>,
     spk_dout: Option<p::GPIO23<'static>>,
+    mic_din: Option<p::GPIO21<'static>>, // ES7210 ASDOUT -> ESP RX
     spk_pa: Option<p::GPIO6<'static>>,
 }
 
@@ -115,7 +115,7 @@ impl Bringup for C6Bringup {
 
     async fn make_display(&mut self) -> Display<'static> {
         let fb: &'static mut [u8] = firmware_hal::display::take_framebuffer();
-        init_display(
+        let display = init_display(
             self.spi2.take().unwrap(),
             self.lcd_sclk.take().unwrap(),
             self.lcd_sio0.take().unwrap(),
@@ -127,7 +127,22 @@ impl Bringup for C6Bringup {
             Output::new(self.lcd_reset.take().unwrap(), Level::High, OutputConfig::default()),
             fb,
         )
-        .await
+        .await;
+        // Raise the display DMA channel's GDMA arbitration priority
+        // above the audio channel's (CH1 stays at the default 0).
+        // Display QSPI (CH0) and I2S audio share this chip's single
+        // GDMA engine, and the top-of-screen corruption observed
+        // during audio-session bring-up is consistent with the
+        // display transfer losing arbitration at that moment. The
+        // display DMA is configured once and never rebuilt, so a
+        // one-time poke here sticks. Audio needs only ~64 KB/s and
+        // doesn't care about latency.
+        {
+            let ch0 = unsafe { &*esp32c6::DMA::ptr() }.ch(0);
+            ch0.in_pri().modify(|_, w| unsafe { w.rx_pri().bits(1) });
+            ch0.out_pri().modify(|_, w| unsafe { w.tx_pri().bits(1) });
+        }
+        display
     }
 
     /// No TE GPIO on this board - the manager skips the vblank wait
@@ -191,11 +206,16 @@ impl Bringup for C6Bringup {
         spawner: embassy_executor::Spawner,
         i2c_bus: &'static system_core::bus::SharedI2c,
     ) {
-        // TX circular DMA buffer for the speaker: 4 KB ~= 64 ms at
-        // 16 kHz / 16-bit stereo, enough to ride DMA refills without
-        // audible gaps. The macro allocates these as internal-SRAM
-        // statics (RX side unused -> size 0).
-        let (_, _, tx_buffer, tx_descriptors) = esp_hal::dma_circular_buffers!(0, 4096);
+        // Circular DMA buffers. RX is 32 KB (~512 ms at 16 kHz/16-bit
+        // stereo) - sized to ride main-loop stalls without overrunning
+        // the consumer. A full-screen settings render can take ~100 ms
+        // and bursts of renders can stack; if the DMA fills the ring
+        // before the audio task pops, `rx.pop` returns
+        // `DmaError::Late`, which esp-hal returns synchronously and
+        // can starve the executor (see audio.rs error arm). TX stays
+        // small - the speaker only streams short alert tones.
+        let (rx_buffer, rx_descriptors, tx_buffer, tx_descriptors) =
+            esp_hal::dma_circular_buffers!(32_768, 4096);
         spawner.spawn(
             audio_task(
                 i2c_bus,
@@ -205,35 +225,116 @@ impl Bringup for C6Bringup {
                 self.spk_bclk.take().unwrap(),
                 self.spk_ws.take().unwrap(),
                 self.spk_dout.take().unwrap(),
+                self.mic_din.take().unwrap(),
                 Output::new(self.spk_pa.take().unwrap(), Level::Low, OutputConfig::default()),
                 tx_buffer,
                 tx_descriptors,
+                rx_buffer,
+                rx_descriptors,
             )
             .unwrap(),
         );
     }
 }
 
-/// Thin per-board wrapper: embassy tasks can't be generic, so each bin
-/// monomorphises the shared `run_audio_task` with its concrete I2S /
-/// DMA / speaker-pin types here.
+/// C6 duplex clock fixups, passed to `run_session` as its `tune_i2s`
+/// hook (re-applied every session - esp-hal rewrites these fields in
+/// its configure path).
+///
+/// The C6's I2S clocks its TX and RX units from two independent
+/// fractional PCR dividers (160 MHz / 39.0625) and esp-hal leaves
+/// them free-running, which breaks full duplex twice over: the RX
+/// unit samples DIN with its own divider's phase (a per-session
+/// lottery against the wire - bit-run garbage from the mic on bad
+/// rolls), and the MCLK pin gets bound to the RX divider while
+/// BCLK/WS come from the TX divider (incoherent clocks at the codecs
+/// - chopped/stuttering ES8311 playback). ESP-IDF's duplex driver
+/// fixes both with two register writes, replicated here from its C6
+/// `i2s_ll`: share the TX unit's BCK/WS with the RX unit
+/// (`i2s_ll_share_bck_ws` - despite the field's name, sig_loopback
+/// shares clocks, not data), and bind the MCLK pin to the TX divider
+/// (`i2s_ll_mclk_bind_to_tx_clk`).
+fn tune_i2s() {
+    unsafe { &*esp32c6::I2S0::ptr() }
+        .tx_conf()
+        .modify(|_, w| w.sig_loopback().set_bit());
+    unsafe { &*esp32c6::PCR::ptr() }
+        .i2s_rx_clkm_conf()
+        .modify(|_, w| w.i2s_mclk_sel().clear_bit());
+}
+
+/// Audio dispatch loop. Owns the board-specific peripheral tokens and
+/// the cross-session state (amp, tone-phase counter),
+/// and reborrows the tokens into a fresh `run_session` for each
+/// PlayAlarm / StartCapture command. embassy tasks can't be generic
+/// so the concrete types stay bin-side; the actual session logic
+/// (build I2S, run inner loop, drop transfer) lives in system-core's
+/// `run_session` and is shared.
 #[embassy_executor::task]
 async fn audio_task(
     i2c_bus: &'static system_core::bus::SharedI2c,
-    i2s: p::I2S0<'static>,
-    dma: p::DMA_CH1<'static>,
-    mclk: p::GPIO19<'static>,
-    bclk: p::GPIO20<'static>,
-    ws: p::GPIO22<'static>,
-    dout: p::GPIO23<'static>,
+    mut i2s: p::I2S0<'static>,
+    mut dma: p::DMA_CH1<'static>,
+    mut mclk: p::GPIO19<'static>,
+    mut bclk: p::GPIO20<'static>,
+    mut ws: p::GPIO22<'static>,
+    mut dout: p::GPIO23<'static>,
+    mut din: p::GPIO21<'static>,
     pa: Output<'static>,
     tx_buffer: &'static mut [u8],
     tx_descriptors: &'static mut [esp_hal::dma::DmaDescriptor],
+    rx_buffer: &'static mut [u8],
+    rx_descriptors: &'static mut [esp_hal::dma::DmaDescriptor],
 ) {
-    system_core::audio::run_audio_task(
-        i2c_bus, i2s, dma, mclk, bclk, ws, dout, pa, tx_buffer, tx_descriptors,
-    )
-    .await
+    use system_core::audio::{run_session, SessionMode};
+    use system_core::audio_hal::SpeakerAmp;
+    use system_core::bus::{AudioCommand, AUDIO_COMMAND};
+
+    let mut amp = SpeakerAmp::new(pa);
+    amp.disable();
+    let mut phase: u32 = 0;
+    // A command consumed by a session's inner loop that the dispatcher
+    // must still act on (e.g. a StartCapture that interrupted a
+    // playing alarm) - so transitions between sessions never drop a
+    // command.
+    let mut pending: Option<AudioCommand> = None;
+
+    loop {
+        let cmd = match pending.take() {
+            Some(c) => c,
+            None => AUDIO_COMMAND.receive().await,
+        };
+        let mode = match cmd {
+            AudioCommand::StopAlarm
+            | AudioCommand::StopCapture
+            | AudioCommand::StopTones
+            | AudioCommand::StopLoopback => {
+                // No active session here - the inner loops own their
+                // own stop response. Defensive amp mute.
+                amp.disable();
+                continue;
+            }
+            AudioCommand::PlayAlarm => SessionMode::Play,
+            AudioCommand::StartCapture => SessionMode::Capture,
+            AudioCommand::PlayTones => SessionMode::Tones,
+            AudioCommand::StartLoopback => SessionMode::Loopback,
+        };
+        pending = run_session(
+            mode,
+            i2c_bus,
+            i2s.reborrow(), dma.reborrow(),
+            mclk.reborrow(), bclk.reborrow(), ws.reborrow(),
+            dout.reborrow(), din.reborrow(),
+            &mut amp,
+            &mut tx_buffer[..],
+            &mut tx_descriptors[..],
+            &mut rx_buffer[..],
+            &mut rx_descriptors[..],
+            &mut phase,
+            tune_i2s,
+        )
+        .await;
+    }
 }
 
 #[esp_rtos::main]
@@ -241,8 +342,13 @@ async fn main(spawner: embassy_executor::Spawner) {
     let peripherals = esp_hal::init(esp_hal::Config::default());
 
     // No PSRAM on this board: internal-SRAM heap (the framebuffer is
-    // in the shared display HAL's static BSS, not the heap).
-    esp_alloc::heap_allocator!(size: 64 * 1024);
+    // in the shared display HAL's static BSS, not the heap). 128 KB
+    // to match the S3: the audio test suite holds 48 KB of live
+    // buffers (32 KB mic pop + 16 KB parrot recording), which OOM'd
+    // the previous 64 KB heap and starved renders during capture.
+    // The C6 has 512 KB of HP SRAM; the linker will complain if this
+    // ever collides with the static budget.
+    esp_alloc::heap_allocator!(size: 128 * 1024);
 
     let timg0 = TimerGroup::new(peripherals.TIMG0);
     let sw_int =
@@ -276,6 +382,7 @@ async fn main(spawner: embassy_executor::Spawner) {
         spk_bclk: Some(peripherals.GPIO20),
         spk_ws: Some(peripherals.GPIO22),
         spk_dout: Some(peripherals.GPIO23),
+        mic_din: Some(peripherals.GPIO21),
         spk_pa: Some(peripherals.GPIO6),
     };
 

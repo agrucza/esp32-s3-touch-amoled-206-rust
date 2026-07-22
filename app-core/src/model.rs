@@ -141,6 +141,41 @@ pub struct Model {
     /// drag-pixel.
     config_dirty: bool,
     buzz: Option<BuzzPattern>,
+    /// Which mic-test audio mode is active. Lets the model stop the
+    /// right session as a safety net if the user leaves Settings by
+    /// any path (not just the view's Back button) or the device
+    /// sleeps.
+    mic_test: MicTestMode,
+    /// Set when sleep entry force-stopped an active mic-test mode.
+    /// Sleep is a pause, not an exit: the MicTest view is still on
+    /// screen (and can't change while asleep), so `wake` restarts the
+    /// stored mode instead of leaving a dead meter.
+    mic_resume_on_wake: Option<MicTestMode>,
+}
+
+/// Audio mode of the mic-test diagnostic, mirrored by the model so its
+/// safety nets know which stop command ends the active session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MicTestMode {
+    Off,
+    /// Meter-only capture (`StartCapture` / `StopCapture`).
+    Capture,
+    /// One-shot speaker tone sweep (`PlayTones` / `StopTones`).
+    Tones,
+    /// Mic -> speaker loopback (`StartLoopback` / `StopLoopback`).
+    Loopback,
+}
+
+impl MicTestMode {
+    /// The command that stops this mode's session, if one is active.
+    fn stop_command(self) -> Option<AudioCommand> {
+        match self {
+            MicTestMode::Off => None,
+            MicTestMode::Capture => Some(AudioCommand::StopCapture),
+            MicTestMode::Tones => Some(AudioCommand::StopTones),
+            MicTestMode::Loopback => Some(AudioCommand::StopLoopback),
+        }
+    }
 }
 
 impl Model {
@@ -168,6 +203,8 @@ impl Model {
             config,
             config_dirty: false,
             buzz: None,
+            mic_test: MicTestMode::Off,
+            mic_resume_on_wake: None,
         }
     }
 
@@ -341,6 +378,37 @@ impl Model {
         self.cached_data.uptime_secs = wall_uptime_secs;
         self.cached_data.active_secs =
             now.duration_since(self.boot).as_secs() as u32;
+        // Safety net for the mic-test diagnostic: stop capture if the
+        // user left Settings by any path (back to clock, an overlay,
+        // etc.) OR if the device is going to sleep. The sleep case is
+        // critical: an active capture leaves the audio task waiting on
+        // a DMA-completion future, whose interrupt keeps firing during
+        // light sleep and starves the executor of real idle - the CPU
+        // ends up unable to truly sleep and the wake path falls over.
+        // Parking the audio task on `AUDIO_COMMAND.receive()` (no DMA
+        // waker) lets light sleep work normally.
+        if self.mic_test != MicTestMode::Off
+            && (self.sleeping || self.screen.id() != ScreenId::Settings)
+        {
+            if let Some(stop) = self.mic_test.stop_command() {
+                let _ = out.push(Effect::AudioCommand(stop));
+            }
+            // Stopped by sleep while still on Settings: pause, resume
+            // on wake. Stopped by leaving the screen: a real exit. A
+            // cancelled tone sweep resumes as the meter, not a replay
+            // (the sweep is one-shot; its TonesDone will never come).
+            self.mic_resume_on_wake =
+                if self.sleeping && self.screen.id() == ScreenId::Settings {
+                    Some(match self.mic_test {
+                        MicTestMode::Tones => MicTestMode::Capture,
+                        m => m,
+                    })
+                } else {
+                    None
+                };
+            self.mic_test = MicTestMode::Off;
+            self.cached_data.mic_level = 0;
+        }
         out
     }
 
@@ -371,6 +439,36 @@ impl Model {
             }
             SystemEvent::MotionUpdated { data } => {
                 self.cached_data.motion = *data;
+            }
+            SystemEvent::MicLevel { level } => {
+                // Drop stale MicLevel events that arrive after capture
+                // has already been stopped. There's an inherent race
+                // on the stop path: the safety net pushes
+                // StopCapture + clears mic_level=0 inside `tick`, but
+                // the audio task may have queued one or two MicLevel
+                // events into EVENTS before the StopCapture signal
+                // reaches it. Without this gate those late events
+                // would overwrite the just-cleared mic_level and the
+                // mic-test bar would freeze on whatever capture last
+                // reported (~90% in the bug we hit).
+                // Also only repaint on actual change, so the meter
+                // doesn't drive a redraw on every chunk in silence.
+                if matches!(self.mic_test, MicTestMode::Capture | MicTestMode::Loopback)
+                    && self.cached_data.mic_level != *level
+                {
+                    self.cached_data.mic_level = *level;
+                    self.needs_redraw = true;
+                }
+            }
+            SystemEvent::TonesDone => {
+                // Sweep finished naturally. Clear the mode here; the
+                // event then dispatches to the settings screen, which
+                // (if still on the MicTest view) answers with
+                // StartMicTest / StartLoopbackTest to bring the meter
+                // back.
+                if self.mic_test == MicTestMode::Tones {
+                    self.mic_test = MicTestMode::Off;
+                }
             }
             SystemEvent::TimerExpired { time } => {
                 self.cached_data.time = *time;
@@ -530,13 +628,13 @@ impl Model {
             Action::StopBuzz => {
                 self.buzz = None;
                 let _ = out.push(Effect::MotorOff);
-                let _ = out.push(Effect::AudioCommand(AudioCommand::Stop));
+                let _ = out.push(Effect::AudioCommand(AudioCommand::StopAlarm));
                 self.needs_redraw = true;
             }
             Action::DismissAlarm => {
                 self.buzz = None;
                 let _ = out.push(Effect::MotorOff);
-                let _ = out.push(Effect::AudioCommand(AudioCommand::Stop));
+                let _ = out.push(Effect::AudioCommand(AudioCommand::StopAlarm));
                 self.cached_data.alarms.alerting = false;
                 self.cached_data.alarms.snoozed = false;
                 self.needs_redraw = true;
@@ -544,7 +642,7 @@ impl Model {
             Action::SnoozeAlarm => {
                 self.buzz = None;
                 let _ = out.push(Effect::MotorOff);
-                let _ = out.push(Effect::AudioCommand(AudioCommand::Stop));
+                let _ = out.push(Effect::AudioCommand(AudioCommand::StopAlarm));
                 self.cached_data.alarms.alerting = false;
                 self.cached_data.alarms.snoozed = true;
                 let t = &self.cached_data.time;
@@ -628,6 +726,41 @@ impl Model {
                 self.config.sound_enabled = !self.config.sound_enabled;
                 self.cached_data.config = self.config;
                 self.config_dirty = true;
+                self.needs_redraw = true;
+            }
+            Action::StartMicTest => {
+                self.mic_test = MicTestMode::Capture;
+                let _ = out.push(Effect::AudioCommand(AudioCommand::StartCapture));
+                // Without this the SettingsScreen's view-flip to
+                // MicTest (set in `row_hit` before we got here) never
+                // hits the display: index_event overrides the
+                // row's normal `Action::Redraw` with this StartMicTest
+                // so the model can fire StartCapture, which means we
+                // lose the redraw signal unless we re-assert it here.
+                self.needs_redraw = true;
+            }
+            Action::StopMicTest => {
+                if let Some(stop) = self.mic_test.stop_command() {
+                    let _ = out.push(Effect::AudioCommand(stop));
+                }
+                self.mic_test = MicTestMode::Off;
+                self.cached_data.mic_level = 0;
+                // Same reasoning as StartMicTest above - mic_test_event
+                // returns StopMicTest after flipping view back to
+                // Index, but the screen doesn't repaint without this.
+                self.needs_redraw = true;
+            }
+            Action::PlayToneTest => {
+                // The running capture/loopback session hands the I2S
+                // to the sweep on its own (interrupt handoff); no stop
+                // command needed first.
+                self.mic_test = MicTestMode::Tones;
+                let _ = out.push(Effect::AudioCommand(AudioCommand::PlayTones));
+                self.needs_redraw = true;
+            }
+            Action::StartLoopbackTest => {
+                self.mic_test = MicTestMode::Loopback;
+                let _ = out.push(Effect::AudioCommand(AudioCommand::StartLoopback));
                 self.needs_redraw = true;
             }
             Action::ToggleDnd => {
@@ -789,13 +922,17 @@ impl Model {
             return;
         }
         self.sleeping = true;
-        // Silence any in-flight attention buzz on the way to sleep -
-        // the user can't react to a notification they can't see, and
-        // a buzzing motor across light sleep entry burns power for
-        // nothing.
+        // Silence any in-flight attention alert (motor AND tone) on
+        // the way to sleep. With `check_idle_sleep` holding sleep off
+        // during an alert, reaching here mid-alert means an explicit
+        // user action (the BOOT shortcut) - treat it as "shut up and
+        // sleep". The tone matters as much as the motor: light sleep
+        // freezes the I2S stream mid-session, and every heartbeat
+        // wake would leak a beep fragment until the next command.
         if self.buzz.is_some() {
             self.buzz = None;
             let _ = out.push(Effect::MotorOff);
+            let _ = out.push(Effect::AudioCommand(AudioCommand::StopAlarm));
         }
         let _ = out.push(Effect::BroadcastSleep(SleepState::Sleeping));
         let _ = out.push(Effect::TransitionDisplay {
@@ -812,6 +949,26 @@ impl Model {
         }
         self.sleeping = false;
         self.last_activity = now;
+        // An active alert (e.g. the alarm that caused this wake) owns
+        // the speaker: any session start would interrupt the alarm
+        // session, so the mic test must not auto-resume over it. Drop
+        // the resume entirely; re-opening the view is one tap.
+        if let Some(mode) = self.mic_resume_on_wake.take().filter(|_| self.buzz.is_none()) {
+            let cmd = match mode {
+                MicTestMode::Loopback => AudioCommand::StartLoopback,
+                // Capture, or the Tones->Capture mapping the safety
+                // net already applied. (If the paused mode was the
+                // sweep while the LOOP toggle was on, the view's
+                // toggle state may briefly disagree with the resumed
+                // meter mode - it self-heals on the next LOOP tap.)
+                _ => AudioCommand::StartCapture,
+            };
+            self.mic_test = match mode {
+                MicTestMode::Loopback => MicTestMode::Loopback,
+                _ => MicTestMode::Capture,
+            };
+            let _ = out.push(Effect::AudioCommand(cmd));
+        }
         let _ = out.push(Effect::BroadcastSleep(SleepState::Awake));
         let _ = out.push(Effect::TransitionDisplay {
             from: self.display_state,
@@ -872,6 +1029,17 @@ impl Model {
     /// already sleeping or if `config.display.always_on` is set.
     fn check_idle_sleep(&mut self, now: Instant, out: &mut Effects) {
         if self.sleeping || self.config.display.always_on {
+            return;
+        }
+        // Never idle-sleep mid-alert. Light sleep gates the I2S
+        // clocks, so the alert tone freezes and only a short beep
+        // fragment leaks out on each ~5 s heartbeat wake - the user
+        // hears a broken, cyclic chirp instead of the alarm. Hold the
+        // device awake until they react (dismiss / snooze / stop all
+        // clear `buzz`). Trade-off: a never-acknowledged alarm keeps
+        // the device awake indefinitely; an alert auto-timeout is the
+        // eventual fix for that.
+        if self.buzz.is_some() {
             return;
         }
         let idle = now.duration_since(self.last_activity);
@@ -956,7 +1124,7 @@ mod tests {
         let mut m = fresh();
         // dim_timeout_s defaults; just step well past it.
         let dim_timeout = m.config.display.dim_timeout_s;
-        let fx = m.tick(Instant::from_millis((dim_timeout as u64 + 1) * 1000));
+        let fx = m.tick(Instant::from_millis((dim_timeout as u64 + 1) * 1000), 0);
         assert!(fx.iter().any(|e| matches!(
             e,
             Effect::TransitionDisplay { to: DisplayState::Dim, .. }
@@ -968,8 +1136,131 @@ mod tests {
     fn idle_past_off_threshold_enters_sleep() {
         let mut m = fresh();
         let off_timeout = m.config.display.off_timeout_s;
-        let fx = m.tick(Instant::from_millis((off_timeout as u64 + 1) * 1000));
+        let fx = m.tick(Instant::from_millis((off_timeout as u64 + 1) * 1000), 0);
         assert!(m.sleeping);
         assert!(fx.contains(&Effect::BroadcastSleep(SleepState::Sleeping)));
+    }
+
+    #[test]
+    fn active_alert_holds_off_idle_sleep() {
+        let mut m = fresh();
+        let t = crate::data::TimeData::default();
+        let _ = m.handle_event(
+            &SystemEvent::AlarmFired { time: t },
+            Instant::from_millis(0),
+        );
+        // Far past the off threshold with no user activity: the
+        // alert must keep the device awake (sleeping would freeze
+        // the tone mid-alarm).
+        let off_timeout = m.config.display.off_timeout_s;
+        let fx = m.tick(Instant::from_millis((off_timeout as u64 + 10) * 1000), 0);
+        assert!(!m.sleeping);
+        assert!(!fx.contains(&Effect::BroadcastSleep(SleepState::Sleeping)));
+        // Dismissing releases the hold: the next idle tick sleeps.
+        let mut out: Effects = Vec::new();
+        m.dispatch_action(Action::DismissAlarm, &mut out);
+        let _ = m.tick(Instant::from_millis((off_timeout as u64 + 20) * 1000), 0);
+        assert!(m.sleeping);
+    }
+
+    #[test]
+    fn boot_sleep_during_alert_stops_tone_and_motor() {
+        let mut m = fresh();
+        let t = crate::data::TimeData::default();
+        let _ = m.handle_event(
+            &SystemEvent::AlarmFired { time: t },
+            Instant::from_millis(0),
+        );
+        let fx = m.handle_event(
+            &SystemEvent::BootButtonPressed,
+            Instant::from_millis(1000),
+        );
+        assert!(m.sleeping);
+        assert!(fx.contains(&Effect::MotorOff));
+        assert!(fx.contains(&Effect::AudioCommand(AudioCommand::StopAlarm)));
+    }
+
+    #[test]
+    fn sleep_pauses_mic_test_and_wake_resumes_it() {
+        let mut m = fresh();
+        let mut out: Effects = Vec::new();
+        m.dispatch_action(Action::SwitchScreen(ScreenId::Settings), &mut out);
+        m.dispatch_action(Action::StartMicTest, &mut out);
+        // Idle past the off threshold: sleep entry must stop capture
+        // (an active DMA session blocks light sleep).
+        let off_timeout = m.config.display.off_timeout_s;
+        let fx = m.tick(Instant::from_millis((off_timeout as u64 + 1) * 1000), 0);
+        assert!(m.sleeping);
+        assert!(fx.contains(&Effect::AudioCommand(AudioCommand::StopCapture)));
+        // Waking resumes capture: the MicTest view is still on screen,
+        // so the meter must come back alive without user action.
+        let fx = m.handle_event(
+            &SystemEvent::BootButtonPressed,
+            Instant::from_millis((off_timeout as u64 + 2) * 1000),
+        );
+        assert!(!m.sleeping);
+        assert!(fx.contains(&Effect::AudioCommand(AudioCommand::StartCapture)));
+        // Leaving Settings afterwards is a real exit: capture stops
+        // and nothing re-arms it on the next sleep/wake cycle.
+        let mut out: Effects = Vec::new();
+        m.dispatch_action(Action::Back, &mut out);
+        let fx = m.tick(Instant::from_millis((off_timeout as u64 + 3) * 1000), 0);
+        assert!(fx.contains(&Effect::AudioCommand(AudioCommand::StopCapture)));
+        assert!(m.mic_resume_on_wake.is_none());
+    }
+
+    #[test]
+    fn sleep_pauses_loopback_and_tones_resume_as_meter() {
+        // Loopback pauses and resumes as loopback.
+        let mut m = fresh();
+        let mut out: Effects = Vec::new();
+        m.dispatch_action(Action::SwitchScreen(ScreenId::Settings), &mut out);
+        m.dispatch_action(Action::StartLoopbackTest, &mut out);
+        let off_timeout = m.config.display.off_timeout_s;
+        let fx = m.tick(Instant::from_millis((off_timeout as u64 + 1) * 1000), 0);
+        assert!(fx.contains(&Effect::AudioCommand(AudioCommand::StopLoopback)));
+        let fx = m.handle_event(
+            &SystemEvent::BootButtonPressed,
+            Instant::from_millis((off_timeout as u64 + 2) * 1000),
+        );
+        assert!(fx.contains(&Effect::AudioCommand(AudioCommand::StartLoopback)));
+
+        // A cancelled tone sweep resumes as the meter (Capture), not
+        // as a replay of the one-shot sweep.
+        let mut m = fresh();
+        let mut out: Effects = Vec::new();
+        m.dispatch_action(Action::SwitchScreen(ScreenId::Settings), &mut out);
+        m.dispatch_action(Action::PlayToneTest, &mut out);
+        let fx = m.tick(Instant::from_millis((off_timeout as u64 + 1) * 1000), 0);
+        assert!(fx.contains(&Effect::AudioCommand(AudioCommand::StopTones)));
+        let fx = m.handle_event(
+            &SystemEvent::BootButtonPressed,
+            Instant::from_millis((off_timeout as u64 + 2) * 1000),
+        );
+        assert!(fx.contains(&Effect::AudioCommand(AudioCommand::StartCapture)));
+    }
+
+    #[test]
+    fn alarm_wake_does_not_resume_mic_test_over_alert() {
+        let mut m = fresh();
+        let mut out: Effects = Vec::new();
+        m.dispatch_action(Action::SwitchScreen(ScreenId::Settings), &mut out);
+        m.dispatch_action(Action::StartMicTest, &mut out);
+        // Idle sleep pauses the mic test and arms the wake-resume.
+        let off_timeout = m.config.display.off_timeout_s;
+        let _ = m.tick(Instant::from_millis((off_timeout as u64 + 1) * 1000), 0);
+        assert!(m.sleeping);
+        // An alarm fires and wakes the device: the alert owns the
+        // speaker, so the mic test must NOT auto-resume (a session
+        // start would interrupt the alarm session and silence it).
+        let t = crate::data::TimeData::default();
+        let fx = m.handle_event(
+            &SystemEvent::AlarmFired { time: t },
+            Instant::from_millis((off_timeout as u64 + 2) * 1000),
+        );
+        assert!(!m.sleeping);
+        assert!(fx.contains(&Effect::AudioCommand(AudioCommand::PlayAlarm)));
+        assert!(!fx.contains(&Effect::AudioCommand(AudioCommand::StartCapture)));
+        assert!(m.mic_resume_on_wake.is_none());
     }
 }

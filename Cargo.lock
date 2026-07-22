@@ -1021,6 +1021,7 @@ dependencies = [
  "esp-println",
  "esp-rtos",
  "esp-storage",
+ "esp32c6",
  "firmware-hal",
  "log",
  "system-core",

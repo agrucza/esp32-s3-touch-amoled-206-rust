@@ -84,6 +84,20 @@ pub enum SystemEvent {
         data: crate::data::MotionData,
     },
 
+    // -- Audio --
+    /// Live microphone input level (0..=255), emitted by the audio
+    /// task while capture is running (the mic-test diagnostic). The
+    /// main loop caches it in `cached_data.mic_level` for the level
+    /// bar. Not user activity and not a wake source - it must not
+    /// reset idle timers or pull the device out of sleep.
+    MicLevel { level: u8 },
+    /// The speaker-test tone sweep finished playing naturally. The
+    /// mic-test view answers this by restarting the level meter it
+    /// paused for the sweep. Not emitted when a sweep is cancelled
+    /// via `StopTones`. Like `MicLevel`, neither user activity nor a
+    /// wake source.
+    TonesDone,
+
     // -- Snapshot refreshes --
     /// Fresh RTC snapshot (calendar date + time of day). Emitted
     /// by the RTC task every `poll_secs` from the software poll,

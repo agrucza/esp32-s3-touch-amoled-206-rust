@@ -29,12 +29,44 @@ pub enum AudioCommand {
     /// Start the repeating alarm / timer alert tone. The audio task
     /// brings the speaker up lazily on the first `PlayAlarm` (the
     /// codec stays dormant until then to save idle current) and loops
-    /// the tone until a `Stop` arrives.
+    /// the tone until a `StopAlarm` arrives.
     PlayAlarm,
     /// Silence the alert tone. Mutes the speaker amplifier; the codec
     /// is left warm so a re-fire (e.g. snooze) doesn't pay the
-    /// bring-up latency again.
-    Stop,
+    /// bring-up latency again. Ignored by an active capture session -
+    /// each stop only ends its own mode, so the alarm and mic-capture
+    /// command streams can't cancel each other.
+    StopAlarm,
+    /// Start microphone capture. The audio task reads the ES7210 over
+    /// the shared I2S RX, computes an input level per chunk, and emits
+    /// `SystemEvent::MicLevel`. Brings the codec up lazily on first use
+    /// like `PlayAlarm`. Used today by the mic-test diagnostic; the
+    /// capture path is the foundation for voice streaming later.
+    StartCapture,
+    /// Stop microphone capture. Ignored by an active playback session
+    /// (see `StopAlarm` on why stops are mode-specific).
+    StopCapture,
+    /// Play the speaker-test tone sweep once (three short tones).
+    /// Interrupts an active capture/loopback session; when the sweep
+    /// finishes naturally the audio task emits
+    /// `SystemEvent::TonesDone` so the mic-test view can restart the
+    /// level meter it paused.
+    PlayTones,
+    /// Cancel a tone sweep mid-play (the model's sleep safety net).
+    /// No `TonesDone` is emitted on this path. Ignored by the other
+    /// modes' sessions.
+    StopTones,
+    /// Start the LOOP test: repeating record-then-playback "parrot"
+    /// cycles (~1.0 s of mic audio recorded with the speaker muted,
+    /// then replayed with the mic ignored), with
+    /// `SystemEvent::MicLevel` feeding the level meter while
+    /// recording.
+    /// Deliberately not a live monitor - see the audio task on why
+    /// that howls on this hardware.
+    StartLoopback,
+    /// Stop loopback. Ignored by the other modes' sessions (see
+    /// `StopAlarm` on why stops are mode-specific).
+    StopLoopback,
 }
 
 /// Main-loop -> IMU task commands.

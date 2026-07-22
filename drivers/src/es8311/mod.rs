@@ -38,13 +38,23 @@ impl Es8311 {
         Self
     }
 
-    /// Initialise the codec for playback and recording.
+    /// Initialise the codec (step 1: assert reset).
+    ///
+    /// The caller MUST wait ~20 ms after this call - the reference
+    /// driver's reset hold time - then call [`Self::init_after_reset`]
+    /// to release reset and configure. Releasing reset in the next
+    /// I2C transaction (no hold) leaves the chip in a random
+    /// half-reset state on some re-inits: misclocked DAC ("warbling"
+    /// playback), muted output, or a hot/garbage ADC path.
+    pub fn init<I: I2c>(&self, i2c: &mut I) -> Result<(), I::Error> {
+        self.write(i2c, REG_RESET, 0x1F) // assert all reset bits
+    }
+
+    /// Release reset and configure (step 2, after the ~20 ms hold).
     ///
     /// Assumes MCLK = 256 * 16 000 Hz = 4.096 MHz from the ESP32 I2S peripheral.
     /// Init sequence follows the Espressif reference driver (es8311.c) and datasheet.
-    pub fn init<I: I2c>(&self, i2c: &mut I) -> Result<(), I::Error> {
-        // --- 1. Soft reset ---
-        self.write(i2c, REG_RESET, 0x1F)?; // assert all reset bits
+    pub fn init_after_reset<I: I2c>(&self, i2c: &mut I) -> Result<(), I::Error> {
         self.write(i2c, REG_RESET, 0x00)?; // release resets
         // Power-on the chip state machine (CSM_ON=1), slave mode (MSC=0)
         self.write(i2c, REG_RESET, 0x80)?;

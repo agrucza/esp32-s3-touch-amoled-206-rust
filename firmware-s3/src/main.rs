@@ -5,11 +5,13 @@ extern crate alloc;
 
 mod board;
 // The audio stack lives in `system_core::audio` - same hardware on
-// every board. The TX-only speaker path is wired: `spawn_audio` below
-// hands the shared `run_audio_task` this board's I2S / DMA / speaker
-// pins, and it sounds the alarm / timer alert tone (lazy codec
-// bring-up on the first tone). The full-duplex ES7210 mic path is
-// still dormant - reintroduced bin-side when capture has a caller.
+// every board. `spawn_audio` below hands this board's I2S / DMA /
+// speaker pins to the bin-local `audio_task` dispatcher; the actual
+// session logic (build I2S, run play/capture loop, drop transfer)
+// lives in the shared `system_core::audio::run_session`. Full duplex
+// (alarm tone + mic capture) is supported via session-scoped transfer
+// rebuilds (`Peri::reborrow()` per command) - see the design comment
+// on `run_session`.
 mod system;
 
 // `config`/`events`/`ui` live in `app-core` (host-testable);
@@ -71,14 +73,14 @@ struct S3Bringup {
     sd_miso: Option<p::GPIO3<'static>>,
     sd_cs: Option<p::GPIO17<'static>>,
     lpwr: Option<p::LPWR<'static>>,
-    // Audio - TX-only speaker path. The mic input (ASDOUT GPIO42) is
-    // deliberately left unclaimed for a future capture path.
+    // Audio - full-duplex (speaker TX + mic RX share one I2S).
     i2s0: Option<p::I2S0<'static>>,
     dma_ch1: Option<p::DMA_CH1<'static>>,
     spk_mclk: Option<p::GPIO16<'static>>,
     spk_bclk: Option<p::GPIO41<'static>>,
     spk_ws: Option<p::GPIO45<'static>>,
     spk_dout: Option<p::GPIO40<'static>>,
+    mic_din: Option<p::GPIO42<'static>>, // ES7210 ASDOUT -> ESP RX
     spk_pa: Option<p::GPIO46<'static>>,
 }
 
@@ -195,11 +197,16 @@ impl Bringup for S3Bringup {
         spawner: embassy_executor::Spawner,
         i2c_bus: &'static system_core::bus::SharedI2c,
     ) {
-        // TX circular DMA buffer for the speaker: 4 KB ~= 64 ms at
-        // 16 kHz / 16-bit stereo, enough to ride DMA refills without
-        // audible gaps. The macro allocates these as internal-SRAM
-        // statics (RX side unused -> size 0).
-        let (_, _, tx_buffer, tx_descriptors) = esp_hal::dma_circular_buffers!(0, 4096);
+        // Circular DMA buffers. RX is 32 KB (~512 ms at 16 kHz/16-bit
+        // stereo) - sized to ride main-loop stalls without overrunning
+        // the consumer. A full-screen settings render can take ~100 ms
+        // and bursts of renders can stack; if the DMA fills the ring
+        // before the audio task pops, `rx.pop` returns
+        // `DmaError::Late`, which esp-hal returns synchronously and
+        // can starve the executor (see audio.rs error arm). TX stays
+        // small - the speaker only streams short alert tones.
+        let (rx_buffer, rx_descriptors, tx_buffer, tx_descriptors) =
+            esp_hal::dma_circular_buffers!(32_768, 4096);
         spawner.spawn(
             audio_task(
                 i2c_bus,
@@ -209,35 +216,93 @@ impl Bringup for S3Bringup {
                 self.spk_bclk.take().unwrap(),
                 self.spk_ws.take().unwrap(),
                 self.spk_dout.take().unwrap(),
+                self.mic_din.take().unwrap(),
                 Output::new(self.spk_pa.take().unwrap(), Level::Low, OutputConfig::default()),
                 tx_buffer,
                 tx_descriptors,
+                rx_buffer,
+                rx_descriptors,
             )
             .unwrap(),
         );
     }
 }
 
-/// Thin per-board wrapper: embassy tasks can't be generic, so each bin
-/// monomorphises the shared `run_audio_task` with its concrete I2S /
-/// DMA / speaker-pin types here.
+/// Audio dispatch loop. Owns the board-specific peripheral tokens and
+/// the cross-session state (amp, tone-phase counter),
+/// and reborrows the tokens into a fresh `run_session` for each
+/// PlayAlarm / StartCapture command. embassy tasks can't be generic
+/// so the concrete types stay bin-side; the actual session logic
+/// (build I2S, run inner loop, drop transfer) lives in system-core's
+/// `run_session` and is shared.
 #[embassy_executor::task]
 async fn audio_task(
     i2c_bus: &'static system_core::bus::SharedI2c,
-    i2s: p::I2S0<'static>,
-    dma: p::DMA_CH1<'static>,
-    mclk: p::GPIO16<'static>,
-    bclk: p::GPIO41<'static>,
-    ws: p::GPIO45<'static>,
-    dout: p::GPIO40<'static>,
+    mut i2s: p::I2S0<'static>,
+    mut dma: p::DMA_CH1<'static>,
+    mut mclk: p::GPIO16<'static>,
+    mut bclk: p::GPIO41<'static>,
+    mut ws: p::GPIO45<'static>,
+    mut dout: p::GPIO40<'static>,
+    mut din: p::GPIO42<'static>,
     pa: Output<'static>,
     tx_buffer: &'static mut [u8],
     tx_descriptors: &'static mut [esp_hal::dma::DmaDescriptor],
+    rx_buffer: &'static mut [u8],
+    rx_descriptors: &'static mut [esp_hal::dma::DmaDescriptor],
 ) {
-    system_core::audio::run_audio_task(
-        i2c_bus, i2s, dma, mclk, bclk, ws, dout, pa, tx_buffer, tx_descriptors,
-    )
-    .await
+    use system_core::audio::{run_session, SessionMode};
+    use system_core::audio_hal::SpeakerAmp;
+    use system_core::bus::{AudioCommand, AUDIO_COMMAND};
+
+    let mut amp = SpeakerAmp::new(pa);
+    amp.disable();
+    let mut phase: u32 = 0;
+    // A command consumed by a session's inner loop that the dispatcher
+    // must still act on (e.g. a StartCapture that interrupted a
+    // playing alarm) - so transitions between sessions never drop a
+    // command.
+    let mut pending: Option<AudioCommand> = None;
+
+    loop {
+        let cmd = match pending.take() {
+            Some(c) => c,
+            None => AUDIO_COMMAND.receive().await,
+        };
+        let mode = match cmd {
+            AudioCommand::StopAlarm
+            | AudioCommand::StopCapture
+            | AudioCommand::StopTones
+            | AudioCommand::StopLoopback => {
+                // No active session here - the inner loops own their
+                // own stop response. Defensive amp mute.
+                amp.disable();
+                continue;
+            }
+            AudioCommand::PlayAlarm => SessionMode::Play,
+            AudioCommand::StartCapture => SessionMode::Capture,
+            AudioCommand::PlayTones => SessionMode::Tones,
+            AudioCommand::StartLoopback => SessionMode::Loopback,
+        };
+        pending = run_session(
+            mode,
+            i2c_bus,
+            i2s.reborrow(), dma.reborrow(),
+            mclk.reborrow(), bclk.reborrow(), ws.reborrow(),
+            dout.reborrow(), din.reborrow(),
+            &mut amp,
+            &mut tx_buffer[..],
+            &mut tx_descriptors[..],
+            &mut rx_buffer[..],
+            &mut rx_descriptors[..],
+            &mut phase,
+            // No I2S register fixups needed: the S3's I2S keeps its
+            // TX/RX units clock-coherent on its own (unlike the C6 -
+            // see that bin's `tune_i2s`).
+            || {},
+        )
+        .await;
+    }
 }
 
 #[esp_rtos::main]
@@ -300,6 +365,7 @@ async fn main(spawner: embassy_executor::Spawner) {
         spk_bclk: Some(peripherals.GPIO41),
         spk_ws: Some(peripherals.GPIO45),
         spk_dout: Some(peripherals.GPIO40),
+        mic_din: Some(peripherals.GPIO42),
         spk_pa: Some(peripherals.GPIO46),
     };
 

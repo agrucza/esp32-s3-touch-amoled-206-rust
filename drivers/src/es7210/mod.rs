@@ -7,7 +7,9 @@
 //! On this board only MIC1 and MIC2 are populated.
 //! Configured for: 16 kHz, 16-bit, standard I2S (Philips), slave mode.
 //!
-//! Init sequence matches the working Arduino/PlatformIO reference (mic.cpp).
+//! Init sequence follows Espressif's esp-bsp `es7210` component
+//! (`es7210_config_codec` + its clock coefficient table), except that
+//! MIC3/4 stay powered down here since they aren't populated.
 
 use embedded_hal::i2c::I2c;
 
@@ -124,13 +126,17 @@ impl Es7210 {
         // OSR = 32
         self.write(i2c, REG_OSR, 0x20)?;
 
-        // Clock config for MCLK=4.096 MHz, Fs=16 kHz
-        // C reference values: dll=1, adc_div=8
-        self.write(i2c, REG_MAINCLK, 0x87)?;
+        // Clock config for MCLK=4.096 MHz, Fs=16 kHz, per the esp-bsp
+        // es7210 coefficient table row {4096000, 16000}:
+        // adc_div=1, doubler=1, dll_bypass=1 -> 0x01 | (1<<6) | (1<<7).
+        // The doubler is essential: the delta-sigma modulator needs
+        // MCLK*2/1 = 8.192 MHz; dividing instead of doubling collapses
+        // the oversampling ratio and with it sensitivity/SNR.
+        self.write(i2c, REG_MAINCLK, 0xC1)?;
 
-        // LRCK divider = 255 (0x00FF)
-        self.write(i2c, REG_LRCK_DIVH, 0x00)?;
-        self.write(i2c, REG_LRCK_DIVL, 0xFF)?;
+        // LRCK divider = MCLK/Fs = 256 (0x0100)
+        self.write(i2c, REG_LRCK_DIVH, 0x01)?;
+        self.write(i2c, REG_LRCK_DIVL, 0x00)?;
 
         // DLL power control
         self.write(i2c, REG_DLL_PWR, 0x04)?;

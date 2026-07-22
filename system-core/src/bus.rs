@@ -88,17 +88,26 @@ pub static IMU_COMMAND: Signal<CriticalSectionRawMutex, ImuCommand> = Signal::ne
 /// Single-consumer: only the RTC task should call `wait()` on this.
 pub static RTC_COMMAND: Signal<CriticalSectionRawMutex, RtcCommand> = Signal::new();
 
-/// Main-to-audio command signal.
+/// Main-to-audio command queue.
 ///
-/// The main loop publishes an [`AudioCommand`] here when an alarm /
-/// timer alert starts or stops (`Effect::AudioCommand`). The audio
-/// task, spawned bin-side with the board's I2S / DMA / speaker pins,
-/// listens for it and drives the speaker. The codec is brought up
-/// lazily on the first `PlayAlarm` so nothing draws current until a
-/// tone is actually needed.
+/// The main loop publishes [`AudioCommand`]s here
+/// (`Effect::AudioCommand`). The audio task, spawned bin-side with the
+/// board's I2S / DMA / speaker pins, receives them and drives the
+/// speaker / microphone sessions.
 ///
-/// Single-consumer: only the audio task should call `wait()` on this.
-pub static AUDIO_COMMAND: Signal<CriticalSectionRawMutex, AudioCommand> = Signal::new();
+/// A queue rather than a `Signal`: the alarm tone and mic capture are
+/// two independent command streams multiplexed over this one channel,
+/// and the model can emit a pair in one batch - e.g. an alarm firing
+/// while the mic test is open pushes `PlayAlarm`, then the
+/// leave-screen safety net pushes `StopCapture`. A single-slot
+/// `Signal` collapses that pair into whichever was written last and
+/// the alarm is silently lost; a queue delivers both, in order. The
+/// audio task drains commands promptly (every inner-loop iteration
+/// selects on this), so a small capacity is plenty.
+///
+/// Single-consumer: only the audio task should call `receive()` on
+/// this.
+pub static AUDIO_COMMAND: Channel<CriticalSectionRawMutex, AudioCommand, 4> = Channel::new();
 
 /// Type alias for the shared I2C bus, protected by an async mutex.
 ///

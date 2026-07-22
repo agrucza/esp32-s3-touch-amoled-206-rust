@@ -414,17 +414,30 @@ impl<B: Board> SystemManager<'static, B> {
                 Effect::RtcCommand(cmd) => RTC_COMMAND.signal(cmd),
                 Effect::ImuCommand(cmd) => IMU_COMMAND.signal(cmd),
                 Effect::AudioCommand(cmd) => {
-                    // Gate the alert tone on the live `sound_enabled`
-                    // toggle, mirroring how `MotorOn` gates on
-                    // `haptics_enabled` just above. `Stop` always
-                    // forwards so toggling sound off mid-alert still
-                    // silences the speaker.
+                    // Only the alert tone is gated on the live
+                    // `sound_enabled` toggle (mirroring how `MotorOn`
+                    // gates on `haptics_enabled` just above). StopAlarm
+                    // always forwards so toggling sound off mid-alert
+                    // still silences the speaker, and the mic-test
+                    // commands (capture, tone sweep, loopback) are a
+                    // separate user-initiated diagnostic, unaffected
+                    // by the alert-sound setting.
                     let forward = match cmd {
                         AudioCommand::PlayAlarm => self.model.config().sound_enabled,
-                        AudioCommand::Stop => true,
+                        AudioCommand::StopAlarm
+                        | AudioCommand::StartCapture
+                        | AudioCommand::StopCapture
+                        | AudioCommand::PlayTones
+                        | AudioCommand::StopTones
+                        | AudioCommand::StartLoopback
+                        | AudioCommand::StopLoopback => true,
                     };
-                    if forward {
-                        AUDIO_COMMAND.signal(cmd);
+                    // Non-blocking: a full queue means the audio task
+                    // has been wedged for several commands' worth of
+                    // time; dropping (loudly) beats stalling the main
+                    // loop behind it.
+                    if forward && AUDIO_COMMAND.try_send(cmd).is_err() {
+                        log::warn!("audio: command queue full, dropped {:?}", cmd);
                     }
                 }
                 Effect::Shutdown => {

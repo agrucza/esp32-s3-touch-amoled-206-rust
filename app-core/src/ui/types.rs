@@ -201,6 +201,31 @@ pub enum Action {
     /// manager gates the alarm / timer alert tone on the live value.
     ToggleSound,
 
+    /// Begin the mic-test diagnostic: Model emits
+    /// `Effect::AudioCommand(StartCapture)` so the audio task starts
+    /// streaming `SystemEvent::MicLevel`. Emitted when the Mic Test
+    /// settings view is opened.
+    StartMicTest,
+    /// End the mic-test diagnostic: Model emits the stop command for
+    /// whichever mic-test audio mode is active (meter capture, tone
+    /// sweep, or loopback). Emitted when the Mic Test view is left
+    /// (leaving Settings any other way is caught by the model's
+    /// safety net).
+    StopMicTest,
+    /// Play the speaker tone sweep (440 / 1000 / 880 Hz) from the Mic
+    /// Test view. Model emits `Effect::AudioCommand(PlayTones)`; the
+    /// audio task interrupts the running meter session, plays the
+    /// sweep, and emits `SystemEvent::TonesDone`, which the view
+    /// answers by restarting the meter.
+    PlayToneTest,
+    /// Switch the mic test to the LOOP test: record-then-playback
+    /// "parrot" cycles that replay short mic recordings through the
+    /// speaker. Model emits `Effect::AudioCommand(StartLoopback)`; the
+    /// running capture session hands the I2S to the parrot session and
+    /// the level meter keeps updating once per cycle. `StartMicTest`
+    /// switches back to meter-only capture.
+    StartLoopbackTest,
+
     /// Flip `config.dnd`. Pure config flip today - the alarm and
     /// notification routing that should respect this lands when
     /// those screens get real backing.
@@ -691,6 +716,10 @@ pub struct SystemData {
     pub power: PowerData,
     pub motion: MotionData,
     pub touch: TouchData,
+    /// Live microphone input level (0..=255) while the mic-test
+    /// diagnostic is capturing; 0 otherwise. Updated from
+    /// `SystemEvent::MicLevel`.
+    pub mic_level: u8,
     /// Flash-filesystem occupancy. Updated at boot and after
     /// every save / reset via `SystemEvent::StorageUsageUpdated`.
     pub storage: StorageUsage,
