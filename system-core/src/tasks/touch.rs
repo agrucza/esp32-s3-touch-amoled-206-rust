@@ -1,9 +1,9 @@
-//! Touch controller (FT3168) task state.
+//! Touch controller task state.
 //!
-//! Owns the FT3168 driver plus the INT line (GPIO38) and tracks
-//! gesture state across polls so it can classify taps and swipes
-//! on release. Emits `TouchPressed` / `TouchReleased` /
-//! `Tap` / `Swipe` events.
+//! Owns the board-selected touch driver (`AnyTouch`) plus the INT
+//! line and tracks gesture state across polls so it can classify
+//! taps and swipes on release. Emits `TouchPressed` /
+//! `TouchReleased` / `Tap` / `Swipe` events.
 //!
 //! ## Phase 4 task loop sketch
 //!
@@ -36,7 +36,7 @@
 use app_core::events::{SwipeDir, SwipeRegion, SystemEvent};
 use crate::bus::{EVENTS, SharedI2c};
 use app_core::ui::theme::{EDGE_GESTURE_ZONE, SCREEN_H, SCREEN_W};
-use drivers::touch::{FT3168, TouchEvent};
+use drivers::touch::{AnyTouch, FT3168, TouchEvent};
 use embassy_time::{Duration, Timer};
 use embedded_hal::i2c::I2c as I2cTrait;
 use esp_hal::gpio::{Input, Output};
@@ -80,7 +80,7 @@ const SWIPE_THRESHOLD: i32 = 60;
 pub use app_core::data::TouchData;
 
 pub struct TouchTaskState<'d> {
-    touch: FT3168<Output<'d>>,
+    touch: AnyTouch<Output<'d>>,
     touch_int: Input<'d>,
     /// First contact position of the current touch gesture (None while idle).
     touch_start: Option<(u16, u16)>,
@@ -112,6 +112,19 @@ impl<'d> TouchTaskState<'d> {
             Err(_) => log::error!("Touch: device not found at I2C address 0x{:02X}", drivers::touch::ADDR),
         }
 
+        Self {
+            touch: AnyTouch::Ft3168(touch),
+            touch_int: int_pin,
+            touch_start: None,
+            touch_last: None,
+        }
+    }
+
+    /// Wrap an already-initialized touch driver. For boards whose
+    /// controller is reset and probed in the bin's bringup instead of
+    /// here - e.g. a reset line that runs through a GPIO expander
+    /// rather than a host GPIO.
+    pub fn with_driver(touch: AnyTouch<Output<'d>>, int_pin: Input<'d>) -> Self {
         Self {
             touch,
             touch_int: int_pin,

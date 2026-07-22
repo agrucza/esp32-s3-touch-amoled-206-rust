@@ -1073,6 +1073,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "firmware-twatch-ultra"
+version = "0.1.0"
+dependencies = [
+ "drivers",
+ "embassy-executor",
+ "embassy-time",
+ "embedded-hal 1.0.0",
+ "esp-alloc",
+ "esp-backtrace",
+ "esp-bootloader-esp-idf",
+ "esp-hal",
+ "esp-println",
+ "esp-rtos",
+ "esp-storage",
+ "firmware-hal",
+ "log",
+ "system-core",
+]
+
+[[package]]
 name = "float-cmp"
 version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

@@ -1,0 +1,68 @@
+[package]
+name    = "firmware-twatch-ultra"
+version = "0.1.0"
+edition = "2021"
+# Two bins live here: the real firmware and the bring-up smoke test
+# (src/bin/smoke.rs, auto-discovered). Plain `cargo run` flashes the
+# firmware.
+default-run = "firmware-twatch-ultra"
+
+[[bin]]
+name  = "firmware-twatch-ultra"
+path  = "src/main.rs"
+test  = false
+bench = false
+
+# LilyGo T-Watch Ultra (ESP32-S3, 16MB flash + 8MB QSPI PSRAM).
+# See src/board.rs for the hardware map. Still absent vs firmware-s3:
+# the audio stack (no codec chip here - needs a backend seam in
+# system-core's session layer) and a real IMU driver (BHI260AP).
+
+[dependencies]
+# --- Espressif bootloader descriptor (required by espflash to verify the image) ---
+esp-bootloader-esp-idf = { version = "0.5.0", features = ["esp32s3"] }
+
+# --- Espressif HAL ---
+esp-hal = { version = "1.1.0-rc.0", features = [
+    "esp32s3",
+    "unstable",     # required for many APIs in 1.x
+] }
+esp-rtos = { version = "0.3.0", features = [
+    "esp32s3",
+    "embassy",  # enables the async executor and time driver
+] }
+esp-backtrace = { version = "0.19.0", features = [
+    "esp32s3",
+    "panic-handler",
+    "println",
+] }
+esp-println = { version = "0.17.0", features = [
+    "esp32s3",
+    "log-04",           # bridges esp-println to the `log` 0.4 crate
+] }
+
+# --- Embassy async runtime ---
+embassy-executor = { version = "0.10" }
+embassy-time     = { version = "0.5.1" }
+
+# --- Logging ---
+log = { version = "0.4.29", default-features = false }
+
+# --- embedded-hal traits (used by drivers crate) ---
+embedded-hal = { workspace = true }
+
+# --- Internal-SRAM heap allocator ---
+esp-alloc = "0.10.0"
+
+# --- Flash storage chip binding ---
+# system-core declares `esp-storage` with no chip feature; the leaf
+# bin sets it and feature unification carries the choice in (the
+# same pattern as esp-hal).
+esp-storage = { version = "0.9.0", features = ["esp32s3"] }
+
+# --- Local crates ---
+# `display` is for the smoke bin; the main bin reaches the display
+# through system-core/firmware-hal.
+drivers      = { path = "../drivers", features = ["display", "pmu", "xl9555", "cst9217"] }
+firmware-hal = { path = "../firmware-hal" }
+system-core  = { path = "../system-core" }

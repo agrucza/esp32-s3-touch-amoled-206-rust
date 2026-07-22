@@ -14,6 +14,9 @@ touch   = []
 sdcard  = ["dep:embedded-sdmmc"]
 es8311  = []
 es7210  = []
+xl9555  = []
+# CST92xx touch lives under the touch module (shares TouchEvent).
+cst9217 = ["touch"]
 
 [dependencies]
 defmt              = { workspace = true, optional = true }

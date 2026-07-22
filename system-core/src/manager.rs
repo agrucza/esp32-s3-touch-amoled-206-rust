@@ -579,7 +579,10 @@ impl<B: Board> SystemManager<'static, B> {
         // mode 100% of the time. The write is best-effort - if it
         // NAKs (e.g. the chip is mid-state-transition from a recent
         // touch) the chip will self-manage to low-power eventually
-        // and a button press still wakes us regardless.
+        // and a button press still wakes us regardless. On boards
+        // whose controller is not an FT3168 nothing lives at this
+        // address, the write NAKs, and the controller stays in its
+        // normal mode - its INT line still wakes us.
         {
             let mut i2c = self.i2c_bus.lock().await;
             let _ = i2c.write(touch::ADDR, &[touch::REG_POWER_MODE, touch::PowerMode::Monitor as u8]);

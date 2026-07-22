@@ -20,6 +20,9 @@
 use embedded_hal::digital::OutputPin;
 use embedded_hal::i2c::I2c as I2cTrait;
 
+#[cfg(feature = "cst9217")]
+pub mod cst9217;
+
 /// Default I²C address for FT3168.
 pub const ADDR: u8 = 0x38;
 
@@ -82,6 +85,42 @@ pub enum TouchEvent {
     Released,
     /// No touch and no recent lift - nothing to report.
     None,
+}
+
+/// Board-selected touch controller.
+///
+/// The shared touch task is an embassy task and therefore can't be
+/// generic over the driver type, so boards pick their controller by
+/// constructing the matching variant; the task dispatches through
+/// this enum. Variants beyond the FT3168 are feature-gated so boards
+/// that don't carry the chip don't compile its driver.
+pub enum AnyTouch<RST> {
+    Ft3168(FT3168<RST>),
+    #[cfg(feature = "cst9217")]
+    Cst92xx(cst9217::Cst9217),
+}
+
+impl<RST: OutputPin> AnyTouch<RST> {
+    /// Read the current touch state (see each driver's `read`).
+    pub fn read<I2C, E>(&mut self, i2c: &mut I2C) -> TouchEvent
+    where
+        I2C: I2cTrait<Error = E>,
+    {
+        match self {
+            AnyTouch::Ft3168(t) => t.read(i2c),
+            #[cfg(feature = "cst9217")]
+            AnyTouch::Cst92xx(t) => t.read(i2c),
+        }
+    }
+
+    /// `true` if the last `read` saw a finger on screen.
+    pub fn is_pressed(&self) -> bool {
+        match self {
+            AnyTouch::Ft3168(t) => t.is_pressed(),
+            #[cfg(feature = "cst9217")]
+            AnyTouch::Cst92xx(t) => t.is_pressed(),
+        }
+    }
 }
 
 /// FT3168 driver.

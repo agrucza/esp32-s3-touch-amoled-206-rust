@@ -7,6 +7,7 @@ members = [
     "system-core",
     "firmware-s3",
     "firmware-c6",
+    "firmware-twatch-ultra",
 ]
 # firmware-c6 is excluded from default-members so `cargo build
 # --workspace` at the root (which runs under the `esp` Xtensa
@@ -19,6 +20,7 @@ default-members = [
     "firmware-hal",
     "system-core",
     "firmware-s3",
+    "firmware-twatch-ultra",
 ]
 
 # Shared dependency versions - single source of truth to avoid mismatches.

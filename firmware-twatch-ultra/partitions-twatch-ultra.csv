@@ -1,0 +1,25 @@
+# ESP-IDF partition table for the LilyGo T-Watch Ultra build.
+#
+# Selected at flash time by the espflash runner in
+# `.cargo/config.toml`.
+#
+# Keep the `storage` row in sync with `FLASH_FS_START` /
+# `FLASH_FS_SIZE` in `src/board.rs` - those constants mirror the
+# offset / size declared here.
+#
+# Layout targets this board's 16 MB flash chip:
+#
+#   0x00_0000  bootloader + partition table   (< 0x9000, managed by espflash)
+#   0x00_9000  nvs                            (24 KB, reserved for ESP-IDF NVS)
+#   0x00_F000  phy_init                       (4 KB, radio calibration)
+#   0x01_0000  factory                        (8 MB firmware image)
+#   0x81_0000  storage                        (7.875 MB LittleFS)
+#   0xFF_0000  coredump                       (64 KB panic crash dump)
+#   0x100_0000 end of 16 MB flash
+#
+# Name,   Type, SubType,  Offset,   Size,     Flags
+nvs,      data, nvs,      0x9000,   0x6000,
+phy_init, data, phy,      0xf000,   0x1000,
+factory,  app,  factory,  0x10000,  0x800000,
+storage,  data, spiffs,   0x810000, 0x7E0000,
+coredump, data, coredump, 0xFF0000, 0x10000,
