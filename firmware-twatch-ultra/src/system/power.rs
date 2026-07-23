@@ -167,6 +167,12 @@ impl Board for TwatchUltraBoard {
         }
     }
 
+    /// S3 family: RTC_CNTL (`LPWR`) `slp_wakeup_cause`.
+    fn wake_cause_raw(&self) -> u32 {
+        use esp_hal::peripherals::LPWR;
+        LPWR::regs().slp_wakeup_cause().read().wakeup_cause().bits()
+    }
+
     /// Switch CPU frequency at runtime via the `SYSTEM.cpu_per_conf`
     /// divider (PLL stays the source - APB stays 80 MHz so I2C/SPI
     /// are unaffected). Same silicon and same poke as the other S3

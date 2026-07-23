@@ -197,6 +197,15 @@ pub struct SystemManager<'d, B: Board> {
     // tells whether the CPU is really gating off.
     sleep_cycles: u32,
 
+    // Light-sleep diagnostic (remove with the other probes): the
+    // last UI-waking sleep cycle's (cycle, wake-cause bits,
+    // slept_ms), re-logged at the end of the first awake tick. The
+    // summary printed right at the wake often lands in the
+    // USB-Serial-JTAG resync blackout and comes out shredded;
+    // delaying it there would lag the wake render, so it is
+    // deferred to a point where output demonstrably survives.
+    pending_wake_summary: Option<(u32, u32, u64)>,
+
     // Unified persistent-storage facade. Owns the on-flash
     // LittleFS and the SD volume manager together with the
     // SD-mirror online flag. Mirrored writes, flash-only escape
@@ -326,6 +335,7 @@ impl<B: Board> SystemManager<'static, B> {
             rtc,
             boot_uptime_secs,
             sleep_cycles: 0,
+            pending_wake_summary: None,
             store,
             last_storage_usage: initial_usage,
             last_sd_recover_attempt: None,
@@ -553,9 +563,45 @@ impl<B: Board> SystemManager<'static, B> {
 
     // ================= Light sleep ================================================
 
+    /// GPIO bit in the sleep-wakeup-cause register
+    /// (`Board::wake_cause_raw`) - the one position that is uniform
+    /// across every chip family we run, so the shared manager owns
+    /// the mask. The timer bit is NOT uniform (bit 3 on the s3
+    /// family, bit 4 on the c6) - the diagnostics print the raw bits
+    /// instead of decoding it.
+    const WAKE_CAUSE_GPIO: u32 = 1 << 2;
+
+    /// Read the RTC-domain wall clock (us since boot), fresh.
+    /// `Rtc::current_time_us` triggers the counter-to-buffer latch
+    /// and reads the buffer immediately; observed on the s3: right
+    /// after `rtc.sleep()` returns, that read still yields the
+    /// PRE-sleep value (a proven 5 s heartbeat sleep measured as
+    /// "slept 0 ms"), while a read a few hundred ms later is
+    /// correct. The exact mechanism is unclear (ESP-IDF uses the
+    /// same immediate-read pattern on this family), so instead of a
+    /// fixed delay, re-read until the buffer visibly moves - the RTC
+    /// counter ticks every ~7 us, so two completed latches never
+    /// compare equal. Bounded at ~2 ms in case the buffer is frozen
+    /// longer; then the stale value is returned rather than hanging.
+    fn rtc_now_us(&self) -> u64 {
+        let first = self.rtc.current_time_us();
+        let delay = esp_hal::delay::Delay::new();
+        for _ in 0..100 {
+            delay.delay_micros(20);
+            let again = self.rtc.current_time_us();
+            if again != first {
+                return again;
+            }
+        }
+        first
+    }
+
     /// Enter hardware light sleep. Blocks until a configured wake
-    /// source (any of the three RTC-armed GPIO INTs, or the ~1 s
-    /// heartbeat timer) fires, then returns.
+    /// source (any of the armed GPIO INTs, or the heartbeat timer)
+    /// fires, then returns `(wake_cause, slept_ms)`: the raw bits of
+    /// the chip's sleep-wakeup-cause register (via
+    /// `Board::wake_cause_raw`; GPIO = `Self::WAKE_CAUSE_GPIO`) and
+    /// how long the chip actually slept (RTC-domain clock).
     ///
     /// The three INT pins are armed for RTC wake at init time via
     /// `wakeup_enable(true, WakeEvent::LowLevel)`. The timer is
@@ -566,7 +612,7 @@ impl<B: Board> SystemManager<'static, B> {
     /// `light_slp_reject(false)` stops a pending interrupt (e.g.
     /// a half-minute PCF85063 INT still latched) from silently
     /// cancelling sleep entry.
-    async fn enter_light_sleep(&mut self) {
+    async fn enter_light_sleep(&mut self) -> (u32, u64) {
         use esp_hal::delay::Delay;
         use esp_hal::rtc_cntl::sleep::{
             GpioWakeupSource, RtcSleepConfig, TimerWakeupSource,
@@ -624,8 +670,26 @@ impl<B: Board> SystemManager<'static, B> {
         let delay = Delay::new();
         delay.delay_millis(100);
 
+        // Diagnostic probe: how long the chip actually slept, off
+        // the RTC-domain clock (which keeps counting through light
+        // sleep, unlike embassy/systimer time). A GPIO-cause wake at
+        // ~heartbeat duration would mean the cause register is lying
+        // (stale bits); one at ~0 ms means a wake line pulsed right
+        // at sleep entry. Both ends use the stale-flushing read (see
+        // `rtc_now_us`) - the plain read right after `rtc.sleep()`
+        // returns the PRE-sleep latch and fakes a 0 ms sleep.
+        let entered_us = self.rtc_now_us();
         self.rtc.sleep(&config, &[&gpio_wake, &timer_wake]);
+        let slept_ms = (self.rtc_now_us() - entered_us) / 1000;
         self.sleep_cycles += 1;
+
+        // Why did we wake? Read before anything else can re-enter
+        // sleep and overwrite the cause register. GPIO bit = one of
+        // the armed wake lines fired (user-facing); timer bit = the
+        // heartbeat. Behind the board seam - the cause register is
+        // chip-specific (and esp-hal's `wakeup_cause()` only works
+        // for deep sleep; see the hook's doc).
+        let wake_cause = self.board.wake_cause_raw();
 
         // Post-wake settle delay. USB-Serial-JTAG in particular loses
         // the first ~tens of ms of output after light-sleep wake
@@ -636,7 +700,17 @@ impl<B: Board> SystemManager<'static, B> {
         // once we're confident this is shipping.
         delay.delay_millis(100);
 
-        log::info!("light_sleep: woke (cycle {})", self.sleep_cycles);
+        // NOTE: printed this close to the wake, this line is often
+        // eaten by the USB-Serial-JTAG resync blackout - the tick
+        // loop re-logs a summary after the wake transition, where
+        // output reliably survives.
+        log::info!(
+            "light_sleep: woke (cycle {}, cause {:#b}, slept {} ms)",
+            self.sleep_cycles,
+            wake_cause,
+            slept_ms,
+        );
+        (wake_cause, slept_ms)
     }
 
     // ================= Event loop ================================================
@@ -669,8 +743,17 @@ impl<B: Board> SystemManager<'static, B> {
             &event,
         );
 
+        let was_sleeping = self.model.sleeping();
         let effects = self.model.handle_event(&event, Instant::now());
         self.execute_effects(effects).await;
+        // Diagnostic probe: name the event that ended sleep. Logged
+        // AFTER the effects so the wake's display transition has
+        // already bought the USB host time to resync - printed any
+        // earlier, this line lands in the post-wake blackout and is
+        // never seen.
+        if was_sleeping && !self.model.sleeping() {
+            log::info!("system: wake cause: {:?}", event);
+        }
     }
 
     /// Run one iteration of the main event loop.
@@ -689,7 +772,8 @@ impl<B: Board> SystemManager<'static, B> {
                     return;
                 }
             }
-            self.enter_light_sleep().await;
+            let (wake_cause, slept_ms) = self.enter_light_sleep().await;
+            let gpio_wake = wake_cause & Self::WAKE_CAUSE_GPIO != 0;
 
             // Kick the RTC task to check for an alarm / timer flag
             // latched while we slept. Boards with no RTC INT line (the
@@ -715,6 +799,50 @@ impl<B: Board> SystemManager<'static, B> {
             }
             while let Ok(event) = EVENTS.try_receive() {
                 self.handle_event(event).await;
+            }
+
+            // A wake line fired but no task delivered an event for it
+            // (a short tap: the touch-INT pulse ended before the
+            // touch task could service it, so nothing above woke the
+            // model). Don't lose the interaction back into sleep -
+            // synthesize the wake. Concrete events win when they
+            // arrive; this only fires when none did.
+            if gpio_wake && self.model.sleeping() {
+                self.handle_event(SystemEvent::WakeInterrupt).await;
+            }
+
+            // Late re-log of the wake diagnostics: by now any wake
+            // transition has run and the USB host has resynced, so
+            // this line survives where the in-`enter_light_sleep`
+            // one gets eaten. A wake that stays dark after LESS than
+            // a full heartbeat is the anomaly under investigation
+            // (interrupted sleep attributed to the timer) and has no
+            // display transition to outlast the USB blackout - buy
+            // it the time explicitly (diagnosis probe; remove with
+            // the other probes).
+            if self.model.sleeping() && slept_ms < 4500 {
+                Timer::after(Duration::from_millis(300)).await;
+            }
+            // `rtc` is the absolute RTC-domain clock in ms - unlike
+            // embassy time it keeps counting through light sleep, so
+            // the line-to-line delta shows the true wall-clock
+            // cadence of the heartbeat (discriminates "sleeps are
+            // really ~0 ms" from "the slept probe is lying while the
+            // chip sleeps fine").
+            log::info!(
+                "light_sleep: summary (cycle {}, cause {:#b}, slept {} ms, rtc {} ms, {})",
+                self.sleep_cycles,
+                wake_cause,
+                slept_ms,
+                self.rtc_now_us() / 1000,
+                if self.model.sleeping() { "staying asleep" } else { "woke UI" },
+            );
+            // A UI wake's line above still races the USB resync -
+            // stash a copy for the first awake tick (see the field
+            // doc).
+            if !self.model.sleeping() {
+                self.pending_wake_summary =
+                    Some((self.sleep_cycles, wake_cause, slept_ms));
             }
             return;
         }
@@ -753,6 +881,19 @@ impl<B: Board> SystemManager<'static, B> {
             self.board.set_cpu_freq(CpuFreq::Mhz160);
             self.render().await;
             self.board.set_cpu_freq(CpuFreq::Mhz80);
+        }
+
+        // Deferred re-log of a UI wake's diagnostics (see the field
+        // doc): by the end of the first awake tick the USB host has
+        // resynced, so this copy survives where the summary printed
+        // at the wake itself gets shredded.
+        if let Some((cycle, cause, slept)) = self.pending_wake_summary.take() {
+            log::info!(
+                "light_sleep: wake summary (cycle {}, cause {:#b}, slept {} ms)",
+                cycle,
+                cause,
+                slept,
+            );
         }
 
         self.log_diagnostics();

@@ -56,6 +56,22 @@ pub trait Board {
     /// purpose: no async-fn-in-trait across the two toolchains.
     fn arm_wake_sources(&mut self);
 
+    /// Raw value of the chip's sleep-wakeup-cause register, read by
+    /// the manager right after `rtc.sleep()` returns. The register
+    /// differs per family (s3 `LPWR.slp_wakeup_cause` vs c6
+    /// `PMU.slp_wakeup_status0`) - hence a board hook, like
+    /// `set_cpu_freq` - but the bit layout the manager relies on is
+    /// uniform: GPIO wake = 1 << 2 on every family we run, and the
+    /// manager owns that interpretation. Returning the raw bits (not
+    /// a pre-masked bool) also keeps the full cause visible in the
+    /// wake diagnostics.
+    ///
+    /// esp-hal's `rtc_cntl::wakeup_cause()` cannot be used for this:
+    /// it guards on reset-reason == deep-sleep-wake, and light-sleep
+    /// wake is not a reset, so it always returns `Undefined` here
+    /// (upstream-report candidate).
+    fn wake_cause_raw(&self) -> u32;
+
     /// Put the touch controller into its low-power state. The manager
     /// calls this synchronously inside `enter_light_sleep`, bus lock
     /// held, immediately before `rtc.sleep()` - serialized there (not

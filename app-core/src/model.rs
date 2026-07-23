@@ -269,7 +269,12 @@ impl Model {
         // which just wakes).
         if self.sleeping && events::is_wake_source(event) {
             self.wake(now, &mut out);
-            if matches!(event, SystemEvent::WakeOnMotion) {
+            // WoM and the manager's synthesized GPIO wake carry no
+            // payload for a screen - they only wake.
+            if matches!(
+                event,
+                SystemEvent::WakeOnMotion | SystemEvent::WakeInterrupt
+            ) {
                 return out;
             }
         }

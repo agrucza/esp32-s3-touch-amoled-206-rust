@@ -83,6 +83,12 @@ impl Board for C6Board {
         }
     }
 
+    /// C6 family: `PMU.slp_wakeup_status0`.
+    fn wake_cause_raw(&self) -> u32 {
+        use esp_hal::peripherals::PMU;
+        PMU::regs().slp_wakeup_status0().read().wakeup_cause().bits()
+    }
+
     /// Switch CPU frequency at runtime. This chip (RISC-V) tops out
     /// at 160 MHz. With PLL as the root clock (left as configured at
     /// init - we do NOT touch the source) the hardware AUTODIV gives

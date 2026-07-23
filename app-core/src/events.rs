@@ -75,6 +75,12 @@ pub enum SystemEvent {
     /// Emitted by the IMU task when GPIO21 goes high. Drives
     /// the wake path on the main loop.
     WakeOnMotion,
+    /// A hardware GPIO wake line ended light sleep but no task
+    /// delivered a concrete event for it. Synthesized by the manager
+    /// so a short tap - whose touch-INT pulse ends before the touch
+    /// task can service it post-wake - still turns the UI on instead
+    /// of being silently lost back into sleep.
+    WakeInterrupt,
     /// Fresh IMU snapshot (accel + gyro + die temperature).
     /// Emitted by the IMU task at a fixed cadence while awake
     /// so screens that display live motion data stay current.
@@ -275,6 +281,7 @@ pub fn is_wake_source(event: &SystemEvent) -> bool {
     matches!(
         event,
         SystemEvent::WakeOnMotion
+            | SystemEvent::WakeInterrupt
             | SystemEvent::AlarmFired { .. }
             | SystemEvent::TimerExpired { .. }
     )
