@@ -10,11 +10,12 @@
 //! reset runs through the XL9555 expander (built here, handed to the
 //! shared task via `TouchTaskState::with_driver`); the IMU is a
 //! BHI260AP the shared QMI8658 task can't drive yet (it probes, logs
-//! the miss, and idles - BHI260AP support is a separate effort); and
-//! there is no audio task yet (`spawn_audio` default no-op - the
-//! MAX98357A needs no codec init but the session layer isn't wired).
-//! The `smoke` bin (src/bin/smoke.rs) is the standalone hardware
-//! diagnostic from bring-up.
+//! the miss, and idles - BHI260AP support is a separate effort);
+//! haptics are a DRV2605 dispatched through a bin-local task (the
+//! `spawn_audio` hook spawns it); and there is no speaker task yet
+//! (the MAX98357A needs no codec init but the shared session layer
+//! isn't wired). The `smoke` bin (src/bin/smoke.rs) is the
+//! standalone hardware diagnostic from bring-up.
 
 extern crate alloc;
 
@@ -244,10 +245,20 @@ impl Bringup for TwatchUltraBringup {
         esp_hal::rtc_cntl::Rtc::new(self.lpwr.take().unwrap())
     }
 
-    // spawn_audio: default no-op. The MAX98357A amp needs no codec
-    // init, but the shared audio session layer assumes an ES8311/
-    // ES7210 pair - the audio effort adds a backend seam there.
-    // Until then AUDIO_COMMANDs are dropped (try_send) with a warn.
+    /// No speaker task yet - the MAX98357A amp needs no codec init,
+    /// but the shared audio session layer assumes an ES8311/ES7210
+    /// pair; the audio effort adds a backend seam there, and until
+    /// then AUDIO_COMMANDs are dropped (try_send) with a warn. This
+    /// hook is the bin-task spawn point, so the haptics dispatcher
+    /// (DRV2605 - needs the shared I2C bus) is spawned here; the
+    /// speaker task joins it when audio lands.
+    fn spawn_audio(
+        &mut self,
+        spawner: embassy_executor::Spawner,
+        i2c_bus: &'static system_core::bus::SharedI2c,
+    ) {
+        spawner.spawn(crate::system::haptics::haptics_task(i2c_bus).unwrap());
+    }
 }
 
 #[esp_rtos::main]

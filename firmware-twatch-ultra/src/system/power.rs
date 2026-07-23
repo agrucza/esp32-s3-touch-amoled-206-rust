@@ -4,11 +4,11 @@
 //! Mirrors `firmware-s3/src/system/power.rs` in role. Board deltas:
 //! no SYS_OUT latch and no motor GPIO - the AXP2101 manages long-press
 //! shutdown internally (6 s), and haptics are a DRV2605 on I2C behind
-//! an XL9555 enable, which the sync no-bus `Board::buzz` seam can't
-//! drive (wire it up when the haptics effort lands). `arm_wake_sources`
-//! arms BOOT (GPIO0), RTC INT (GPIO1), PMU IRQ (GPIO7 - readable on
-//! this board, so the PWR button wakes from light sleep) and touch INT
-//! (GPIO12).
+//! an XL9555 enable, so `Board::buzz` queues into the bin's haptics
+//! task instead of driving a pin (see `system::haptics`).
+//! `arm_wake_sources` arms BOOT (GPIO0), RTC INT (GPIO1), PMU IRQ
+//! (GPIO7 - readable on this board, so the PWR button wakes from
+//! light sleep) and touch INT (GPIO12).
 //!
 //! Rails ARE configured every boot (unlike the C6, which trusts the
 //! AXP's persisted state): the map differs from any factory state and
@@ -114,13 +114,25 @@ impl TwatchUltraBoard {
 }
 
 impl Board for TwatchUltraBoard {
-    /// Haptics are a DRV2605 on I2C (enable via XL9555) - not
-    /// drivable from this sync no-bus seam. No-op until the haptics
-    /// effort designs that path.
-    fn buzz(&mut self) {}
+    /// The motor is a DRV2605 on the shared I2C bus - not drivable
+    /// from this sync no-bus seam directly, so this only queues a
+    /// command; the haptics task owns the driver (see
+    /// `system::haptics`). A full queue means the task is wedged -
+    /// drop with a warn rather than block sleep-entry paths.
+    fn buzz(&mut self) {
+        use crate::system::haptics::{HapticCommand, HAPTIC_COMMAND};
+        if HAPTIC_COMMAND.try_send(HapticCommand::On).is_err() {
+            log::warn!("Haptics: command queue full - buzz dropped");
+        }
+    }
 
     /// See `buzz`.
-    fn buzz_stop(&mut self) {}
+    fn buzz_stop(&mut self) {
+        use crate::system::haptics::{HapticCommand, HAPTIC_COMMAND};
+        if HAPTIC_COMMAND.try_send(HapticCommand::Off).is_err() {
+            log::warn!("Haptics: command queue full - buzz-stop dropped");
+        }
+    }
 
     /// No soft-power latch: the AXP2101 handles long-press (6 s)
     /// shutdown internally. Nothing for firmware to do.

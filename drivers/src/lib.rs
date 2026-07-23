@@ -35,6 +35,9 @@ pub mod es7210;
 #[cfg(feature = "xl9555")]
 pub mod xl9555;
 
+#[cfg(feature = "drv2605")]
+pub mod drv2605;
+
 pub use embedded_hal;
 
 #[cfg(feature = "defmt")]

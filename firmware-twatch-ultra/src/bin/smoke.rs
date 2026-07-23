@@ -3,7 +3,9 @@
 
 //! Hardware smoke test (bring-up stages 0-2, hardware-verified
 //! 2026-07-22): boot + I2C scan + PMU rails + XL9555 expander +
-//! CO5300 color bars + CST9217 touch traces + heartbeat.
+//! CO5300 color bars + CST9217 touch traces + DRV2605 haptics
+//! exercise (diagnostics, ROM click, sequencer, RTP ramp) +
+//! heartbeat.
 //!
 //! Kept as a standalone diagnostic bin - run with
 //! `cargo run --bin smoke` - for isolating hardware questions from
@@ -155,6 +157,55 @@ async fn main(_spawner: embassy_executor::Spawner) {
             info.chip_id, info.project_id, info.fw_version, info.res_x, info.res_y,
         ),
         Err(()) => log::error!("CST9217 init failed"),
+    }
+
+    // Haptics: exercise every DRV2605 driver path on the real motor.
+    // You should FEEL, in order: a brief diagnostic twitch, one
+    // strong click, a double click, then a ~1.6 s buzz ramping from
+    // 25 % to full - each step also logged.
+    {
+        use drivers::drv2605::{Config as DrvConfig, Drv2605, SequenceStep, RTP_MAX};
+        let drv = Drv2605::new(DrvConfig::default());
+        match drv.init(&mut i2c) {
+            Ok(id) => {
+                log::info!("Haptics: DRV2605 online (device id {})", id);
+
+                match drv.run_diagnostics(&mut i2c, &mut Delay) {
+                    Ok(true) => log::info!("Haptics: diagnostics PASS (motor present, no short)"),
+                    Ok(false) => log::warn!("Haptics: diagnostics FAIL (open/short/back-EMF out of range)"),
+                    Err(_) => log::warn!("Haptics: diagnostics I2C error"),
+                }
+                Timer::after(Duration::from_millis(300)).await;
+
+                log::info!("Haptics: ROM effect 1 (strong click)");
+                let _ = drv.play_effect(&mut i2c, 1);
+                Timer::after(Duration::from_millis(500)).await;
+
+                log::info!("Haptics: sequencer double-click (150 ms gap)");
+                let _ = drv.play_sequence(
+                    &mut i2c,
+                    &[
+                        SequenceStep::Effect(1),
+                        SequenceStep::WaitMs10(15),
+                        SequenceStep::Effect(1),
+                    ],
+                );
+                Timer::after(Duration::from_millis(700)).await;
+
+                log::info!("Haptics: RTP ramp 25% -> 100%");
+                for amp in [RTP_MAX / 4, RTP_MAX / 2, RTP_MAX * 3 / 4, RTP_MAX] {
+                    let _ = drv.buzz_on(&mut i2c, amp);
+                    Timer::after(Duration::from_millis(400)).await;
+                }
+                // VBAT reading is only valid while actively driving.
+                if let Ok(mv) = drv.vbat_mv(&mut i2c) {
+                    log::info!("Haptics: VDD under full drive: {} mV", mv);
+                }
+                let _ = drv.buzz_off(&mut i2c);
+                log::info!("Haptics: done (standby)");
+            }
+            Err(_) => log::error!("Haptics: DRV2605 init failed"),
+        }
     }
 
     // Poll loop: touch traces at 50 Hz (INT-gated, plus is_pressed so
