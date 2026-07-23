@@ -1,18 +1,11 @@
-//! ESP32-S3 HAL glue for the audio I2S interface.
+//! HAL glue for the audio I2S interface. The SoC is the I2S master;
+//! pins are the bins' business and arrive as parameters.
 //!
-//! ES8311 (DAC/playback) and ES7210 (ADC/capture) share the same I2S bus.
-//! The ESP32-S3 is the I2S master.
-//!
-//! ## Pin assignments
-//!
-//! | Signal    | GPIO |
-//! |-----------|------|
-//! | MCLK      |  16  |
-//! | SCLK/BCLK |  41  |
-//! | LRCK/WS   |  45  |
-//! | DSDIN     |  40  | (ESP32 TX -> ES8311 DAC input)
-//! | ASDOUT    |  42  | (ES7210 ADC output -> ESP32 RX)
-//! | PA_CTRL   |  46  | (NS4150B speaker amp enable, active HIGH)
+//! Two build paths, matching the two speaker architectures we carry:
+//! [`build_i2s`] brings up full duplex (TX DAC + RX ADC codec pair
+//! sharing one I2S unit and its clocks, MCLK required) and
+//! [`build_i2s_tx`] brings up playback only (a clock-in-only Class-D
+//! amp like the MAX98357A - no codec, no MCLK, no capture path).
 //!
 //! ## Sample format
 //!
@@ -31,19 +24,39 @@ use esp_hal::i2s::AnyI2s;
 
 pub const SAMPLE_RATE_HZ: u32 = 16_000;
 
-/// Speaker amplifier control (NS4150B, active HIGH).
+/// Speaker amplifier control. Wraps the amp-enable GPIO on boards
+/// that have one (e.g. NS4150B PA_CTRL, active HIGH). Boards whose
+/// amp has no host-driven enable line construct with [`Self::fixed`]
+/// and both calls are no-ops - the MAX98357A mutes itself (auto
+/// standby, outputs high-impedance) whenever BCLK stops toggling,
+/// which happens naturally when the session's transfer drops.
 pub struct SpeakerAmp<'d> {
-    ctrl: Output<'d>,
+    ctrl: Option<Output<'d>>,
 }
 
 impl<'d> SpeakerAmp<'d> {
     pub fn new(pin: impl Into<Output<'d>>) -> Self {
-        Self { ctrl: pin.into() }
+        Self { ctrl: Some(pin.into()) }
     }
 
-    pub fn enable(&mut self)  { self.ctrl.set_high(); }
+    /// An amp with no enable line - it manages its own standby off
+    /// the I2S clocks.
+    pub fn fixed() -> Self {
+        Self { ctrl: None }
+    }
+
+    pub fn enable(&mut self) {
+        if let Some(ctrl) = self.ctrl.as_mut() {
+            ctrl.set_high();
+        }
+    }
+
     #[allow(dead_code)]
-    pub fn disable(&mut self) { self.ctrl.set_low();  }
+    pub fn disable(&mut self) {
+        if let Some(ctrl) = self.ctrl.as_mut() {
+            ctrl.set_low();
+        }
+    }
 }
 
 /// Build the I2S TX (playback) and RX (capture) channels.
@@ -108,4 +121,43 @@ pub fn build_i2s<'d>(
         .build(rx_desc_static);
 
     (tx, rx)
+}
+
+/// Build a playback-only I2S TX channel - for boards whose speaker
+/// path is a clock-in-only Class-D amp (MAX98357A): no codec to
+/// clock, so no MCLK output, and no capture side. Same wire format
+/// as [`build_i2s`]; the amp auto-detects the clocking scheme from
+/// BCLK/LRCLK alone (datasheet "MCLK Elimination").
+///
+/// Descriptor lifetime story is identical to [`build_i2s`] - see the
+/// SAFETY comment there.
+pub fn build_i2s_tx<'d>(
+    i2s:          impl esp_hal::i2s::master::Instance + 'd,
+    dma_channel:  impl DmaChannelFor<AnyI2s<'d>>,
+    bclk:         impl PeripheralOutput<'d>,
+    ws:           impl PeripheralOutput<'d>,
+    dout:         impl PeripheralOutput<'d>,
+    tx_desc:      &'d mut [DmaDescriptor],
+) -> I2sTx<'d, Async> {
+    // SAFETY: see build_i2s - the backing storage really is 'static,
+    // the transfer (and this borrow) is dropped at session end.
+    let tx_desc_static: &'static mut [DmaDescriptor] =
+        unsafe { core::mem::transmute(tx_desc) };
+
+    let i2s = I2s::new(
+        i2s,
+        dma_channel,
+        Config::new_tdm_philips()
+            .with_sample_rate(Rate::from_hz(SAMPLE_RATE_HZ))
+            .with_data_format(DataFormat::Data16Channel16)
+            .with_channels(Channels::STEREO),
+    )
+    .unwrap()
+    .into_async();
+
+    i2s.i2s_tx
+        .with_bclk(bclk)
+        .with_ws(ws)
+        .with_dout(dout)
+        .build(tx_desc_static)
 }

@@ -11,10 +11,10 @@
 //! shared task via `TouchTaskState::with_driver`); the IMU is a
 //! BHI260AP the shared QMI8658 task can't drive yet (it probes, logs
 //! the miss, and idles - BHI260AP support is a separate effort);
-//! haptics are a DRV2605 dispatched through a bin-local task (the
-//! `spawn_audio` hook spawns it); and there is no speaker task yet
-//! (the MAX98357A needs no codec init but the shared session layer
-//! isn't wired). The `smoke` bin (src/bin/smoke.rs) is the
+//! haptics are a DRV2605 dispatched through a bin-local task; and
+//! the speaker is a MAX98357A driven by a TX-only audio task (see
+//! `audio_task` - no codec, no MCLK, no capture; the PDM mic is a
+//! separate effort). The `smoke` bin (src/bin/smoke.rs) is the
 //! standalone hardware diagnostic from bring-up.
 
 extern crate alloc;
@@ -69,6 +69,12 @@ struct TwatchUltraBringup {
     lcd_cs: Option<p::GPIO41<'static>>,
     dma_ch0: Option<p::DMA_CH0<'static>>,
     lcd_reset: Option<p::GPIO37<'static>>,
+    // Speaker (MAX98357A, TX-only - see `audio_task`).
+    i2s0: Option<p::I2S0<'static>>,
+    dma_ch1: Option<p::DMA_CH1<'static>>,
+    spk_bclk: Option<p::GPIO9<'static>>,
+    spk_ws: Option<p::GPIO10<'static>>,
+    spk_dout: Option<p::GPIO11<'static>>,
     lcd_te: Option<p::GPIO6<'static>>,
     touch_int: Option<p::GPIO12<'static>>,
     btn_boot: Option<p::GPIO0<'static>>,
@@ -245,19 +251,105 @@ impl Bringup for TwatchUltraBringup {
         esp_hal::rtc_cntl::Rtc::new(self.lpwr.take().unwrap())
     }
 
-    /// No speaker task yet - the MAX98357A amp needs no codec init,
-    /// but the shared audio session layer assumes an ES8311/ES7210
-    /// pair; the audio effort adds a backend seam there, and until
-    /// then AUDIO_COMMANDs are dropped (try_send) with a warn. This
-    /// hook is the bin-task spawn point, so the haptics dispatcher
-    /// (DRV2605 - needs the shared I2C bus) is spawned here; the
-    /// speaker task joins it when audio lands.
+    /// Spawns the two bin-local dispatchers: haptics (DRV2605 -
+    /// needs the shared I2C bus) and the TX-only speaker task
+    /// (MAX98357A via `system_core::audio::run_session_tx` - see
+    /// `audio_task`). The RX halves of the DMA macro are zero-sized:
+    /// this board has no I2S capture path (its mic is a PDM device,
+    /// a separate effort).
     fn spawn_audio(
         &mut self,
         spawner: embassy_executor::Spawner,
         i2c_bus: &'static system_core::bus::SharedI2c,
     ) {
         spawner.spawn(crate::system::haptics::haptics_task(i2c_bus).unwrap());
+        let (_rx_buffer, _rx_descriptors, tx_buffer, tx_descriptors) =
+            esp_hal::dma_circular_buffers!(0, 4096);
+        spawner.spawn(
+            audio_task(
+                self.i2s0.take().unwrap(),
+                self.dma_ch1.take().unwrap(),
+                self.spk_bclk.take().unwrap(),
+                self.spk_ws.take().unwrap(),
+                self.spk_dout.take().unwrap(),
+                tx_buffer,
+                tx_descriptors,
+            )
+            .unwrap(),
+        );
+    }
+}
+
+/// TX-only audio dispatch loop - this board's counterpart of the
+/// other bins' full-duplex `audio_task`. Owns the I2S peripheral
+/// tokens and the cross-session tone-phase counter, and reborrows
+/// them into a fresh `run_session_tx` per session-starting command
+/// (embassy tasks can't be generic, so the concrete types stay
+/// bin-side). The MAX98357A has no enable line (`SpeakerAmp::fixed`)
+/// and no codec init; it wakes when BCLK starts and re-enters
+/// standby when the session's transfer drop stops the clocks.
+///
+/// The capture commands are acknowledged-and-ignored: the mic here
+/// is a TDK T3902 PDM device (own pins, own peripheral mode), not an
+/// I2S-slave ADC - wiring it up is a separate effort. The MIC TEST
+/// views therefore show a dead meter on this board for now.
+#[embassy_executor::task]
+async fn audio_task(
+    mut i2s: p::I2S0<'static>,
+    mut dma: p::DMA_CH1<'static>,
+    mut bclk: p::GPIO9<'static>,
+    mut ws: p::GPIO10<'static>,
+    mut dout: p::GPIO11<'static>,
+    tx_buffer: &'static mut [u8],
+    tx_descriptors: &'static mut [esp_hal::dma::DmaDescriptor],
+) {
+    use system_core::audio::{run_session_tx, SessionMode};
+    use system_core::audio_hal::SpeakerAmp;
+    use system_core::bus::{AudioCommand, AUDIO_COMMAND};
+
+    let mut amp = SpeakerAmp::fixed();
+    let mut phase: u32 = 0;
+    // A command consumed by a session's inner loop that the
+    // dispatcher must still act on - same hand-off as the other
+    // bins, so transitions between sessions never drop a command.
+    let mut pending: Option<AudioCommand> = None;
+
+    loop {
+        let cmd = match pending.take() {
+            Some(c) => c,
+            None => AUDIO_COMMAND.receive().await,
+        };
+        let mode = match cmd {
+            AudioCommand::StopAlarm
+            | AudioCommand::StopCapture
+            | AudioCommand::StopTones
+            | AudioCommand::StopLoopback => continue,
+            AudioCommand::PlayAlarm => SessionMode::Play,
+            AudioCommand::PlayTones => SessionMode::Tones,
+            AudioCommand::StartCapture | AudioCommand::StartLoopback => {
+                log::warn!(
+                    "Audio: {:?} ignored - no mic backend on this board yet (PDM)",
+                    cmd,
+                );
+                continue;
+            }
+        };
+        pending = run_session_tx(
+            mode,
+            i2s.reborrow(),
+            dma.reborrow(),
+            bclk.reborrow(),
+            ws.reborrow(),
+            dout.reborrow(),
+            &mut amp,
+            &mut tx_buffer[..],
+            &mut tx_descriptors[..],
+            &mut phase,
+            // S3 silicon: no I2S register fixups needed (same as the
+            // other S3 bin; the C6 is the one that needs them).
+            || {},
+        )
+        .await;
     }
 }
 
@@ -294,6 +386,11 @@ async fn main(spawner: embassy_executor::Spawner) {
         lcd_cs: Some(peripherals.GPIO41),
         dma_ch0: Some(peripherals.DMA_CH0),
         lcd_reset: Some(peripherals.GPIO37),
+        i2s0: Some(peripherals.I2S0),
+        dma_ch1: Some(peripherals.DMA_CH1),
+        spk_bclk: Some(peripherals.GPIO9),
+        spk_ws: Some(peripherals.GPIO10),
+        spk_dout: Some(peripherals.GPIO11),
         lcd_te: Some(peripherals.GPIO6),
         touch_int: Some(peripherals.GPIO12),
         btn_boot: Some(peripherals.GPIO0),

@@ -763,6 +763,34 @@ fn loopback_command(
     }
 }
 
+/// Overwrite the stale TX ring with silence. A fresh transfer starts
+/// streaming whatever the ring last held (e.g. the final 64 ms of
+/// the previous session's tone), and in sessions that never push TX
+/// the circular DMA loops it forever. Plain awaits - this completes
+/// within ~2 ring laps and commands can wait that long.
+async fn flush_tx_ring<B>(
+    tx: &mut esp_hal::i2s::master::asynch::I2sWriteDmaTransferAsync<'_, B>,
+) {
+    let mut off = 0;
+    while off < TX_RING_BYTES {
+        match tx
+            .push_with(|out| {
+                let take = out.len().min(TX_RING_BYTES - off) / 4 * 4;
+                out[..take].fill(0);
+                take
+            })
+            .await
+        {
+            Ok(0) => Timer::after(Duration::from_millis(1)).await,
+            Ok(k) => off += k,
+            Err(e) => {
+                log::warn!("Audio: ring flush err: {:?}", e);
+                break;
+            }
+        }
+    }
+}
+
 /// Which side of the audio stack a session should drive. Both sides of
 /// the I2S come up either way (they share clocks), but the inner loop
 /// differs.
@@ -887,34 +915,11 @@ pub async fn run_session<'d>(
         return None;
     }
 
-    // Overwrite the stale TX ring with silence before anything else.
-    // A fresh transfer starts streaming whatever the ring last held
-    // (e.g. the final 64 ms of the previous session's tone), and in
-    // sessions that never push TX the circular DMA loops it forever:
-    // inaudible with the amp off, but loud enough on the DAC output
-    // to couple into the ES7210 and peg the level meter in a quiet
-    // room. Plain awaits - this completes within ~2 ring laps and
-    // commands can wait that long.
-    {
-        let mut off = 0;
-        while off < TX_RING_BYTES {
-            match tx
-                .push_with(|out| {
-                    let take = out.len().min(TX_RING_BYTES - off) / 4 * 4;
-                    out[..take].fill(0);
-                    take
-                })
-                .await
-            {
-                Ok(0) => Timer::after(Duration::from_millis(1)).await,
-                Ok(k) => off += k,
-                Err(e) => {
-                    log::warn!("Audio: ring flush err: {:?}", e);
-                    break;
-                }
-            }
-        }
-    }
+    // Overwrite the stale TX ring with silence before anything else
+    // (see `flush_tx_ring`) - here the endless replay is inaudible
+    // with the amp off, but loud enough on the DAC output to couple
+    // into the ES7210 and peg the level meter in a quiet room.
+    flush_tx_ring(&mut tx).await;
     Timer::after(Duration::from_millis(10)).await; // MCLK settle
 
     // Re-init the codecs on EVERY session. The previous session's
@@ -1003,4 +1008,68 @@ pub async fn run_session<'d>(
     // borrows. The caller's `Peri<'static, _>` tokens then become
     // available for the next session.
     result
+}
+
+/// Run **one** playback-only audio session - the TX half of
+/// [`run_session`] for boards whose speaker path is a clock-in-only
+/// Class-D amp (MAX98357A): no codec to re-init (so no I2C), no
+/// MCLK, no capture side. Same session-scoped transfer lifecycle and
+/// for the same reason (circular DMA has no reset API - see
+/// `run_session`'s design comment); same TX ring flush; the mode
+/// loops themselves are the shared ones.
+///
+/// Only `Play` and `Tones` are playable here. The capture modes
+/// (`Capture`, `Loopback`) need a capture backend this board doesn't
+/// have on its I2S bus (its mic is a separate PDM device - a future
+/// effort); a dispatcher shouldn't route them here, and defensively
+/// they end the session immediately.
+pub async fn run_session_tx<'d>(
+    mode: SessionMode,
+    i2s: impl esp_hal::i2s::master::Instance + 'd,
+    dma_ch: impl DmaChannelFor<AnyI2s<'d>>,
+    bclk: impl PeripheralOutput<'d>,
+    ws: impl PeripheralOutput<'d>,
+    dout: impl PeripheralOutput<'d>,
+    amp: &mut SpeakerAmp<'_>,
+    tx_buf: &'d mut [u8],
+    tx_desc: &'d mut [DmaDescriptor],
+    phase: &mut u32,
+    tune_i2s: fn(),
+) -> Option<AudioCommand> {
+    log::info!("Audio: TX session {:?}", mode);
+    let i2s_tx = audio_hal::build_i2s_tx(i2s, dma_ch, bclk, ws, dout, tx_desc);
+    // Chip-specific I2S register fixups, same seam as run_session.
+    tune_i2s();
+    // Starting TX begins BCLK/WS output; TX streams whatever's in
+    // the ring until the silence flush below overwrites it.
+    let mut tx = match i2s_tx.write_dma_circular_async(tx_buf) {
+        Ok(t) => t,
+        Err(e) => {
+            log::error!("Audio: write_dma_circular_async failed: {:?}", e);
+            return None;
+        }
+    };
+    // Stale-ring flush, as in run_session. The amp is still in
+    // standby while this runs (BCLK only just started; the replayed
+    // ring is silence-overwritten within ~2 laps).
+    flush_tx_ring(&mut tx).await;
+
+    match mode {
+        SessionMode::Play => {
+            amp.enable();
+            play_until_interrupt(&mut tx, amp, phase).await
+        }
+        SessionMode::Tones => {
+            // The sweep enables the amp itself, after its lead-in.
+            amp.disable();
+            play_tones_until_done(&mut tx, amp, phase).await
+        }
+        SessionMode::Capture | SessionMode::Loopback => {
+            log::warn!("Audio: {:?} not supported on a TX-only backend", mode);
+            None
+        }
+    }
+    // tx drops here, stopping the DMA and BCLK/WS; the amp then
+    // enters its own standby. The reborrowed Peri tokens release for
+    // the next session, as in run_session.
 }
