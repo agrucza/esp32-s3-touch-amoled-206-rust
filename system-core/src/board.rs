@@ -9,12 +9,14 @@
 //!
 //! Kept deliberately tiny (verified against the manager's actual
 //! board-specific call sites): haptic motor, power-off, wake-source
-//! arming, CPU-frequency scaling, and light-sleep config tuning - the
+//! arming, CPU-frequency scaling, light-sleep config tuning - the
 //! last two because the clock/sleep registers differ per chip family
-//! (e.g. the s3 `SYSTEM` block vs the c6 `PCR` block). The manager
-//! owns everything else - the async FT3168 monitor write,
-//! `rtc.sleep()`, the render/event loop, and the *policy* of when to
-//! scale/sleep - because none of that is board-specific.
+//! (e.g. the s3 `SYSTEM` block vs the c6 `PCR` block) - and the touch
+//! controller's sleep/wake transitions, because how (and whether) a
+//! controller survives light sleep is a property of the chip the
+//! board carries. The manager owns everything else - `rtc.sleep()`,
+//! the render/event loop, and the *policy* of when to scale/sleep -
+//! because none of that is board-specific.
 
 /// CPU clock levels the manager scales between. A board-agnostic
 /// concept; the actual register sequence to reach each level is
@@ -48,12 +50,49 @@ pub trait Board {
 
     /// Arm this board's hardware wake sources, synchronously, right
     /// before the manager enters light sleep. The manager owns *when*
-    /// to sleep, the async FT3168 -> Monitor write, and the actual
-    /// `rtc.sleep()` call (all board-agnostic); the board only
-    /// declares *what wakes it* - which GPIO wake bits / internal
-    /// timer to enable. Sync on purpose: no async-fn-in-trait across
-    /// the two toolchains.
+    /// to sleep and the actual `rtc.sleep()` call (all
+    /// board-agnostic); the board only declares *what wakes it* -
+    /// which GPIO wake bits / internal timer to enable. Sync on
+    /// purpose: no async-fn-in-trait across the two toolchains.
     fn arm_wake_sources(&mut self);
+
+    /// Put the touch controller into its low-power state. The manager
+    /// calls this synchronously inside `enter_light_sleep`, bus lock
+    /// held, immediately before `rtc.sleep()` - serialized there (not
+    /// in the touch task off SLEEP_WATCH) so the chip is guaranteed
+    /// in the right mode before the CPU gates off. Called again on
+    /// every heartbeat re-entry while the system stays asleep; a
+    /// board whose transition isn't idempotent-cheap must guard.
+    ///
+    /// Default: the FT3168 write - Monitor mode, a low-power scan
+    /// that auto-returns to Active on touch and drives INT# low, so
+    /// touch remains a wake source. Best-effort: if it NAKs (chip
+    /// mid-transition after a recent touch) the chip self-manages to
+    /// low power and the other wake sources still work.
+    fn touch_sleep(
+        &mut self,
+        i2c: &mut esp_hal::i2c::master::I2c<'static, esp_hal::Blocking>,
+    ) {
+        use drivers::touch;
+        let _ = i2c.write(
+            touch::ADDR,
+            &[touch::REG_POWER_MODE, touch::PowerMode::Monitor as u8],
+        );
+    }
+
+    /// Bring the touch controller back to full operation on wake -
+    /// the real, user-facing wake (`BroadcastSleep(Awake)`), not the
+    /// 5 s heartbeat.
+    ///
+    /// Default: nothing - the FT3168 leaves Monitor mode by itself on
+    /// the first touch. Boards whose controller needs host action to
+    /// leave its sleep state (e.g. a reset pulse) override this.
+    fn touch_wake(
+        &mut self,
+        i2c: &mut esp_hal::i2c::master::I2c<'static, esp_hal::Blocking>,
+    ) {
+        let _ = i2c;
+    }
 
     /// Switch the CPU clock to `freq`. The chip's clock registers
     /// differ per family, so the sequence lives here. A board may

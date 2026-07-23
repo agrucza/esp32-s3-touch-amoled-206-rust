@@ -13,8 +13,23 @@
 //!
 //! The runtime I2C address is strap-dependent: 0x1A on the T-Watch
 //! Ultra. 0x5A is the bootloader address (and would collide with a
-//! DRV2605 on the same bus) - firmware-update flows are out of scope
-//! here.
+//! DRV2605 on the same bus).
+//!
+//! Power model (Hynitron CST9217 datasheet V1.0, section 10.2 -
+//! user-supplied scans, 2026-07-23): the chip self-manages between
+//! dynamic mode (1.3 mA, 100 Hz) and monitor mode (12 uA, 30 Hz)
+//! on a no-touch timeout, asserting INT on the next touch - no host
+//! action needed for idle power or tap-to-wake. [`sleep`] commands
+//! the third state, deep sleep (2 uA, not scanning); the datasheet
+//! mentions a wake command exists but doesn't name its register, so
+//! the only wake path shipped here is the hardware reset pulse.
+//!
+//! Deliberately NOT implemented: bootloader entry and firmware
+//! update (irreversible-risk flows with no update assets to flash),
+//! and the vendor header's low-power-scan registers (0xD106/0xD10F)
+//! - per the datasheet the low-power scan is automatic, so these
+//! presumably disable/force it, but no available source implements
+//! them and guessed register semantics don't ship here.
 
 use embedded_hal::delay::DelayNs;
 use embedded_hal::i2c::I2c as I2cTrait;
@@ -75,11 +90,37 @@ pub struct Cst9217 {
     was_pressed: bool,
     /// Consecutive reads that found no new report while pressed.
     empty_reads: u8,
+    /// Second finger of the last report, when two were down.
+    second: Option<(u16, u16)>,
+    /// Cover-screen/palm gesture seen since the last
+    /// [`take_palm_detected`](Cst9217::take_palm_detected).
+    palm: bool,
 }
 
 impl Cst9217 {
     pub fn new() -> Self {
-        Self { was_pressed: false, empty_reads: 0 }
+        Self {
+            was_pressed: false,
+            empty_reads: 0,
+            second: None,
+            palm: false,
+        }
+    }
+
+    /// Second finger position from the most recent
+    /// [`read`](Cst9217::read), when the report carried two contacts.
+    /// The shared `TouchEvent` stays single-touch; this is the
+    /// opt-in multi-touch accessor for future gestures (pinch etc.).
+    pub fn second_finger(&self) -> Option<(u16, u16)> {
+        self.second
+    }
+
+    /// `true` if a cover-screen/palm gesture was reported since the
+    /// last call (sticky, clears on read - a poll loop can't miss
+    /// it). The chip raises this when a large area covers the panel;
+    /// the touch stream reports a release alongside it.
+    pub fn take_palm_detected(&mut self) -> bool {
+        core::mem::take(&mut self.palm)
     }
 
     /// Read and validate the chip identity. Call after the hardware
@@ -198,7 +239,12 @@ impl Cst9217 {
         let x = ((buf[1] as u16) << 4) | ((buf[3] as u16) >> 4);
         let y = ((buf[2] as u16) << 4) | ((buf[3] as u16) & 0x0F);
 
+        if (buf[4] & 0x80) != 0 {
+            self.palm = true;
+        }
+
         if (buf[4] & 0x80) != 0 || count == 0 || count > 2 || event != 0x06 {
+            self.second = None;
             if self.was_pressed {
                 self.was_pressed = false;
                 return TouchEvent::Released;
@@ -206,73 +252,106 @@ impl Cst9217 {
             return TouchEvent::None;
         }
 
+        // Second finger, when present (vendor layout: point 1 starts
+        // 2 bytes past point 0's 5, i.e. offset 7). Same nibble
+        // packing; only a contact event counts.
+        self.second = if count == 2 && (buf[7] & 0x0F) == 0x06 {
+            let x2 = ((buf[8] as u16) << 4) | ((buf[10] as u16) >> 4);
+            let y2 = ((buf[9] as u16) << 4) | ((buf[10] as u16) & 0x0F);
+            Some((x2, y2))
+        } else {
+            None
+        };
+
         self.was_pressed = true;
         TouchEvent::Pressed { x, y }
     }
 
-    /// Put the controller into deep sleep.
-    ///
-    /// Wake requires a hardware reset pulse (there is no I2C wake), so
-    /// the caller must re-run the reset + [`init`](Cst9217::init)
-    /// sequence afterwards.
-    pub fn sleep<I2C, E, D>(&mut self, i2c: &mut I2C, delay: &mut D) -> Result<(), ()>
-    where
-        I2C: I2cTrait<Error = E>,
-        D: DelayNs,
-    {
-        self.enter_command_mode(i2c, delay)?;
-        write_cmd(i2c, reg::SLEEP)
-    }
-
-    /// Switch back to normal reporting mode (after a debug-mode
-    /// excursion; not needed after init).
-    pub fn set_normal_mode<I2C, E, D>(&mut self, i2c: &mut I2C, delay: &mut D) -> Result<(), ()>
-    where
-        I2C: I2cTrait<Error = E>,
-        D: DelayNs,
-    {
-        self.enter_command_mode(i2c, delay)?;
-        write_cmd(i2c, reg::NORMAL)?;
-        let mut echo = [0u8; 2];
-        read_at(i2c, reg::MODE_ECHO, &mut echo)?;
-        if echo[1] != (reg::NORMAL & 0xFF) as u8 {
-            return Err(());
-        }
-        delay.delay_ms(10);
-        Ok(())
-    }
-
-    /// The vendor pre-mode-switch handshake: latch `0xD11E` (sent
-    /// twice) until the mode-echo register reads it back.
-    fn enter_command_mode<I2C, E, D>(&mut self, i2c: &mut I2C, delay: &mut D) -> Result<(), ()>
-    where
-        I2C: I2cTrait<Error = E>,
-        D: DelayNs,
-    {
-        for _ in 0..3 {
-            if write_cmd(i2c, reg::MODE_LATCH).is_err()
-                || write_cmd(i2c, reg::MODE_LATCH).is_err()
-            {
-                delay.delay_ms(200);
-                continue;
-            }
-            let mut echo = [0u8; 4];
-            if read_at(i2c, reg::MODE_ECHO, &mut echo).is_err() {
-                delay.delay_ms(200);
-                continue;
-            }
-            if echo[1] == (reg::MODE_LATCH & 0xFF) as u8 {
-                return Ok(());
-            }
-        }
-        Err(())
-    }
 }
 
 impl Default for Cst9217 {
     fn default() -> Self {
         Self::new()
     }
+}
+
+// ---- mode / power commands --------------------------------------------------
+//
+// Free functions, not methods: these are chip-global commands with no
+// per-instance state, and the sleep/wake caller (the board's sleep
+// hooks) doesn't own the `Cst9217` instance - the touch task does.
+
+/// Put the controller into deep sleep (2 uA, not scanning).
+///
+/// Vendor sequence: switch to command mode first (latched mode
+/// write, echo-verified), then send the sleep command.
+///
+/// Wake requires a hardware reset pulse (the datasheet mentions a
+/// wake command but doesn't document its register).
+/// After the pulse the chip boots into normal reporting mode on its
+/// own; re-running [`Cst9217::init`] is optional (it only validates
+/// identity - there are no config writes to replay).
+pub fn sleep<I2C, E, D>(i2c: &mut I2C, delay: &mut D) -> Result<(), ()>
+where
+    I2C: I2cTrait<Error = E>,
+    D: DelayNs,
+{
+    set_mode(i2c, delay, reg::CMD_MODE)?;
+    write_cmd(i2c, reg::SLEEP)
+}
+
+/// Switch back to normal reporting mode (after a debug-mode
+/// excursion; not needed after init).
+pub fn set_normal_mode<I2C, E, D>(i2c: &mut I2C, delay: &mut D) -> Result<(), ()>
+where
+    I2C: I2cTrait<Error = E>,
+    D: DelayNs,
+{
+    set_mode(i2c, delay, reg::NORMAL)
+}
+
+/// The vendor mode switch: latch handshake, write the mode
+/// register, verify the mode echo, then let the switch settle.
+fn set_mode<I2C, E, D>(i2c: &mut I2C, delay: &mut D, mode: u16) -> Result<(), ()>
+where
+    I2C: I2cTrait<Error = E>,
+    D: DelayNs,
+{
+    mode_latch_handshake(i2c, delay)?;
+    write_cmd(i2c, mode)?;
+    let mut echo = [0u8; 2];
+    read_at(i2c, reg::MODE_ECHO, &mut echo)?;
+    if echo[1] != (mode & 0xFF) as u8 {
+        return Err(());
+    }
+    delay.delay_ms(10);
+    Ok(())
+}
+
+/// The vendor pre-mode-switch handshake: latch `0xD11E` (sent
+/// twice) until the mode-echo register reads it back.
+fn mode_latch_handshake<I2C, E, D>(i2c: &mut I2C, delay: &mut D) -> Result<(), ()>
+where
+    I2C: I2cTrait<Error = E>,
+    D: DelayNs,
+{
+    for _ in 0..3 {
+        if write_cmd(i2c, reg::MODE_LATCH).is_err()
+            || write_cmd(i2c, reg::MODE_LATCH).is_err()
+        {
+            delay.delay_ms(200);
+            continue;
+        }
+        let mut echo = [0u8; 4];
+        if read_at(i2c, reg::MODE_ECHO, &mut echo).is_err() {
+            delay.delay_ms(200);
+            continue;
+        }
+        if echo[1] == (reg::MODE_LATCH & 0xFF) as u8 {
+            return Ok(());
+        }
+    }
+    Err(())
 }
 
 // ---- private helpers --------------------------------------------------------

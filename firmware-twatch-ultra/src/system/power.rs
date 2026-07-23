@@ -8,7 +8,10 @@
 //! task instead of driving a pin (see `system::haptics`).
 //! `arm_wake_sources` arms BOOT (GPIO0), RTC INT (GPIO1), PMU IRQ
 //! (GPIO7 - readable on this board, so the PWR button wakes from
-//! light sleep) and touch INT (GPIO12).
+//! light sleep) and touch INT (GPIO12). `touch_sleep` is overridden
+//! to a no-op: the CST9217 self-manages to a 12 uA monitor mode and
+//! INT-wakes on touch, needing neither the FT3168 default write nor
+//! any wake-side action (see the override's doc).
 //!
 //! Rails ARE configured every boot (unlike the C6, which trusts the
 //! AXP's persisted state): the map differs from any factory state and
@@ -146,6 +149,10 @@ impl Board for TwatchUltraBoard {
     /// sets them back immediately before `rtc.sleep()`. `int_type=4`
     /// is LowLevel - all four lines are active-low - and the only
     /// type esp-hal allows for wake-from-light-sleep.
+    ///
+    /// Touch INT is the tap-to-wake path: the CST9217 keeps scanning
+    /// through system sleep (12 uA monitor mode, self-managed) and
+    /// asserts INT on the first touch.
     fn arm_wake_sources(&mut self) {
         for &gpio_num in &[
             crate::board::BTN_BOOT,
@@ -176,6 +183,23 @@ impl Board for TwatchUltraBoard {
             w.cpuperiod_sel().bits(period_sel)
         });
         esp_hal::rom::ets_update_cpu_frequency_rom(freq_mhz);
+    }
+
+    /// Explicit no-op - shadowing the FT3168 default write, which
+    /// would go to an address nothing occupies on this bus. Per the
+    /// CST9217 datasheet (V1.0 section 10.2) the chip manages its
+    /// own power: on a no-touch timeout it drops from dynamic mode
+    /// (1.3 mA) into monitor mode (12 uA, 30 Hz scan) by itself, and
+    /// the next touch flips it back and asserts INT - armed as a
+    /// wake source, so tap-to-wake works with zero host action. The
+    /// chip's 2 uA deep sleep (`cst9217::sleep`, wake = XL9555 reset
+    /// pulse) is deliberately unused: it would trade tap-to-wake for
+    /// a 10 uA saving. Revisit only for a future pocket/shipping
+    /// mode.
+    fn touch_sleep(
+        &mut self,
+        _i2c: &mut esp_hal::i2c::master::I2c<'static, esp_hal::Blocking>,
+    ) {
     }
 
     /// The light-sleep recipe validated on the other S3 board (same

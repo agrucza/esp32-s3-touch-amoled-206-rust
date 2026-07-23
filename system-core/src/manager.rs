@@ -386,6 +386,14 @@ impl<B: Board> SystemManager<'static, B> {
                     match state {
                         SleepState::Sleeping => log::info!("system: sleep"),
                         SleepState::Awake => {
+                            // Kick the touch controller awake first so
+                            // its boot overlaps the repaint below.
+                            // No-op on controllers that wake on their
+                            // own; see `Board::touch_wake`.
+                            {
+                                let mut i2c = self.i2c_bus.lock().await;
+                                self.board.touch_wake(&mut i2c);
+                            }
                             // Same reasoning as the DISPOFF -> Active
                             // transition above: stale GRAM + stale
                             // screen snapshot, so force a full repaint.
@@ -563,29 +571,19 @@ impl<B: Board> SystemManager<'static, B> {
         use esp_hal::rtc_cntl::sleep::{
             GpioWakeupSource, RtcSleepConfig, TimerWakeupSource,
         };
-        use drivers::touch;
 
-        // Put the FT3168 into Monitor mode synchronously before sleep
-        // entry. In Monitor mode the chip continues to scan at low
-        // power and auto-transitions back to Active on touch, driving
-        // INT# low - that's what wakes us via GPIO38.
-        //
-        // The touch *task* also listens to SLEEP_WATCH and would
-        // attempt the same write asynchronously, but there's a race:
-        // if `rtc.sleep()` fires before the task acquires the I²C
-        // lock, the chip is still in Active mode at sleep entry and
-        // wake-from-touch becomes intermittent. Doing the write here
-        // serializes it with sleep entry, so the chip is in the right
-        // mode 100% of the time. The write is best-effort - if it
-        // NAKs (e.g. the chip is mid-state-transition from a recent
-        // touch) the chip will self-manage to low-power eventually
-        // and a button press still wakes us regardless. On boards
-        // whose controller is not an FT3168 nothing lives at this
-        // address, the write NAKs, and the controller stays in its
-        // normal mode - its INT line still wakes us.
+        // Drop the touch controller to its low-power state
+        // synchronously before sleep entry, bus lock held. Doing it
+        // here rather than in the touch task off SLEEP_WATCH closes
+        // a race: if `rtc.sleep()` fires before the task acquires
+        // the I²C lock, the chip is still in full-scan mode at sleep
+        // entry (observed as intermittent wake-from-touch). What
+        // "low-power" means for the board's controller - and whether
+        // touch remains a wake source - lives behind the seam; see
+        // `Board::touch_sleep`. Re-runs on every heartbeat re-entry.
         {
             let mut i2c = self.i2c_bus.lock().await;
-            let _ = i2c.write(touch::ADDR, &[touch::REG_POWER_MODE, touch::PowerMode::Monitor as u8]);
+            self.board.touch_sleep(&mut i2c);
         }
 
         // Re-arm this board's wake sources. The embassy async GPIO
